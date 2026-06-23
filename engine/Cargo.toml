@@ -1,0 +1,8 @@
+[package]
+name = "entroximer-engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fundsp = "0.23.0"
+songbird = "0.6.0"
