@@ -1,0 +1,7 @@
+{
+  "name": "entroximer",
+  "workspaces": [
+    "bot",
+    "client"
+  ]
+}
