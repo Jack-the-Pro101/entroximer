@@ -2,10 +2,13 @@ mod web_media_source;
 
 use std::fs;
 use std::io;
+use std::println;
+use std::collections::HashMap;
 
+use fundsp::typenum::Mod;
 use fundsp::{
     prelude::{AudioNode, AudioUnit, bell_hz, db_amp},
-    prelude32::reverb_stereo,
+    prelude32::{reverb_stereo, chorus, lowpass_hz, pass},
 };
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
@@ -80,121 +83,152 @@ impl AudioBuffer {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let url = String::from("https://public.share.bluegaria.net/GUT_GENUG.mp3");
-
-    modify_audio(url).await;
-
-    // let nums = bytes.into_iter().flatten().collect::<Vec<_>>();
-
-    // let cursor = Cursor::new(nums);
-
-    // let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
-
-    // let mut format = symphonia::default::get_probe()
-    //     .probe(&Hint::new(), mss, FormatOptions::default(), MetadataOptions::default())
-    //     .expect("Unsupported format");
-
-    // let tracks = format.tracks();
-    // for track in tracks {
-    //     println!("{:#?}", track.duration);
-    // }
-
-    // let track = format.default_track(TrackType::Audio).expect("No audio track");
-
-    // let mut decoder = symphonia::default::get_codecs().make_audio_decoder(
-    //     track.codec_params.as_ref().expect("Codec parameters missing").audio().unwrap(),
-    //     &AudioDecoderOptions::default())
-    //     .expect("Unsupported codec");
-
-    // let sample_rate = decoder.codec_params().sample_rate.unwrap();
-    // let track_id = track.id;
-
-    // let mut samples: Vec<f32> = Default::default();
-    // println!("{:#?}", sample_rate);
-    // let mut total_sample_count = 0;
-    // let mut audio_spec: u16 = 0;
-
-    // loop {
-    //     let packet = match format.next_packet() {
-    //         Ok(Some(packet)) => packet,
-    //         Ok(None) => {
-    //             break;
-    //         }
-    //         Err(Error::ResetRequired) => {
-    //             break;
-    //         }
-    //         Err(err) => {
-    //             panic!("{}", err);
-    //         }
-    //     };
-
-    //     while !format.metadata().is_latest() {
-    //         format.metadata().pop();
-    //     }
-
-    //     if packet.track_id != track_id {
-    //         continue;
-    //     }
-
-    //     match decoder.decode(&packet) {
-    //         Ok(_decoded) => {
-    //             audio_spec = _decoded.spec().channels().count().try_into().unwrap();
-
-    //             samples.resize(total_sample_count + _decoded.samples_interleaved(), f32::MIN);
-
-    //             _decoded.copy_to_slice_interleaved(&mut samples[total_sample_count..]);
-
-    //             total_sample_count += _decoded.samples_interleaved();
-    //         }
-    //         Err(Error::IoError(_)) => {
-    //             continue;
-    //         }
-    //         Err(Error::DecodeError(_)) => {
-    //             continue;
-    //         }
-    //         Err(err) => {
-    //             panic!("{}", err);
-    //         }
-    //     }
-    // }
-
-    // let mut reverb = reverb_stereo(15.0, 3.0, 0.5);
-
-    // reverb.set_sample_rate(sample_rate.into());
-    // reverb.reset();
-
-    // for frame in samples.chunks_exact_mut(2) {
-    //     let (l, r) = reverb.filter_stereo(frame[0], frame[1]);
-
-    //     frame[0] = l;
-    //     frame[1] = r;
-    // }
-
-    // // for sample in samples {
-    // //     println!("{:#?}", sample);
-    // // }
-
-    // let channel_num: u16 = audio_spec;
-
-    // let spec = WavSpec {
-    //     channels: channel_num,
-    //     sample_rate: sample_rate,
-    //     bits_per_sample: 32,
-    //     sample_format: hound::SampleFormat::Float
-    // };
-
-    // let mut writer = WavWriter::create("output.wav", spec).unwrap();
-
-    // for sample in samples {
-    //     writer.write_sample(sample).expect("Error in write sample");
-    // }
-
-    // writer.finalize().expect("Error in finalize");
+#[derive(Debug, Eq, Hash, PartialEq)]
+enum Modification {
+    Unmodified,
+    Reverb,
+    Chorus,
+    Lowpass,
+    Volume
 }
 
-async fn modify_audio(url: String) {
+impl TryFrom<&str> for Modification {
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "unmodified" => Ok(Modification::Unmodified),
+            "reverb" => Ok(Modification::Reverb),
+            "chorus" => Ok(Modification::Chorus),
+            "lowpass" => Ok(Modification::Lowpass),
+            "volume" => Ok(Modification::Volume),
+            _ => Err("Invalid string for Modifications"),
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    run_program().await;
+}
+
+async fn run_program() {
+    let url = String::from("https://public.share.bluegaria.net/GUT_GENUG.mp3");
+
+    println!("Welcome to Entroximer!");
+    println!("Build your digital signal processing graph by entering the numbers associated with the modifications, separated by '=>'.");
+    println!("Options: unmodified, reverb, chorus, lowpass, volume");
+
+    let mut input = String::new();
+
+    io::stdin()
+        .read_line(&mut input)
+        .expect("Failed to read user input");
+
+
+    let user_mod_list_result = validate_input(&mut input);
+
+    if user_mod_list_result.is_err() {
+        println!("Error: {:#?}", user_mod_list_result.err());
+        return;
+    }
+
+    let user_mod_list = user_mod_list_result.unwrap();
+
+    modify_audio(url, user_mod_list).await;
+}
+
+fn validate_input(input: &mut String) -> Result<HashMap<Modification, Vec<f32>>, String> {
+
+    let mut mods: HashMap<Modification, Vec<f32>> = HashMap::new();
+
+    let mut lower = input.to_lowercase();
+
+    lower.retain(|c| !c.is_whitespace());
+
+    let split_input: Vec<&str> = lower.split("=>").collect();
+
+    if split_input.len() < 1 {
+        return Err(String::from("User input is empty"));
+    }
+
+    for mod_and_param in split_input.iter() {
+
+        let split_mod_and_param: Vec<&str> = mod_and_param.split('(').collect();
+
+        match Modification::try_from(split_mod_and_param[0]) {
+            Ok(modification) => {
+                let mut parameters: Vec<f32> = Vec::new();
+                let mut str_parameters: Vec<&str> = split_mod_and_param[1].split([',', ')']).collect();
+                str_parameters.retain(|c| *c != "");
+
+                for num in str_parameters.iter() {
+                    println!("num: {:#?}", num);
+                    let num_parsed: f32 = num.parse().expect("Non-numeric parameter");
+                    parameters.push(num_parsed);
+                }
+
+                mods.insert(modification, parameters);
+            }
+            Err(e) => {
+                return Err(e.to_string());
+            }
+        }
+    }
+
+    return Ok(mods);
+}
+
+fn convert_modification_add_to_list(modification: &Modification, parameters: &Vec<f32>, mod_list: &mut Vec<Box<dyn AudioUnit>>, sample_rate: f64) {
+    if parameters.len() != num_parametres(modification) {
+        panic!("Invalid number of paramters.");
+    }
+
+    match modification {
+        Modification::Unmodified => { }
+        Modification::Reverb => { 
+            let mut reverb = reverb_stereo(parameters[0], parameters[1], parameters[2]);
+
+            reverb.set_sample_rate(sample_rate);
+            reverb.reset();
+
+            mod_list.push(Box::from(reverb)) 
+        }
+        Modification::Chorus => {
+            let chorus_left = chorus(0, parameters[0], parameters[1], parameters[2]);
+            let chorus_right = chorus(1, parameters[0], parameters[1], parameters[2]);
+
+            let mut chorus_stereo = chorus_left | chorus_right;
+            
+            chorus_stereo.set_sample_rate(sample_rate);
+            chorus_stereo.reset();
+            
+            mod_list.push(Box::new(chorus_stereo));
+        }
+        Modification::Lowpass => {
+            let lowpass_left = lowpass_hz(parameters[0], parameters[1]);
+            let lowpass_right = lowpass_hz(parameters[0], parameters[1]);
+
+            let mut lowpass_stereo = lowpass_left | lowpass_right;
+            
+            lowpass_stereo.set_sample_rate(sample_rate);
+            lowpass_stereo.reset();
+            
+            mod_list.push(Box::new(lowpass_stereo));
+        },
+        Modification::Volume => {
+            let mut volume_node = (pass() | pass()) * parameters[0];
+            
+            volume_node.set_sample_rate(sample_rate);
+            volume_node.reset();
+            
+            mod_list.push(Box::new(volume_node));
+        }
+        _ => { panic!("Unrecognized modification!") }
+    }
+}
+
+async fn modify_audio(url: String, modification_list: HashMap<Modification, Vec<f32>>) {
     let mut audio = AudioBuffer::default();
 
     let result = reqwest::get(url).await;
@@ -240,10 +274,11 @@ async fn modify_audio(url: String) {
                 )
                 .expect("Unsupported codec");
 
-            let mut reverb = reverb_stereo(15.0, 3.0, 0.5);
+            let mut modification_units: Vec<Box<dyn AudioUnit>>= Vec::new();
 
-            reverb.set_sample_rate(decoder.codec_params().sample_rate.unwrap() as f64);
-            reverb.reset();
+            for (modification, parameters) in &modification_list {
+                convert_modification_add_to_list(modification,  parameters, &mut modification_units, decoder.codec_params().sample_rate.unwrap() as f64);
+            }
 
             // don't want to collect this into one big buffer in prod but we're just testing
             let mut packet_audio = AudioBuffer::default();
@@ -292,7 +327,7 @@ async fn modify_audio(url: String) {
                 println!("Packet {} [decoded ]", packet_i);
                 // println!("{:#?}", packet_audio.audio_stream);
 
-                reverb_mod(&mut packet_audio, &mut reverb);
+                apply_mods(&mut packet_audio, &mut modification_units);
 
                 println!("Packet {} [reverbed]", packet_i);
                 // println!("{:#?}", packet_audio.audio_stream);
@@ -312,88 +347,19 @@ async fn modify_audio(url: String) {
         .expect("the decoder thread errored");
 }
 
-// fn decode_bytes(bytes: &Vec<u8>) -> Audio {
-//     let cursor = Cursor::new(bytes);
+fn apply_mods(decoded_audio: &mut AudioBuffer, mods: &mut Vec<Box<dyn AudioUnit>>) {
+    if mods.len() < 1 {
+        return;
+    }
 
-//     let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
-
-//     let mut format = symphonia::default::get_probe()
-//         .probe(&Hint::new(), mss, FormatOptions::default(), MetadataOptions::default())
-//         .expect("Unsupported format");
-
-//     let tracks = format.tracks();
-
-//     let track = format.default_track(TrackType::Audio).expect("No audio track");
-
-//     let mut decoder = symphonia::default::get_codecs().make_audio_decoder(
-//         track.codec_params.as_ref().expect("Codec parameters missing").audio().unwrap(),
-//         &AudioDecoderOptions::default())
-//         .expect("Unsupported codec");
-
-//     let sample_rate = decoder.codec_params().sample_rate.unwrap();
-
-//     let track_id = track.id;
-
-//     let mut samples: Vec<f32> = Default::default();
-//     let mut total_sample_count = 0;
-//     let mut audio_spec: u16 = 0;
-
-//     loop {
-//         let packet = match format.next_packet() {
-//             Ok(Some(packet)) => packet,
-//             Ok(None) => {
-//                 break;
-//             }
-//             Err(Error::ResetRequired) => {
-//                 break;
-//             }
-//             Err(err) => {
-//                 panic!("{}", err);
-//             }
-//         };
-
-//         while !format.metadata().is_latest() {
-//             format.metadata().pop();
-//         }
-
-//         if packet.track_id != track_id {
-//             continue;
-//         }
-
-//         match decoder.decode(&packet) {
-//             Ok(_decoded) => {
-//                 audio_spec = _decoded.spec().channels().count().try_into().unwrap();
-
-//                 samples.resize(total_sample_count + _decoded.samples_interleaved(), f32::MIN);
-
-//                 _decoded.copy_to_slice_interleaved(&mut samples[total_sample_count..]);
-
-//                 total_sample_count += _decoded.samples_interleaved();
-//             }
-//             Err(Error::IoError(_)) => {
-//                 continue;
-//             }
-//             Err(Error::DecodeError(_)) => {
-//                 continue;
-//             }
-//             Err(err) => {
-//                 panic!("{}", err);
-//             }
-//         }
-//     }
-
-//     let decoded_audio = Audio{audio_stream: samples, sample_rate: sample_rate, channel_num: audio_spec};
-
-//     return decoded_audio;
-// }
-
-fn reverb_mod(decoded_audio: &mut AudioBuffer, reverb: &mut impl AudioUnit) {
     assert_eq!(decoded_audio.channel_count, 2);
     for frame in decoded_audio.audio_stream.chunks_exact_mut(2) {
-        let (l, r) = reverb.filter_stereo(frame[0], frame[1]);
+        for m in mods.iter_mut() {
+            let (l, r) = m.filter_stereo(frame[0], frame[1]);
 
-        frame[0] = l;
-        frame[1] = r;
+            frame[0] = l;
+            frame[1] = r;
+        }
     }
 }
 
@@ -416,4 +382,27 @@ fn write_to_file(audio: AudioBuffer) {
     }
 
     writer.finalize().expect("Error in finalize");
+}
+
+fn num_parametres(modification: &Modification) -> usize {
+    match modification {
+        Modification::Unmodified => {
+            return 0;
+        }
+        Modification::Reverb => {
+            return 3;
+        }
+        Modification::Chorus => {
+            return 3;
+        }
+        Modification::Lowpass => {
+            return 2;
+        }
+        Modification::Volume => {
+            return 1;
+        }
+        _ => {
+            panic!("Unknown modification");
+        }
+    }
 }
