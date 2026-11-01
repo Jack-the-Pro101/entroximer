@@ -1,0 +1,28 @@
+[package]
+name = "entroximer-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "entroximer"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+entroximer-core.workspace = true
+
+anyhow = "1.0.104"
+axum.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+clap.workspace = true
+hound.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
