@@ -1,0 +1,26 @@
+[package]
+name = "entroximer-core"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes.workspace = true
+fundsp.workspace = true
+futures-util.workspace = true
+kanal.workspace = true
+opus2.workspace = true
+rubato.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+symphonia.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true

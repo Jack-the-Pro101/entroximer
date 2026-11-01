@@ -32,7 +32,8 @@ fn new_download_fut<'a>(
     })
 }
 
-// TODO: manage stream internally to support seeking
+// Seeking is intentionally not supported here: the demuxer reads every source forward-only and
+// seeks happen on the packet timeline instead (see `crate::timeline`).
 pub fn stream_media<'a, S>(stream: S) -> (WebMediaDownload<'a>, WebMediaSource)
 where
     S: Stream<Item = io::Result<Bytes>> + Send + 'a,
@@ -43,18 +44,29 @@ where
     (download, WebMediaSource { rx, cur: None })
 }
 
+impl std::fmt::Debug for WebMediaSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebMediaSource").finish_non_exhaustive()
+    }
+}
+
 impl io::Read for WebMediaSource {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.cur.as_ref().is_none_or(|cur| !cur.has_remaining()) {
-            self.cur = Some(io::Cursor::new(self.rx.recv().map_err(|e| match e {
-                kanal::ReceiveError::Closed | kanal::ReceiveError::SendClosed => {
-                    io::Error::other("channel closed")
-                }
-            })??));
+        // an empty chunk must not be mistaken for the end of the stream
+        while self.cur.as_ref().is_none_or(|cur| !cur.has_remaining()) {
+            let chunk = match self.rx.recv() {
+                Ok(chunk) => chunk?,
+                // The channel only ends by the download dropping its sender: stream errors arrive
+                // in-band as `Err` chunks above. kanal reports a sender dropped while we were
+                // blocked as `Closed` rather than `SendClosed`, so both mean end of stream.
+                Err(kanal::ReceiveError::SendClosed | kanal::ReceiveError::Closed) => return Ok(0),
+            };
+            self.cur = Some(io::Cursor::new(chunk));
         }
-
-        let cur = self.cur.as_mut().unwrap();
-        cur.read(buf)
+        self.cur
+            .as_mut()
+            .expect("the loop exits with a non-empty chunk")
+            .read(buf)
     }
 }
 
@@ -66,7 +78,6 @@ impl io::Seek for WebMediaSource {
 
 impl symphonia::core::io::MediaSource for WebMediaSource {
     fn is_seekable(&self) -> bool {
-        // TODO: support via Range requests when possible
         false
     }
 
@@ -108,5 +119,36 @@ mod tests {
         a_r.expect("the downloader errored");
         b_r.expect("the decoder thread panicked")
             .expect("the decoder thread errored");
+    }
+
+    #[tokio::test]
+    async fn finished_stream_reads_as_eof_and_errors_propagate() {
+        let ok = futures_util::stream::iter([Ok(Bytes::from_static(b"abc"))]);
+        let (download, mut source) = stream_media(ok);
+        let (a_r, b_r) = futures_util::future::join(
+            download,
+            tokio::task::spawn_blocking(move || {
+                let mut out = Vec::new();
+                source.read_to_end(&mut out).map(|_| out)
+            }),
+        )
+        .await;
+        a_r.unwrap();
+        assert_eq!(b_r.unwrap().unwrap(), b"abc");
+
+        let failing = futures_util::stream::iter([
+            Ok(Bytes::from_static(b"abc")),
+            Err(io::Error::other("producer died")),
+        ]);
+        let (download, mut source) = stream_media(failing);
+        let (_, b_r) = futures_util::future::join(
+            download,
+            tokio::task::spawn_blocking(move || {
+                let mut out = Vec::new();
+                source.read_to_end(&mut out)
+            }),
+        )
+        .await;
+        assert!(b_r.unwrap().is_err());
     }
 }

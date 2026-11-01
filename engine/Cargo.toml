@@ -1,18 +1,44 @@
-[package]
-name = "entroximer-engine"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace.dependencies]
+entroximer-core = { path = "crates/entroximer-core" }
+
+axum = "0.8"
 bytes = "1.12.0"
+clap = { version = "4.6.7", features = ["derive", "env"] }
 fundsp = "0.23.0"
 futures-util = "0.3.32"
 hound = "3.5.1"
 kanal = "0.1.1"
+# matches songbird's opus2, so libopus is only linked once
+opus2 = "0.4.0"
 reqwest = { version = "0.13.4", features = ["stream"] }
+# matches songbird's rubato
+rubato = "0.16.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 songbird = "0.6.0"
-symphonia = { version = "0.6.0", features = ["all-codecs", "all-formats"] }
+symphonia = { version = "0.6.1", features = ["all-codecs", "all-formats"] }
+tempfile = "3.27.0"
+thiserror = "2"
 tokio = { version = "1.52.3", features = ["full"] }
+tokio-util = { version = "0.7.19", features = ["io"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
 
 # optimize dependencies in debug mode, but not our code, maintaining quicker debug warm build times
 [profile.dev.package."*"]
