@@ -4,9 +4,7 @@
 //! frequency of the rendered audio tells which second of the media is playing. Requires ffmpeg
 //! with libopus (the engine needs ffmpeg at runtime anyway).
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use entroximer_core::error::display_chain;
@@ -14,39 +12,10 @@ use entroximer_core::player::{Player, PlayerConfig, Status};
 use entroximer_core::producer::file::FileProducer;
 use entroximer_core::producer::process::{ProcessProducer, ProcessSpec};
 use entroximer_core::producer::{Producer, ProducerCaps, TimestampMode};
-use entroximer_core::timeline::{SpillConfig, TICKS_PER_SECOND, Ticks};
+use entroximer_core::timeline::{SpillConfig, TICKS_PER_SECOND};
 
-const FIXTURE_SECONDS: i64 = 60;
-const BLOCK_FRAMES: usize = 960;
-
-fn fixture() -> &'static Path {
-    static FIXTURE: OnceLock<PathBuf> = OnceLock::new();
-    FIXTURE.get_or_init(|| {
-        let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("steps.webm");
-        if !path.exists() {
-            let tone =
-                format!("aevalsrc=sin(2*PI*(200+10*floor(t))*t):s=48000:d={FIXTURE_SECONDS}");
-            let status = Command::new("ffmpeg")
-                .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y"])
-                .args([
-                    "-f", "lavfi", "-i", &tone, "-ac", "2", "-c:a", "libopus", "-b:a", "128k",
-                ])
-                .arg(&path)
-                .status()
-                .expect("ffmpeg must be installed to run these tests");
-            assert!(status.success(), "ffmpeg failed to create the fixture");
-        }
-        path
-    })
-}
-
-fn expected_hz(second: f64) -> f64 {
-    200.0 + 10.0 * second.floor()
-}
-
-fn at(seconds: f64) -> Ticks {
-    (seconds * TICKS_PER_SECOND as f64).round() as Ticks
-}
+mod common;
+use common::{BLOCK_FRAMES, FIXTURE_SECONDS, assert_playing_second, at, fixture};
 
 /// ffmpeg streaming the fixture at real-time speed, like a network download would.
 fn throttled(time_seek: bool) -> impl Producer {
@@ -147,25 +116,6 @@ impl Harness {
             self.player.wait_for_media(Duration::from_millis(50));
         }
     }
-}
-
-/// Frequency of the left channel, from its zero crossings.
-fn frequency(interleaved: &[f32]) -> f64 {
-    let left: Vec<f32> = interleaved.iter().step_by(2).copied().collect();
-    let crossings = left
-        .windows(2)
-        .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
-        .count();
-    crossings as f64 / 2.0 / (left.len() as f64 / 48_000.0)
-}
-
-fn assert_playing_second(audio: &[f32], second: f64) {
-    let hz = frequency(audio);
-    let expected = expected_hz(second);
-    assert!(
-        (hz - expected).abs() < 4.0,
-        "expected second {second} ({expected} Hz), heard {hz:.1} Hz"
-    );
 }
 
 #[test]
