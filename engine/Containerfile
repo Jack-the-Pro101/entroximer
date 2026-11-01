@@ -1,0 +1,61 @@
+# Entroximer engine image; works with Podman and Docker. Build from this directory:
+#
+#   podman build -t entroximer-engine .
+#   docker build -f Containerfile -t entroximer-engine .
+#
+# yt-dlp is not part of the image: the engine installs it into the data volume on first start
+# and keeps it updated (ENTROXIMER_YTDLP_* settings), so YouTube fixes never need a rebuild.
+# Update on demand with `podman exec <container> entroximer ytdlp update`.
+
+ARG RUST_VERSION=1.99
+ARG DEBIAN_RELEASE=trixie
+# yt-dlp needs a JavaScript runtime to solve YouTube's player challenges
+ARG DENO_VERSION=2.9.8
+
+FROM docker.io/library/rust:${RUST_VERSION}-slim-${DEBIAN_RELEASE} AS build
+# libopus is linked statically, so the runtime image does not need it
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends pkg-config libopus-dev \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked -p entroximer-server \
+ && install -D -m 0755 target/release/entroximer /out/entroximer
+
+FROM docker.io/denoland/deno:bin-${DENO_VERSION} AS deno
+
+FROM docker.io/library/debian:${DEBIAN_RELEASE}-slim
+# python3-venv lets the engine install yt-dlp at runtime; tini reaps the processes yt-dlp
+# leaves behind (ffmpeg, deno) and forwards signals
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates ffmpeg python3 python3-venv tini \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=deno /deno /usr/local/bin/deno
+COPY --from=build /out/entroximer /usr/local/bin/entroximer
+
+RUN groupadd --gid 10001 entroximer \
+ && useradd --uid 10001 --gid 10001 --home-dir /var/lib/entroximer --create-home entroximer \
+ && install -d -o entroximer -g entroximer /var/cache/entroximer
+USER entroximer
+
+ENV ENTROXIMER_HOST=0.0.0.0 \
+    ENTROXIMER_PORT=2333 \
+    ENTROXIMER_DATA_DIR=/var/lib/entroximer \
+    ENTROXIMER_YTDLP_MANAGED=true \
+    ENTROXIMER_CACHE_DIR=/var/cache/entroximer \
+    ENTROXIMER_LOG_FORMAT=json \
+    RUST_LOG=info
+# The managed yt-dlp lives in the data volume, so it survives restarts and image upgrades.
+# The packet cache spills to the cache volume: put it on fast disk, never a RAM-backed tmpfs.
+VOLUME ["/var/lib/entroximer", "/var/cache/entroximer"]
+EXPOSE 2333
+
+# Honoured by Docker, and by Podman for images built with `--format docker`;
+# compose.yaml declares the same check for both.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["entroximer", "healthcheck"]
+ENTRYPOINT ["/usr/bin/tini", "--", "entroximer"]
+CMD ["serve"]

@@ -1,0 +1,33 @@
+# Development stack: `podman compose up --build` or `docker compose up --build`.
+services:
+  engine:
+    build:
+      context: ./engine
+      dockerfile: Containerfile
+    image: localhost/entroximer-engine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:2333:2333"
+    environment:
+      RUST_LOG: info
+      # yt-dlp is installed and updated by the engine; these tune it:
+      # ENTROXIMER_YTDLP_NIGHTLY: "true"            # YouTube fixes arrive in nightly builds first
+      # ENTROXIMER_YTDLP_PACKAGE: "yt-dlp[default]==2026.10.26"   # pin a version
+      # ENTROXIMER_YTDLP_UPDATE_HOURS: "24"         # 0 = install once, never update
+    volumes:
+      # the engine-managed yt-dlp; persists across restarts and image upgrades
+      - engine-data:/var/lib/entroximer
+      # The packet cache spills here instead of RAM. Named volumes live in the container
+      # engine's storage; to place it elsewhere use a bind mount, e.g. `/mnt/ssd/cache:/var/cache/entroximer:Z`
+      # (`:Z` relabels it for SELinux hosts such as Fedora).
+      - engine-cache:/var/cache/entroximer
+    healthcheck:
+      test: ["CMD", "entroximer", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  engine-data:
+  engine-cache:

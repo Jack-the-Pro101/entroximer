@@ -1,0 +1,6 @@
+# Read by Docker, and by Podman when no .containerignore exists.
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+crates/**/target/
