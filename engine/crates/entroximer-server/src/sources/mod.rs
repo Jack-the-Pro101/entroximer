@@ -1,6 +1,6 @@
 //! Turning user input (URLs, searches, local paths) into playable tracks.
 
-mod ytdlp;
+pub mod ytdlp;
 
 use std::io;
 use std::path::Path;
@@ -12,6 +12,8 @@ use serde::Serialize;
 
 use crate::config::MediaContext;
 use crate::managed_ytdlp::InstallError;
+use crate::youtube::{SessionError, SignInUnavailable};
+use ytdlp::{Failure, Restriction};
 
 /// What clients are told about a track.
 #[derive(Clone, Debug, Serialize)]
@@ -48,7 +50,19 @@ pub enum ResolveError {
     #[error("failed to run yt-dlp")]
     Spawn(#[source] io::Error),
     #[error("yt-dlp could not load `{query}`: {message}")]
-    Extraction { query: String, message: String },
+    Extraction {
+        query: String,
+        message: String,
+        failure: Failure,
+    },
+    #[error("this video {}; {}", restriction.describe(), reason.advice())]
+    SignInRequired {
+        query: String,
+        restriction: Restriction,
+        reason: SignInUnavailable,
+    },
+    #[error("cannot use the YouTube session")]
+    Session(#[source] SessionError),
     #[error("yt-dlp returned unexpected JSON")]
     Json(#[source] serde_json::Error),
     #[error("no results for `{0}`")]

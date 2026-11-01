@@ -7,3 +7,4 @@ pub mod managed_ytdlp;
 pub mod render;
 pub mod serve;
 pub mod sources;
+pub mod youtube;

@@ -14,8 +14,12 @@ services:
       # ENTROXIMER_YTDLP_NIGHTLY: "true"            # YouTube fixes arrive in nightly builds first
       # ENTROXIMER_YTDLP_PACKAGE: "yt-dlp[default]==2026.10.26"   # pin a version
       # ENTROXIMER_YTDLP_UPDATE_HOURS: "24"         # 0 = install once, never update
+      # YouTube session for age-restricted videos; or run `entroximer youtube cookies import -`
+      # ENTROXIMER_YOUTUBE_COOKIES_FILE: /run/secrets/youtube-cookies
+    # secrets:
+    #   - youtube-cookies
     volumes:
-      # the engine-managed yt-dlp; persists across restarts and image upgrades
+      # the engine-managed yt-dlp and YouTube session; persist across restarts and image upgrades
       - engine-data:/var/lib/entroximer
       # The packet cache spills here instead of RAM. Named volumes live in the container
       # engine's storage; to place it elsewhere use a bind mount, e.g. `/mnt/ssd/cache:/var/cache/entroximer:Z`
@@ -31,3 +35,7 @@ services:
 volumes:
   engine-data:
   engine-cache:
+
+# secrets:
+#   youtube-cookies:
+#     file: ./youtube-cookies.txt

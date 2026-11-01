@@ -14,6 +14,7 @@ use entroximer_core::timeline::{RetentionConfig, SpillConfig};
 
 use crate::cache::CacheDir;
 use crate::managed_ytdlp::{ManagedYtDlp, YtDlpBinary};
+use crate::youtube::{AuthPolicy, YouTube};
 
 const MIB: u64 = 1 << 20;
 
@@ -21,6 +22,9 @@ const MIB: u64 = 1 << 20;
 pub struct MediaConfig {
     #[command(flatten)]
     pub ytdlp: YtDlpConfig,
+
+    #[command(flatten)]
+    pub youtube: YouTubeConfig,
 
     /// Persistent state such as the managed yt-dlp. Defaults to `$XDG_DATA_HOME/entroximer`.
     #[arg(long, env = "ENTROXIMER_DATA_DIR")]
@@ -98,6 +102,39 @@ pub struct YtDlpConfig {
     pub args: ExtraArgs,
 }
 
+#[derive(Clone, Debug, Args)]
+pub struct YouTubeConfig {
+    /// When the YouTube session is sent: only for videos that need it (age-restricted, bot
+    /// checks, members-only), which keeps the account out of most traffic, always, or never.
+    #[arg(
+        long = "youtube-auth",
+        env = "ENTROXIMER_YOUTUBE_AUTH",
+        value_enum,
+        default_value_t
+    )]
+    pub auth: AuthPolicy,
+
+    /// A cookies.txt imported whenever its contents change, e.g. a mounted Podman/Docker secret.
+    #[arg(long = "youtube-cookies-file", env = "ENTROXIMER_YOUTUBE_COOKIES_FILE")]
+    pub cookies_file: Option<PathBuf>,
+
+    /// Hours between checks that YouTube still accepts the session; 0 disables them.
+    #[arg(
+        long = "youtube-check-hours",
+        env = "ENTROXIMER_YOUTUBE_CHECK_HOURS",
+        default_value_t = 12
+    )]
+    pub check_hours: u64,
+
+    /// An age-restricted video that only loads when signed in, used for those checks.
+    #[arg(
+        long = "youtube-check-video",
+        env = "ENTROXIMER_YOUTUBE_CHECK_VIDEO",
+        default_value = "https://www.youtube.com/watch?v=Tq92D6wQ1mg"
+    )]
+    pub check_video: String,
+}
+
 impl MediaConfig {
     /// Where persistent state lives: `data_dir`, else the XDG data directory.
     pub fn data_root(&self) -> PathBuf {
@@ -133,6 +170,7 @@ impl MediaConfig {
 pub struct MediaContext {
     pub config: MediaConfig,
     pub ytdlp: YtDlpBinary,
+    pub youtube: YouTube,
     cache: CacheDir,
 }
 
@@ -144,9 +182,15 @@ impl MediaContext {
         } else {
             YtDlpBinary::System(config.ytdlp.program.clone())
         };
+        let youtube = YouTube::new(
+            config.data_root().join("youtube"),
+            config.youtube.auth,
+            config.youtube.check_video.clone(),
+        );
         Ok(Self {
             config,
             ytdlp,
+            youtube,
             cache,
         })
     }

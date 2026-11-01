@@ -46,6 +46,29 @@ Use `ENTROXIMER_YTDLP_NIGHTLY=true` to follow nightly builds, which get YouTube 
 with `ENTROXIMER_YTDLP_PACKAGE='yt-dlp[default]==<version>'`, or try a test build such as
 yt-dlp's SABR branch with `ENTROXIMER_YTDLP_PACKAGE='yt-dlp[default] @ git+https://...'`.
 
+## Signing in to YouTube
+
+Age-restricted, members-only and bot-checked videos need a signed-in account. YouTube no longer
+accepts OAuth from yt-dlp, so the engine uses the cookies of a browser session:
+
+1. In a private browser window, sign into a dedicated adult YouTube account (YouTube may restrict
+   accounts used this way), open `https://www.youtube.com/robots.txt`, and export the cookies with
+   a cookies.txt extension. Close the window without signing out, so YouTube does not rotate them.
+2. Give them to the engine, from anywhere that can reach it:
+
+   ```sh
+   entroximer youtube cookies import cookies.txt
+   ssh host 'podman exec -i entroximer entroximer youtube cookies import -' < cookies.txt
+   ```
+
+The import checks the session with YouTube right away. By default (`ENTROXIMER_YOUTUBE_AUTH=fallback`)
+every video is tried anonymously first and the session is only sent when YouTube demands it,
+which keeps the account out of most traffic. Cookies YouTube rotates are merged back after every
+yt-dlp run, and the session is re-checked every 12 hours; when YouTube stops accepting it the
+engine logs a warning and tracks needing it fail with instructions until fresh cookies are
+imported. `entroximer youtube cookies status|check|remove` manage it; a cookie file mounted as a
+secret (`ENTROXIMER_YOUTUBE_COOKIES_FILE`) is imported whenever it changes.
+
 ## How seeking works
 
 Every source is read forward-only, whether it is yt-dlp writing to a pipe, a file yt-dlp is
@@ -87,6 +110,10 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_YTDLP_UPDATE_HOURS` | `24` | Update check interval; `0` installs once and never updates |
 | `ENTROXIMER_YTDLP`, `ENTROXIMER_FFMPEG` | `yt-dlp`, `ffmpeg` | Executables (`ENTROXIMER_YTDLP` only when not managed) |
 | `ENTROXIMER_PYTHON` | `python3` | Python used for the managed install |
+| `ENTROXIMER_YOUTUBE_AUTH` | `fallback` | When to send the YouTube session: `fallback`, `always`, `never` |
+| `ENTROXIMER_YOUTUBE_COOKIES_FILE` | | cookies.txt imported whenever it changes, e.g. a secret |
+| `ENTROXIMER_YOUTUBE_CHECK_HOURS` | `12` | Session check interval; `0` disables it |
+| `ENTROXIMER_YOUTUBE_CHECK_VIDEO` | an age-restricted video | Video used to check the session |
 | `ENTROXIMER_YTDLP_ARGS` | | Extra yt-dlp arguments, e.g. `--extractor-args youtube:formats=duplicate` |
 | `ENTROXIMER_LOG_FORMAT` | `pretty` | `json` for log collectors |
 | `RUST_LOG` | `info` | Log verbosity, e.g. `entroximer_core=debug` |
@@ -103,8 +130,8 @@ podman compose up --build                      # from the repository root, using
 
 The image runs as an unprivileged user under `tini`, listens on port 2333, logs JSON, shuts down
 cleanly on `SIGTERM`, and has a health check (`entroximer healthcheck`). It has two volumes:
-`/var/lib/entroximer` holds the managed yt-dlp, which therefore survives restarts and image
-upgrades, and `/var/cache/entroximer` holds the packet cache and belongs on fast disk. On SELinux
+`/var/lib/entroximer` holds the managed yt-dlp and the YouTube session, which therefore survive
+restarts and image upgrades, and `/var/cache/entroximer` holds the packet cache and belongs on fast disk. On SELinux
 hosts add `:Z` to bind mounts. yt-dlp is not in the image, so YouTube fixes never need a rebuild.
 
 ## Development

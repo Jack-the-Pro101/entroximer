@@ -1,12 +1,14 @@
 //! The Entroximer engine binary.
 
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use entroximer_core::error::display_chain;
 use entroximer_server::config::{LogFormat, MediaConfig, MediaContext};
 use entroximer_server::managed_ytdlp::log_outcome;
-use entroximer_server::{render, serve};
+use entroximer_server::youtube::command::YouTubeCommand;
+use entroximer_server::{render, serve, youtube};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -40,6 +42,9 @@ enum Command {
     /// Manage the engine-installed yt-dlp (see `--ytdlp-managed`).
     #[command(subcommand)]
     Ytdlp(YtdlpCommand),
+    /// Sign the engine into YouTube, for age-restricted and members-only videos.
+    #[command(subcommand)]
+    Youtube(YouTubeCommand),
 }
 
 #[derive(Debug, Subcommand)]
@@ -67,8 +72,11 @@ async fn main() -> ExitCode {
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Healthcheck(args) => serve::check_health(&args).await,
-        Command::Serve(args) => serve::run(args, &MediaContext::new(cli.media)?).await,
+        Command::Serve(args) => serve::run(args, Arc::new(MediaContext::new(cli.media)?)).await,
         Command::Render(args) => render::run(args, &MediaContext::new(cli.media)?).await,
+        Command::Youtube(command) => {
+            youtube::command::run(command, &MediaContext::new(cli.media)?).await
+        }
         Command::Ytdlp(command) => ytdlp(command, &cli.media).await,
     }
 }

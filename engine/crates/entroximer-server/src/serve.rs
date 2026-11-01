@@ -17,6 +17,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::config::MediaContext;
 use crate::managed_ytdlp::YtDlpBinary;
+use crate::youtube;
 
 pub const HEALTH_PATH: &str = "/health";
 
@@ -30,13 +31,15 @@ pub struct ServeArgs {
     pub port: u16,
 }
 
-pub async fn run(args: ServeArgs, ctx: &MediaContext) -> anyhow::Result<()> {
+pub async fn run(args: ServeArgs, ctx: Arc<MediaContext>) -> anyhow::Result<()> {
     if let YtDlpBinary::Managed(managed) = &ctx.ytdlp {
         let hours = ctx.config.ytdlp.update_hours;
         let interval = (hours > 0).then(|| Duration::from_secs(hours * 3600));
         let managed = Arc::clone(managed);
         tokio::spawn(async move { managed.maintain(interval).await });
     }
+    start_youtube_session(&ctx);
+
     let app = Router::new().route(HEALTH_PATH, get(|| async { "ok" }));
     let addr = SocketAddr::new(args.host, args.port);
     let listener = TcpListener::bind(addr)
@@ -49,6 +52,30 @@ pub async fn run(args: ServeArgs, ctx: &MediaContext) -> anyhow::Result<()> {
         .context("server failed")?;
     tracing::info!("engine stopped");
     Ok(())
+}
+
+/// Imports a mounted cookie secret if it changed and keeps checking the session.
+fn start_youtube_session(ctx: &Arc<MediaContext>) {
+    let config = &ctx.config.youtube;
+    if let Some(path) = &config.cookies_file {
+        match ctx.youtube.store.import_file_if_changed(path) {
+            Ok(Some(report)) => {
+                tracing::info!(cookies = report.cookies, file = %path.display(), "imported the YouTube session")
+            }
+            Ok(None) => {
+                tracing::debug!(file = %path.display(), "the YouTube cookie file is unchanged")
+            }
+            Err(e) => tracing::warn!(
+                file = %path.display(),
+                error = %entroximer_core::error::display_chain(&e),
+                "cannot import the YouTube cookie file"
+            ),
+        }
+    }
+    if config.check_hours > 0 {
+        let interval = Duration::from_secs(config.check_hours * 3600);
+        tokio::spawn(youtube::maintain_session(Arc::clone(ctx), interval));
+    }
 }
 
 /// Resolves on SIGINT, or SIGTERM as sent by `podman stop` / `docker stop`.

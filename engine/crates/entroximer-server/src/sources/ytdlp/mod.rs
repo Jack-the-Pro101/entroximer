@@ -27,8 +27,13 @@ use futures_util::future::BoxFuture;
 use serde::Deserialize;
 use serde_json::Value;
 
+pub use failure::{Failure, Restriction, SESSION_ENDED_WARNING, classify};
+
 use super::{ResolveError, ResolvedTrack, TrackInfo};
 use crate::config::MediaContext;
+use crate::youtube::{SessionCopy, SignInUnavailable};
+
+mod failure;
 
 pub(super) async fn resolve(
     query: &str,
@@ -38,20 +43,7 @@ pub(super) async fn resolve(
         .ready()
         .await
         .map_err(ResolveError::YtDlpUnavailable)?;
-    let output = tokio::process::Command::new(ctx.ytdlp.program())
-        .args(&ctx.config.ytdlp.args.0)
-        .args(["-J", "--no-playlist", "--no-warnings", "--", query])
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(ResolveError::Spawn)?;
-    if !output.status.success() {
-        return Err(ResolveError::Extraction {
-            query: query.to_owned(),
-            message: last_line(&output.stderr),
-        });
-    }
-    let mut json: Value = serde_json::from_slice(&output.stdout).map_err(ResolveError::Json)?;
+    let (mut json, session) = extract_with_policy(query, ctx).await?;
     // searches (`ytsearch:...`) return a playlist of fully extracted entries
     if json.get("_type").and_then(Value::as_str) == Some("playlist") {
         json = json
@@ -86,6 +78,7 @@ pub(super) async fn resolve(
         &format,
         info.live(),
         urls_valid_from,
+        session,
     );
     Ok(ResolvedTrack {
         info: track,
@@ -94,6 +87,128 @@ pub(super) async fn resolve(
 }
 
 const YOUTUBE_URL_ACTIVATION: Duration = Duration::from_millis(2500);
+
+/// Extracts `query`, signed in only as the YouTube auth policy allows. Returns the info JSON and
+/// the session copy it used, which the track's downloads keep using.
+async fn extract_with_policy(
+    query: &str,
+    ctx: &MediaContext,
+) -> Result<(Value, Option<SessionCopy>), ResolveError> {
+    let youtube = &ctx.youtube;
+    let first = if youtube.sign_in_first(query) {
+        youtube.checkout(ctx).map_err(ResolveError::Session)?
+    } else {
+        None
+    };
+    let restriction = match extract(ctx, query, first.as_ref()).await {
+        Ok(json) => return Ok((json, first)),
+        Err(ResolveError::Extraction {
+            failure: Failure::Restricted(restriction),
+            ..
+        }) => restriction,
+        Err(e) => return Err(e),
+    };
+    if first.is_some() {
+        return Err(refused(ctx, query, restriction));
+    }
+
+    youtube.remember_restricted(query);
+    let Some(session) = youtube.checkout(ctx).map_err(ResolveError::Session)? else {
+        return Err(ResolveError::SignInRequired {
+            query: query.to_owned(),
+            restriction,
+            reason: youtube.unavailable_reason(),
+        });
+    };
+    tracing::debug!(query, ?restriction, "retrying signed in to YouTube");
+    match extract(ctx, query, Some(&session)).await {
+        Ok(json) => Ok((json, Some(session))),
+        Err(ResolveError::Extraction {
+            failure: Failure::Restricted(restriction),
+            ..
+        }) => Err(refused(ctx, query, restriction)),
+        Err(e) => Err(e),
+    }
+}
+
+/// YouTube still wants an account although the session was sent.
+fn refused(ctx: &MediaContext, query: &str, restriction: Restriction) -> ResolveError {
+    if restriction.implicates_session() {
+        ctx.youtube.request_check();
+    }
+    ResolveError::SignInRequired {
+        query: query.to_owned(),
+        restriction,
+        reason: SignInUnavailable::Refused,
+    }
+}
+
+async fn extract(
+    ctx: &MediaContext,
+    query: &str,
+    session: Option<&SessionCopy>,
+) -> Result<Value, ResolveError> {
+    let output = run(ctx, query, session, &["-J", "--no-playlist"]).await?;
+    serde_json::from_slice(&output.stdout).map_err(ResolveError::Json)
+}
+
+/// Loads `video` signed in, without downloading; returns yt-dlp's warnings.
+pub async fn probe(
+    ctx: &MediaContext,
+    video: &str,
+    session: &SessionCopy,
+) -> Result<String, ResolveError> {
+    let output = run(
+        ctx,
+        video,
+        Some(session),
+        &["--simulate", "--no-playlist", "--print", "id"],
+    )
+    .await?;
+    Ok(output.stderr)
+}
+
+struct Output {
+    stdout: Vec<u8>,
+    stderr: String,
+}
+
+/// Runs yt-dlp on `target`. Warnings stay on so that yt-dlp can report a session YouTube ended.
+async fn run(
+    ctx: &MediaContext,
+    target: &str,
+    session: Option<&SessionCopy>,
+    args: &[&str],
+) -> Result<Output, ResolveError> {
+    let mut command = tokio::process::Command::new(ctx.ytdlp.program());
+    command.args(&ctx.config.ytdlp.args.0).args(args);
+    if let Some(session) = session {
+        command.arg("--cookies").arg(session.path());
+    }
+    let output = command
+        .arg("--")
+        .arg(target)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(ResolveError::Spawn)?;
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if let Some(session) = session {
+        ctx.youtube.observe(session, &stderr);
+    }
+    if !output.status.success() {
+        let message = error_line(&stderr);
+        return Err(ResolveError::Extraction {
+            query: target.to_owned(),
+            failure: classify(&message),
+            message,
+        });
+    }
+    Ok(Output {
+        stdout: output.stdout,
+        stderr,
+    })
+}
 
 /// The parts of yt-dlp's info JSON we use; the rest is passed back to yt-dlp untouched.
 #[derive(Debug, Deserialize)]
@@ -219,6 +334,9 @@ struct YtDlpProducer {
     live: bool,
     /// Direct requests to the format's URL are not made before this.
     urls_valid_from: Instant,
+    /// The YouTube session the track was resolved with; its downloads use it too. Rotated
+    /// cookies are merged back when the track is dropped.
+    _session: Option<SessionCopy>,
 }
 
 impl YtDlpProducer {
@@ -228,6 +346,7 @@ impl YtDlpProducer {
         format: &Format,
         live: bool,
         urls_valid_from: Instant,
+        session: Option<SessionCopy>,
     ) -> Self {
         let media = &ctx.config;
         let transport = format
@@ -261,6 +380,12 @@ impl YtDlpProducer {
             );
             if let Some(id) = &format.format_id {
                 args.extend(["-f".to_owned(), id.clone()]);
+            }
+            if let Some(session) = &session {
+                args.extend([
+                    "--cookies".to_owned(),
+                    session.path().to_string_lossy().into_owned(),
+                ]);
             }
             args
         };
@@ -305,6 +430,7 @@ impl YtDlpProducer {
             seek,
             live,
             urls_valid_from,
+            _session: session,
         }
     }
 }
@@ -348,13 +474,15 @@ impl Producer for LiveFfmpeg {
     }
 }
 
-fn last_line(stderr: &[u8]) -> String {
-    String::from_utf8_lossy(stderr)
-        .lines()
+/// The most relevant line of yt-dlp's error output: its last `ERROR:` line, or else the last line.
+fn error_line(stderr: &str) -> String {
+    let mut lines = stderr.lines().map(str::trim).filter(|l| !l.is_empty());
+    lines
+        .clone()
         .rev()
-        .find(|line| !line.trim().is_empty())
+        .find(|l| l.starts_with("ERROR:"))
+        .or_else(|| lines.next_back())
         .unwrap_or("no error output")
-        .trim()
         .to_owned()
 }
 
