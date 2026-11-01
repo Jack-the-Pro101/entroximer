@@ -2,6 +2,7 @@
 //! environment variable, which is how containers are configured.
 
 use std::convert::Infallible;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -166,7 +167,7 @@ pub struct SpotifyConfig {
         env = "ENTROXIMER_SPOTIFY_CLIENT_SECRET",
         hide_env_values = true
     )]
-    pub client_secret: Option<String>,
+    pub client_secret: Option<Secret>,
 
     /// Country whose Spotify catalog is read, as a two-letter code.
     #[arg(
@@ -332,6 +333,40 @@ pub enum LogFormat {
     Json,
 }
 
+/// A setting that must not show up in logs, such as a password: its `Debug` output is redacted.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// The secret itself, for the one place that needs it.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether it is blank, as compose files pass unset variables.
+    pub fn is_blank(&self) -> bool {
+        self.0.trim().is_empty()
+    }
+}
+
+impl FromStr for Secret {
+    type Err = Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::new(s))
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
 /// Whitespace-separated command-line arguments for another program.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExtraArgs(pub Vec<String>);
@@ -341,5 +376,19 @@ impl FromStr for ExtraArgs {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(Self(s.split_whitespace().map(str::to_owned).collect()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secrets_stay_out_of_debug_output() {
+        let secret: Secret = "hunter2".parse().unwrap();
+        assert_eq!(format!("{secret:?}"), "<redacted>");
+        assert_eq!(format!("{:?}", Some(secret.clone())), "Some(<redacted>)");
+        assert_eq!(secret.expose(), "hunter2");
+        assert!(Secret::new("  ").is_blank());
     }
 }

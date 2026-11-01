@@ -16,6 +16,10 @@ use super::{NodeRegistry, ParamError, ParamSpecs};
 
 pub const GRAPH_INPUT: &str = "input";
 pub const GRAPH_OUTPUT: &str = "output";
+/// Most nodes and edges one graph may have. Some nodes hold megabytes of delay lines (a large
+/// reverb about 5 MB), so this bounds what one player's effects can take.
+pub const MAX_NODES: usize = 16;
+pub const MAX_EDGES: usize = 64;
 /// Graphs process interleaved stereo.
 pub const CHANNELS: usize = 2;
 
@@ -134,6 +138,12 @@ impl fmt::Display for Endpoint {
 
 #[derive(Debug, thiserror::Error)]
 pub enum GraphError {
+    #[error("a graph may have at most {max} {what}, got {count}")]
+    TooLarge {
+        what: &'static str,
+        count: usize,
+        max: usize,
+    },
     #[error("the rate must be within {min}..={max}, got {0}", min = RATE_RANGE.start(), max = RATE_RANGE.end())]
     Rate(f32),
     #[error("unknown node type `{0}`")]
@@ -193,6 +203,14 @@ struct Placed {
 impl NodeRegistry {
     /// Validates `spec` and builds its effects, running at `sample_rate`.
     pub fn compile(&self, spec: &GraphSpec, sample_rate: f64) -> Result<Effects, GraphError> {
+        for (what, count, max) in [
+            ("nodes", spec.nodes.len(), MAX_NODES),
+            ("edges", spec.edges.len(), MAX_EDGES),
+        ] {
+            if count > max {
+                return Err(GraphError::TooLarge { what, count, max });
+            }
+        }
         let passes_through = spec.nodes.is_empty() && spec.edges.is_empty();
         let network = if passes_through {
             None
@@ -558,6 +576,13 @@ mod tests {
         assert!(matches!(
             compile(json!({ "rate": 3.0, "nodes": [] })),
             Some(GraphError::Rate(_))
+        ));
+        let crowded: Vec<_> = (0..=MAX_NODES)
+            .map(|i| json!({ "id": format!("n{i}"), "type": "volume" }))
+            .collect();
+        assert!(matches!(
+            compile(json!({ "nodes": crowded })),
+            Some(GraphError::TooLarge { what: "nodes", .. })
         ));
     }
 

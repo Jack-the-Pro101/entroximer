@@ -14,6 +14,7 @@ use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
 
 use super::super::net;
+use crate::config::Secret;
 
 const API: &str = "https://api.spotify.com/v1";
 const API_HOST: &str = "api.spotify.com";
@@ -48,7 +49,7 @@ pub enum SpotifyError {
 #[derive(Debug)]
 pub(super) struct SpotifyApi {
     client_id: String,
-    client_secret: String,
+    client_secret: Secret,
     /// The country whose catalog is read.
     market: String,
     /// Held while it is renewed, so concurrent requests wait for one renewal.
@@ -57,18 +58,23 @@ pub(super) struct SpotifyApi {
 
 #[derive(Debug, Clone)]
 struct Token {
-    value: String,
+    value: Secret,
     renew_at: Instant,
 }
 
 impl SpotifyApi {
-    pub(super) fn new(client_id: String, client_secret: String, market: String) -> Self {
+    pub(super) fn new(client_id: String, client_secret: Secret, market: String) -> Self {
         Self {
             client_id,
             client_secret,
             market,
             token: Mutex::new(None),
         }
+    }
+
+    /// Signs in with the app's credentials, to find out early whether Spotify accepts them.
+    pub(super) async fn check(&self) -> Result<(), SpotifyError> {
+        self.token(true).await.map(drop)
     }
 
     pub(super) async fn track(&self, id: &str) -> Result<Track, SpotifyError> {
@@ -206,11 +212,11 @@ impl SpotifyApi {
             .as_ref()
             .filter(|t| !renew && Instant::now() < t.renew_at)
         {
-            return Ok(current.value.clone());
+            return Ok(current.value.expose().to_owned());
         }
         let response = net::client()
             .post(TOKEN_URL)
-            .basic_auth(&self.client_id, Some(&self.client_secret))
+            .basic_auth(&self.client_id, Some(self.client_secret.expose()))
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body("grant_type=client_credentials")
             .timeout(REQUEST_TIMEOUT)
@@ -233,7 +239,7 @@ impl SpotifyApi {
         let granted: TokenGrant = serde_json::from_slice(&body).map_err(SpotifyError::Json)?;
         let lifetime = Duration::from_secs(granted.expires_in).saturating_sub(TOKEN_MARGIN);
         *token = Some(Token {
-            value: granted.access_token.clone(),
+            value: Secret::new(granted.access_token.clone()),
             renew_at: Instant::now() + lifetime,
         });
         Ok(granted.access_token)
@@ -404,7 +410,7 @@ mod tests {
 
     #[tokio::test]
     async fn never_sends_the_token_off_the_api() {
-        let api = SpotifyApi::new("id".into(), "secret".into(), "US".into());
+        let api = SpotifyApi::new("id".into(), Secret::new("secret"), "US".into());
         let refused = api
             .next_page::<Track>(Some("https://evil.example/v1/next"))
             .await

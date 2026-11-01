@@ -103,7 +103,8 @@ Spotify app; Spotify tracks play from YouTube); `decode` reads `encoded` tracks 
 `buildPreset(name, params?)` returns a preset's graph without applying it. When the
 connection drops, it reconnects and resumes the session: the engine pauses the players
 meanwhile and continues them where they were. If it reconnects after the engine's resume
-timeout, `playersLost` lists the players that are gone. `youtubeSession` reports when the
+timeout, or after the engine restarted, `playersLost` lists the players that are gone; the bot
+leaves their voice channels. `youtubeSession` reports when the
 engine's YouTube session needs fresh cookies.
 
 Failures are `EntroximerError`s with a `code`: the engine's codes (`age_restricted`,

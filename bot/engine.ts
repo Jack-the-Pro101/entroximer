@@ -52,7 +52,7 @@ export async function connectEngine(client: Client<true>): Promise<Engine> {
   manager.on("ready", ({ resumed }) => console.log(`engine connected${resumed ? " (session resumed)" : ""}`));
   manager.on("playersLost", (players) => {
     for (const player of players) {
-      announce(player.guildId, "Reconnected to the engine too late; playback was stopped.");
+      announce(player.guildId, "Lost the engine's player (it restarted, or reconnecting took too long); playback stopped.");
     }
   });
   manager.on("error", (error) => console.error("engine error:", error));

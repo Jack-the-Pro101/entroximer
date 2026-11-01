@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use entroximer_server::api;
-use entroximer_server::config::{MediaConfig, MediaContext};
+use entroximer_server::config::{MediaConfig, MediaContext, Secret};
 use entroximer_server::node::{Node, NodeSettings};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -54,6 +54,7 @@ struct Cli {
 
 struct Engine {
     addr: SocketAddr,
+    node: Arc<Node>,
     _dirs: tempfile::TempDir,
 }
 
@@ -73,7 +74,7 @@ impl Engine {
         let node = Node::new(
             ctx,
             NodeSettings {
-                password: password.map(str::to_owned),
+                password: password.map(Secret::new),
                 player_update_interval: Duration::from_millis(300),
                 stuck_after: Duration::from_secs(10),
                 resume_timeout: Duration::from_secs(30),
@@ -82,8 +83,13 @@ impl Engine {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, api::router(node)).await });
-        Self { addr, _dirs: dirs }
+        let router = api::router(Arc::clone(&node));
+        tokio::spawn(async move { axum::serve(listener, router).await });
+        Self {
+            addr,
+            node,
+            _dirs: dirs,
+        }
     }
 
     async fn connect(
@@ -547,4 +553,54 @@ async fn presets_build_graphs_that_players_apply_and_extend() {
         .await;
     assert_eq!(player["result"]["volume"], 100);
     assert_eq!(player["result"]["graph"], graph);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutting_down_ends_players_and_closes_connections() {
+    let engine = Engine::start(None).await;
+    let mut client = engine.connect(None, None).await.unwrap();
+    client.recv().await;
+    let (_, played) = client
+        .exchange(
+            "player.update",
+            json!({ "guildId": "1", "track": { "query": fixture() } }),
+        )
+        .await;
+    assert!(played["result"]["track"].is_object(), "{played}");
+    let health = format!("http://{}/health", engine.addr);
+    assert_eq!(reqwest::get(&health).await.unwrap().status(), 200);
+
+    engine.node.shutdown().await;
+
+    // the player's end, then a close saying why
+    let mut ends = Vec::new();
+    let close = loop {
+        let message = tokio::time::timeout(Duration::from_secs(5), client.ws.next())
+            .await
+            .expect("the connection closes")
+            .expect("a close frame comes first")
+            .unwrap();
+        match message {
+            Message::Text(text) => {
+                let event: Value = serde_json::from_str(&text).unwrap();
+                if event["event"] == "trackEnd" {
+                    ends.push(event["reason"].clone());
+                }
+            }
+            Message::Close(frame) => break frame.expect("a close frame with a code"),
+            _ => {}
+        }
+    };
+    assert_eq!(ends, [json!("cleanup")]);
+    assert_eq!(u16::from(close.code), 1001, "going away");
+    assert_eq!(close.reason.as_str(), "the engine is shutting down");
+    assert!(
+        engine.connect(None, None).await.is_err(),
+        "no new connections while shutting down"
+    );
+    assert_eq!(
+        reqwest::get(&health).await.unwrap().status(),
+        503,
+        "orchestrators see the engine going away"
+    );
 }

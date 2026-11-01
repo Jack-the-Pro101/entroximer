@@ -26,7 +26,8 @@ mod rate;
 pub use chain::{ChainError, parse_chain};
 pub use effects::Effects;
 pub use graph::{
-    CHANNELS, Edge, Endpoint, GRAPH_INPUT, GRAPH_OUTPUT, GraphError, GraphSpec, NodeSpec,
+    CHANNELS, Edge, Endpoint, GRAPH_INPUT, GRAPH_OUTPUT, GraphError, GraphSpec, MAX_EDGES,
+    MAX_NODES, NodeSpec,
 };
 pub use presets::{PresetDescriptor, PresetError, PresetFactory, PresetRegistry, PresetSelection};
 pub use rate::RATE_RANGE;

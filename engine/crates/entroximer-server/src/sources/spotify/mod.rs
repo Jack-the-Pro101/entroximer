@@ -48,9 +48,12 @@ impl SpotifyProvider {
     /// `None` without credentials: Spotify's API needs an app. Empty ones count as none, as
     /// compose files pass unset variables.
     pub(super) fn new(config: &SpotifyConfig) -> Option<Self> {
-        let given = |value: &Option<String>| value.clone().filter(|v| !v.trim().is_empty());
-        let (Some(id), Some(secret)) = (given(&config.client_id), given(&config.client_secret))
-        else {
+        let id = config.client_id.clone().filter(|id| !id.trim().is_empty());
+        let secret = config
+            .client_secret
+            .clone()
+            .filter(|secret| !secret.is_blank());
+        let (Some(id), Some(secret)) = (id, secret) else {
             return None;
         };
         Some(Self {
@@ -64,6 +67,11 @@ impl SpotifyProvider {
             mirror_searches: config.mirror.clone(),
             mirrors: Expiring::new(REMEMBER_MIRRORS_FOR, REMEMBERED_MIRRORS),
         })
+    }
+
+    /// Whether Spotify accepts the app's credentials.
+    pub(super) async fn check(&self) -> Result<(), SpotifyError> {
+        self.api.check().await
     }
 
     async fn load_album(&self, id: &str, ctx: &MediaContext) -> Result<LoadOutcome, ResolveError> {
@@ -450,6 +458,7 @@ fn describe(track: &TrackInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Secret;
     use crate::sources::spotify::api::Album;
 
     fn link(text: &str) -> Option<Link> {
@@ -535,7 +544,7 @@ mod tests {
         let ctx = MediaContext::new(cli.media).unwrap();
         let provider = SpotifyProvider::new(&SpotifyConfig {
             client_id: Some("unused".into()),
-            client_secret: Some("unused".into()),
+            client_secret: Some(Secret::new("unused")),
             ..cli_defaults()
         })
         .unwrap();

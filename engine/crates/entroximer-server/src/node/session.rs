@@ -20,6 +20,8 @@ use crate::api::protocol::{Event, ServerMessage, SessionSettings, Snowflake};
 
 /// Events kept for a disconnected client; older ones are dropped and counted.
 const BACKLOG_CAPACITY: usize = 1024;
+/// The longest resume timeout a client may ask for.
+const MAX_RESUME_TIMEOUT: Duration = Duration::from_secs(24 * 3600);
 
 pub struct Session {
     pub id: String,
@@ -162,8 +164,10 @@ impl Session {
         }
     }
 
+    /// Applies a client's settings; the result is what took effect.
     pub fn configure(&self, settings: SessionSettings) -> SessionSettings {
-        *lock(&self.resume_timeout) = Duration::from_secs(settings.resume_timeout_secs);
+        *lock(&self.resume_timeout) =
+            Duration::from_secs(settings.resume_timeout_secs).min(MAX_RESUME_TIMEOUT);
         self.settings()
     }
 
@@ -204,9 +208,7 @@ impl Session {
 
     pub(super) async fn destroy(&self) {
         let players: Vec<_> = lock(&self.players).drain().map(|(_, p)| p).collect();
-        for player in players {
-            player.destroy().await;
-        }
+        futures_util::future::join_all(players.iter().map(|player| player.destroy())).await;
     }
 }
 
@@ -275,6 +277,15 @@ mod tests {
             json!({ "type": "event", "event": "youtubeSession", "state": "expired" })
         );
         assert!(session.detached_epoch().is_none());
+    }
+
+    #[test]
+    fn resume_timeouts_are_capped_at_a_day() {
+        let session = Session::new(Snowflake(1), Duration::from_secs(60));
+        let applied = session.configure(SessionSettings {
+            resume_timeout_secs: u64::MAX,
+        });
+        assert_eq!(applied.resume_timeout_secs, 24 * 3600);
     }
 
     #[test]

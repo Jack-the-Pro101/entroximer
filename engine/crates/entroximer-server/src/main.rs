@@ -104,9 +104,13 @@ async fn ytdlp(command: YtdlpCommand, media: &MediaConfig) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Without `RUST_LOG`: songbird reports every player it sets up at `info`, which floods the logs
+/// of a busy engine.
+const DEFAULT_LOG_FILTER: &str = "info,songbird=warn";
+
 fn init_logging(format: LogFormat) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,entroximer_core=info,entroximer=info"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));
     let builder = tracing_subscriber::fmt().with_env_filter(filter);
     match format {
         LogFormat::Pretty => builder.init(),

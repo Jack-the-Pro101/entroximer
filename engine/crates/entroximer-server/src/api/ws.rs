@@ -7,12 +7,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::State;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use bytes::Bytes;
 use entroximer_core::error::display_chain;
 use futures_util::future::try_join_all;
+use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde_json::Value;
@@ -29,6 +30,8 @@ use crate::node::{Node, Session, tracks};
 /// Queue items `queue.get` returns unless asked otherwise, and at most.
 const QUEUE_PAGE: u32 = 100;
 const MAX_QUEUE_PAGE: u32 = 1000;
+/// Largest message a client may send: room for adding a long playlist of encoded tracks.
+const MAX_MESSAGE_BYTES: usize = 4 << 20;
 
 /// How often the engine pings clients. Clients answer pings by themselves (WebSocket
 /// libraries do), so a connection that stays silent this long is gone even if TCP has not
@@ -45,6 +48,9 @@ pub(super) async fn upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, HttpError> {
+    if node.is_closing() {
+        return Err(HttpError::unavailable("the engine is shutting down"));
+    }
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
     let user_id = header("User-Id")
         .and_then(|v| v.parse().ok())
@@ -52,7 +58,13 @@ pub(super) async fn upgrade(
         .ok_or_else(|| HttpError::bad_request("the User-Id header must be the bot's Discord ID"))?;
     let client = header("Client-Name").unwrap_or("unknown").to_owned();
     let resume = header("Session-Id").map(str::to_owned);
-    Ok(ws.on_upgrade(move |socket| connection(node, socket, user_id, client, resume)))
+    Ok(ws
+        .max_message_size(MAX_MESSAGE_BYTES)
+        .max_frame_size(MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| {
+            let tracked = Arc::clone(&node);
+            tracked.track_connection(connection(node, socket, user_id, client, resume))
+        }))
 }
 
 async fn connection(
@@ -65,32 +77,17 @@ async fn connection(
     let (session, resumed) = node.open_session(user_id, resume.as_deref());
     tracing::info!(session = %session.id, %client, resumed, "client connected");
 
-    let (out, mut outgoing) = mpsc::unbounded_channel::<ServerMessage>();
+    let (out, outgoing) = mpsc::unbounded_channel::<ServerMessage>();
     let connection = session.attach(out.clone(), resumed);
-    let (mut sink, mut incoming) = socket.split();
-    let writer = tokio::spawn(async move {
-        let mut pings = tokio::time::interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
-        pings.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        loop {
-            let message = tokio::select! {
-                message = outgoing.recv() => match message {
-                    Some(message) => Message::Text(
-                        serde_json::to_string(&message)
-                            .expect("server messages serialize")
-                            .into(),
-                    ),
-                    None => break,
-                },
-                _ = pings.tick() => Message::Ping(Bytes::new()),
-            };
-            if sink.send(message).await.is_err() {
-                break;
-            }
-        }
-    });
+    let (sink, mut incoming) = socket.split();
+    let writer = tokio::spawn(write(Arc::clone(&node), sink, outgoing));
 
     loop {
-        let message = match tokio::time::timeout(SILENCE_LIMIT, incoming.next()).await {
+        let next = tokio::select! {
+            next = tokio::time::timeout(SILENCE_LIMIT, incoming.next()) => next,
+            () = node.closed() => break,
+        };
+        let message = match next {
             Ok(Some(Ok(message))) => message,
             Ok(Some(Err(_)) | None) => break,
             Err(_) => {
@@ -125,6 +122,59 @@ async fn connection(
         stop_writing.abort();
     }
     tracing::info!(session = %session.id, %client, "client disconnected");
+}
+
+/// Sends the session's messages, and pings, until nothing can send any more, then closes the
+/// connection: normally, or as "going away" when the engine shuts down, after the messages
+/// already queued (such as the players' last events).
+async fn write(
+    node: Arc<Node>,
+    mut sink: SplitSink<WebSocket, Message>,
+    mut outgoing: mpsc::UnboundedReceiver<ServerMessage>,
+) {
+    let text = |message: &ServerMessage| {
+        Message::Text(
+            serde_json::to_string(message)
+                .expect("server messages serialize")
+                .into(),
+        )
+    };
+    let mut pings = tokio::time::interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
+    pings.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        let message = tokio::select! {
+            biased;
+            message = outgoing.recv() => match message {
+                Some(message) => text(&message),
+                None => break,
+            },
+            () = node.closed() => {
+                while let Ok(message) = outgoing.try_recv() {
+                    if sink.send(text(&message)).await.is_err() {
+                        return;
+                    }
+                }
+                break;
+            }
+            _ = pings.tick() => Message::Ping(Bytes::new()),
+        };
+        if sink.send(message).await.is_err() {
+            return;
+        }
+    }
+    let close = if node.is_closing() {
+        CloseFrame {
+            code: close_code::AWAY,
+            reason: "the engine is shutting down".into(),
+        }
+    } else {
+        CloseFrame {
+            code: close_code::NORMAL,
+            reason: "".into(),
+        }
+    };
+    // fails harmlessly when the client closed first
+    let _ = sink.send(Message::Close(Some(close))).await;
 }
 
 async fn handle(
@@ -204,7 +254,7 @@ async fn dispatch(node: &Arc<Node>, session: &Arc<Session>, call: Call) -> Resul
             to_value(
                 player
                     .queue_add(tracks.into_iter().flatten().collect(), params.index)
-                    .await,
+                    .await?,
             )
         }
         Call::RemoveFromQueue(params) => to_value(

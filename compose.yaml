@@ -12,7 +12,7 @@ services:
       # what clients must send as `Authorization`, e.g. from `ENTROXIMER_PASSWORD=...` in a .env
       # file; unset, any client that can reach the port may use the engine
       ENTROXIMER_PASSWORD: ${ENTROXIMER_PASSWORD:-}
-      RUST_LOG: info
+      RUST_LOG: info,songbird=warn
       # yt-dlp is installed and updated by the engine; these tune it:
       # ENTROXIMER_YTDLP_NIGHTLY: "true"            # YouTube fixes arrive in nightly builds first
       # ENTROXIMER_YTDLP_PACKAGE: "yt-dlp[default]==2026.10.26"   # pin a version

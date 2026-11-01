@@ -51,7 +51,7 @@ ENV MALLOC_ARENA_MAX=2 \
     ENTROXIMER_YTDLP_MANAGED=true \
     ENTROXIMER_CACHE_DIR=/var/cache/entroximer \
     ENTROXIMER_LOG_FORMAT=json \
-    RUST_LOG=info
+    RUST_LOG=info,songbird=warn
 # The managed yt-dlp lives in the data volume, so it survives restarts and image upgrades.
 # The packet cache spills to the cache volume: put it on fast disk, never a RAM-backed tmpfs.
 VOLUME ["/var/lib/entroximer", "/var/cache/entroximer"]

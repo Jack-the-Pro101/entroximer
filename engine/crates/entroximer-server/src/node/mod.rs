@@ -7,11 +7,15 @@ pub mod session;
 pub mod tracks;
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use entroximer_core::dsp::{NodeRegistry, PresetRegistry};
+use futures_util::future::join_all;
 use tokio::sync::{OnceCell, broadcast};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 pub use session::Session;
 
@@ -19,14 +23,14 @@ use crate::api::protocol::{
     ApiError, ErrorCode, Event, LoadResult, Millis, NodeInfo, PROTOCOL_VERSION, Snowflake, Stats,
     Track, TrackSelector,
 };
-use crate::config::MediaContext;
+use crate::config::{MediaContext, Secret};
 use crate::managed_ytdlp::YtDlpBinary;
 use tracks::{Loaded, TrackCache, decode_track, with_user_data};
 
 #[derive(Clone, Debug)]
 pub struct NodeSettings {
     /// What clients must send as `Authorization`; `None` lets every client in.
-    pub password: Option<String>,
+    pub password: Option<Secret>,
     pub player_update_interval: Duration,
     /// After waiting this long for media, a track is reported stuck.
     pub stuck_after: Duration,
@@ -47,10 +51,16 @@ pub struct Node {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     system_ytdlp_version: OnceCell<Option<String>>,
     started: Instant,
+    /// Cancelled when the engine shuts down; client connections then close.
+    closing: CancellationToken,
+    /// The client connections, so that shutting down can wait for them to close.
+    connections: TaskTracker,
 }
 
 impl Node {
     const STATS_INTERVAL: Duration = Duration::from_secs(60);
+    /// How long shutting down waits for the last messages to reach clients.
+    const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
     pub fn new(ctx: Arc<MediaContext>, settings: NodeSettings) -> Arc<Self> {
         let node = Arc::new(Self {
@@ -62,6 +72,8 @@ impl Node {
             sessions: Mutex::new(HashMap::new()),
             system_ytdlp_version: OnceCell::new(),
             started: Instant::now(),
+            closing: CancellationToken::new(),
+            connections: TaskTracker::new(),
         });
         tokio::spawn(periodic_events(Arc::downgrade(&node)));
         tokio::spawn(forward_youtube_session(
@@ -102,6 +114,50 @@ impl Node {
                 session.destroy().await;
             }
         });
+    }
+
+    /// Whether the engine is shutting down, and takes no new connections.
+    pub fn is_closing(&self) -> bool {
+        self.closing.is_cancelled()
+    }
+
+    /// A handle that is cancelled once the engine shuts down.
+    pub(crate) fn closing_signal(&self) -> CancellationToken {
+        self.closing.clone()
+    }
+
+    /// Resolves once the engine shuts down.
+    pub(crate) fn closed(&self) -> impl Future<Output = ()> + '_ {
+        self.closing.cancelled()
+    }
+
+    /// Runs a client connection, which shutting down waits for.
+    pub(crate) fn track_connection<F: Future<Output = ()>>(
+        &self,
+        connection: F,
+    ) -> impl Future<Output = ()> + use<F> {
+        self.connections.track_future(connection)
+    }
+
+    /// Ends every session for a shutdown: the players stop and leave voice (their clients get
+    /// `trackEnd` with reason `cleanup`), then every connection closes as "going away", and this
+    /// waits a few seconds for that to reach the clients.
+    pub async fn shutdown(&self) {
+        let sessions: Vec<_> = self
+            .sessions()
+            .drain()
+            .map(|(_, session)| session)
+            .collect();
+        tracing::info!(sessions = sessions.len(), "ending client sessions");
+        join_all(sessions.iter().map(|session| session.destroy())).await;
+        self.closing.cancel();
+        self.connections.close();
+        if tokio::time::timeout(Self::SHUTDOWN_GRACE, self.connections.wait())
+            .await
+            .is_err()
+        {
+            tracing::warn!("some client connections did not close in time");
+        }
     }
 
     pub async fn load(&self, selector: &TrackSelector) -> Result<Loaded, ApiError> {

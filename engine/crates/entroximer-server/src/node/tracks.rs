@@ -256,7 +256,8 @@ pub fn load_error(e: &ResolveError) -> ApiError {
         | ResolveError::Json(..)
         | ResolveError::Session(_)
         | ResolveError::Http { .. }
-        | ResolveError::Probe { .. } => ErrorCode::LoadFailed,
+        | ResolveError::Probe { .. }
+        | ResolveError::Timeout { .. } => ErrorCode::LoadFailed,
     };
     ApiError::new(code, display_chain(e))
 }

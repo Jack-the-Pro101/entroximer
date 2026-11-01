@@ -97,8 +97,24 @@ fn next_track_follows_without_a_gap() {
     bench.deck.play(first);
     bench.deck.set_next(Some(second));
 
-    // let the preloaded track download before the switch
-    std::thread::sleep(Duration::from_millis(500));
+    // the point is that a preloaded track follows without a gap, so wait for its download
+    // (a fixed sleep is not enough on a busy machine)
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let preloaded = |deck: &Deck| {
+        deck.next().is_some_and(|next| {
+            next.player
+                .buffered()
+                .iter()
+                .any(|&(start, end)| start <= at(30.0) && end >= at(30.5))
+        })
+    };
+    while !preloaded(&bench.deck) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the next track never downloaded"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let audio = bench.render(1.5);
 
     assert_eq!(

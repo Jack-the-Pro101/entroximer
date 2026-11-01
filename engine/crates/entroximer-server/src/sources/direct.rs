@@ -349,7 +349,10 @@ impl Probe {
         };
         let output = tokio::time::timeout(PROBE_TIMEOUT, probing)
             .await
-            .map_err(|_| failed("timed out".into()))?
+            .map_err(|_| ResolveError::Timeout {
+                program: "ffprobe",
+                after: PROBE_TIMEOUT,
+            })?
             .map_err(|source| ResolveError::Spawn("ffprobe", source))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

@@ -17,6 +17,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use entroximer_core::error::display_chain;
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
 use crate::node::Node;
@@ -25,8 +26,10 @@ use crate::youtube::{CheckOutcome, SessionStatus, check_session};
 use protocol::{ApiError, ErrorCode};
 
 pub fn router(node: Arc<Node>) -> Router {
+    // all `/health` needs to know is whether the engine is shutting down
+    let closing = node.closing_signal();
     Router::new()
-        .route(HEALTH_PATH, get(|| async { "ok" }))
+        .route(HEALTH_PATH, get(move || health(closing.clone())))
         .route("/v1/info", get(info))
         .route("/v1/ws", get(ws::upgrade))
         .route(
@@ -53,7 +56,7 @@ impl FromRequestParts<Arc<Node>> for Authorized {
             .get(header::AUTHORIZATION)
             .map(|v| v.as_bytes())
             .unwrap_or_default();
-        if constant_time_eq(given, password.as_bytes()) {
+        if constant_time_eq(given, password.expose().as_bytes()) {
             Ok(Self)
         } else {
             Err(HttpError(
@@ -79,6 +82,13 @@ impl HttpError {
         )
     }
 
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::new(ErrorCode::Internal, message),
+        )
+    }
+
     fn internal(message: impl Into<String>) -> Self {
         Self(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -90,6 +100,16 @@ impl HttpError {
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
         (self.0, Json(self.1)).into_response()
+    }
+}
+
+/// `ok` while the engine takes clients; 503 once it is shutting down, so that orchestrators stop
+/// sending it traffic.
+async fn health(closing: CancellationToken) -> (StatusCode, &'static str) {
+    if closing.is_cancelled() {
+        (StatusCode::SERVICE_UNAVAILABLE, "shutting down")
+    } else {
+        (StatusCode::OK, "ok")
     }
 }
 

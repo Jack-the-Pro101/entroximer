@@ -132,8 +132,8 @@ pub enum Call {
     #[serde(rename = "queue.get")]
     GetQueue(GetQueue),
     /// Adds tracks to a player's queue, creating the player if needed. With nothing playing,
-    /// the first item starts, unless playback was stopped and nothing has played since.
-    /// Result: [`QueueAdded`].
+    /// the first item starts, unless playback was stopped and nothing has played since. A queue
+    /// holds at most 10 000 items. Result: [`QueueAdded`].
     #[serde(rename = "queue.add")]
     AddToQueue(AddToQueue),
     /// Removes items; ids not in the queue are ignored. Result: [`QueueState`].
@@ -375,7 +375,7 @@ pub struct VoiceState {
 #[ts(export)]
 pub struct SessionSettings {
     /// How long players stay paused after the connection drops, waiting for the client to resume
-    /// the session; afterwards they are destroyed. 0 destroys them right away.
+    /// the session; afterwards they are destroyed. 0 destroys them right away; at most a day.
     #[ts(type = "number")]
     pub resume_timeout_secs: u64,
 }

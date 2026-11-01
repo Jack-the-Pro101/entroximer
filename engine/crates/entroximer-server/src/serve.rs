@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::api;
-use crate::config::MediaContext;
+use crate::config::{MediaContext, Secret};
 use crate::managed_ytdlp::YtDlpBinary;
 use crate::node::{Node, NodeSettings};
 use crate::youtube;
@@ -37,7 +37,7 @@ pub struct ServeArgs {
     /// Password clients must send as `Authorization`. Without one, any client that can reach
     /// the engine may use it.
     #[arg(long, env = "ENTROXIMER_PASSWORD", hide_env_values = true)]
-    pub password: Option<String>,
+    pub password: Option<Secret>,
 
     /// Seconds between `playerUpdate` events.
     #[arg(long, env = "ENTROXIMER_PLAYER_UPDATE_SECS", default_value_t = 5)]
@@ -61,7 +61,7 @@ pub struct ServeArgs {
 pub async fn run(args: ServeArgs, ctx: Arc<MediaContext>) -> anyhow::Result<()> {
     let addr = SocketAddr::new(args.listen.host, args.listen.port);
     // an empty variable, e.g. from `${ENTROXIMER_PASSWORD:-}` in compose files, means none
-    let password = args.password.filter(|p| !p.is_empty());
+    let password = args.password.filter(|p| !p.is_blank());
     if password.is_none() {
         if addr.ip().is_loopback() {
             tracing::info!("no password set; local clients connect without one");
@@ -79,6 +79,10 @@ pub async fn run(args: ServeArgs, ctx: Arc<MediaContext>) -> anyhow::Result<()> 
         tokio::spawn(async move { managed.maintain(interval).await });
     }
     start_youtube_session(&ctx);
+    tokio::spawn({
+        let ctx = Arc::clone(&ctx);
+        async move { ctx.sources.report().await }
+    });
 
     let node = Node::new(
         Arc::clone(&ctx),
@@ -90,13 +94,17 @@ pub async fn run(args: ServeArgs, ctx: Arc<MediaContext>) -> anyhow::Result<()> 
             preload_lead: Duration::from_secs(args.preload_secs),
         },
     );
-    let app = api::router(node);
+    let app = api::router(Arc::clone(&node));
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("cannot listen on {addr}"))?;
     tracing::info!(%addr, cache_dir = %ctx.work_dir().display(), "engine listening");
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            // upgraded connections are not the server's to wait for: the node closes them
+            node.shutdown().await;
+        })
         .await
         .context("server failed")?;
     tracing::info!("engine stopped");

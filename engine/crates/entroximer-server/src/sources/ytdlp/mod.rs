@@ -306,7 +306,7 @@ impl Provider for YtDlpProvider {
         // searches never carry the YouTube session, keeping the account out of that traffic
         let output = run(
             ctx,
-            &ctx.ytdlp_runs.searches,
+            Purpose::Search,
             &target,
             None,
             &["-J", "--flat-playlist", "--playlist-items", &items],
@@ -380,7 +380,7 @@ async fn extract(
     session: Option<&SessionCopy>,
     args: &[&str],
 ) -> Result<Value, ResolveError> {
-    let output = run(ctx, &ctx.ytdlp_runs.extractions, target, session, args).await?;
+    let output = run(ctx, Purpose::Extraction, target, session, args).await?;
     serde_json::from_slice(&output.stdout).map_err(|e| ResolveError::Json("yt-dlp", e))
 }
 
@@ -392,7 +392,7 @@ pub async fn probe(
 ) -> Result<String, ResolveError> {
     let output = run(
         ctx,
-        &ctx.ytdlp_runs.extractions,
+        Purpose::Extraction,
         video,
         Some(session),
         &["--simulate", "--no-playlist", "--print", "id"],
@@ -406,16 +406,43 @@ struct Output {
     stderr: String,
 }
 
-/// Runs yt-dlp on `target` once it gets one of `turns`. Warnings stay on so that yt-dlp can
+/// What a yt-dlp run is for, which decides whose turns it waits for and how long it may take.
+#[derive(Clone, Copy, Debug)]
+enum Purpose {
+    Search,
+    /// Loading a link, resolving a track to play, or checking the YouTube session.
+    Extraction,
+}
+
+impl Purpose {
+    fn turns(self, ctx: &MediaContext) -> &Semaphore {
+        match self {
+            Self::Search => &ctx.ytdlp_runs.searches,
+            Self::Extraction => &ctx.ytdlp_runs.extractions,
+        }
+    }
+
+    /// Long enough for a playlist of hundreds of entries, or YouTube's JavaScript challenges on a
+    /// slow host; a run that hangs (a stalled connection) would otherwise hold its turn forever.
+    fn timeout(self) -> Duration {
+        match self {
+            Self::Search => Duration::from_secs(30),
+            Self::Extraction => Duration::from_secs(120),
+        }
+    }
+}
+
+/// Runs yt-dlp on `target` once its purpose's turn comes. Warnings stay on so that yt-dlp can
 /// report a session YouTube ended.
 async fn run(
     ctx: &MediaContext,
-    turns: &Semaphore,
+    purpose: Purpose,
     target: &str,
     session: Option<&SessionCopy>,
     args: &[&str],
 ) -> Result<Output, ResolveError> {
-    let _turn = turns
+    let _turn = purpose
+        .turns(ctx)
         .acquire()
         .await
         .expect("the semaphore is never closed");
@@ -424,12 +451,14 @@ async fn run(
     if let Some(session) = session {
         command.arg("--cookies").arg(session.path());
     }
-    let output = command
-        .arg("--")
-        .arg(target)
-        .kill_on_drop(true)
-        .output()
+    // dropped on timeout, which kills the process
+    let running = command.arg("--").arg(target).kill_on_drop(true).output();
+    let output = tokio::time::timeout(purpose.timeout(), running)
         .await
+        .map_err(|_| ResolveError::Timeout {
+            program: "yt-dlp",
+            after: purpose.timeout(),
+        })?
         .map_err(|e| ResolveError::Spawn("yt-dlp", e))?;
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if let Some(session) = session {

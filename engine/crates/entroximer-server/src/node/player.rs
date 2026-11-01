@@ -54,6 +54,8 @@ const PRELOAD_TICK: Duration = Duration::from_millis(500);
 const MAX_FAILURES: u32 = 5;
 /// Percent.
 const MAX_VOLUME: u16 = 1000;
+/// Items one queue may hold.
+const MAX_QUEUE_LENGTH: usize = 10_000;
 
 /// Something for the player's event task.
 pub(super) enum Signal {
@@ -270,12 +272,21 @@ impl GuildPlayer {
 
     /// Adds tracks to the queue at `index` (the end if `None` or past it). With nothing
     /// playing, the first item starts.
-    pub async fn queue_add(&self, tracks: Vec<Track>, index: Option<u32>) -> QueueAdded {
+    pub async fn queue_add(
+        &self,
+        tracks: Vec<Track>,
+        index: Option<u32>,
+    ) -> Result<QueueAdded, ApiError> {
         let _in_order = self.updating.lock().await;
         let items: Vec<QueueItem> = tracks.into_iter().map(QueueItem::new).collect();
         let added = {
             let mut state = self.state();
             let length = state.queue.len();
+            if length + items.len() > MAX_QUEUE_LENGTH {
+                return Err(bad_request(format!(
+                    "a queue holds at most {MAX_QUEUE_LENGTH} items; it has {length}"
+                )));
+            }
             let index = index.map_or(length, |i| i as usize).min(length);
             if !items.is_empty() {
                 // asking for more to play ends a stop, and a wait after failures
@@ -292,7 +303,7 @@ impl GuildPlayer {
             }
         };
         self.settle().await;
-        added
+        Ok(added)
     }
 
     pub async fn queue_remove(&self, ids: &[String]) -> Result<QueueState, ApiError> {

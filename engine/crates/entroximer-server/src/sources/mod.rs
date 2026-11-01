@@ -13,6 +13,7 @@ pub mod ytdlp;
 
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use entroximer_core::producer::Producer;
 use serde::{Deserialize, Serialize};
@@ -120,6 +121,11 @@ pub enum ResolveError {
     HttpStatus { url: String, status: u16 },
     #[error("ffprobe cannot read `{target}`: {message}")]
     Probe { target: String, message: String },
+    #[error("{program} took longer than {} s", after.as_secs())]
+    Timeout {
+        program: &'static str,
+        after: Duration,
+    },
     #[error(transparent)]
     Spotify(#[from] SpotifyError),
     #[error("found no recording of `{0}` on YouTube")]

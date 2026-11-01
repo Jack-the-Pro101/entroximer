@@ -87,6 +87,8 @@ pub struct SearchOutcome {
 /// Every provider, in the order URLs are offered to them.
 pub struct Sources {
     providers: Vec<Arc<dyn Provider>>,
+    /// Also among `providers`, for its startup check.
+    spotify: Option<Arc<SpotifyProvider>>,
     default_search: String,
     local_files: bool,
 }
@@ -97,11 +99,9 @@ impl Sources {
             .into_iter()
             .map(|site| Arc::new(site) as Arc<dyn Provider>)
             .collect();
-        match SpotifyProvider::new(spotify) {
-            Some(spotify) => providers.push(Arc::new(spotify)),
-            None => tracing::debug!(
-                "Spotify is off: set ENTROXIMER_SPOTIFY_CLIENT_ID and ENTROXIMER_SPOTIFY_CLIENT_SECRET"
-            ),
+        let spotify = SpotifyProvider::new(spotify).map(Arc::new);
+        if let Some(spotify) = &spotify {
+            providers.push(Arc::clone(spotify) as Arc<dyn Provider>);
         }
         providers.push(Arc::new(HttpProvider::new()));
         providers.push(Arc::new(YtDlpProvider::generic()));
@@ -110,8 +110,32 @@ impl Sources {
         }
         Self {
             providers,
+            spotify,
             default_search: config.default_search.clone(),
             local_files: config.allow_local_files,
+        }
+    }
+
+    /// Logs the providers, and whether Spotify accepts the configured app, so that operators
+    /// learn of a mistake at startup rather than from the first user who tries.
+    pub async fn report(&self) {
+        let names: Vec<&str> = self
+            .providers
+            .iter()
+            .map(|p| p.descriptor().name.as_str())
+            .collect();
+        tracing::info!(providers = %names.join(", "), "sources");
+        match &self.spotify {
+            None => tracing::info!(
+                "Spotify is off; set ENTROXIMER_SPOTIFY_CLIENT_ID and ENTROXIMER_SPOTIFY_CLIENT_SECRET to enable it"
+            ),
+            Some(spotify) => match spotify.check().await {
+                Ok(()) => tracing::info!("Spotify accepts the app's credentials"),
+                Err(e) => tracing::warn!(
+                    error = %entroximer_core::error::display_chain(&e),
+                    "Spotify links and searches will fail"
+                ),
+            },
         }
     }
 

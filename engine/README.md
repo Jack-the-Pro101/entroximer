@@ -92,6 +92,16 @@ receives the events it could not get meanwhile (periodic ones excepted) and each
 state; otherwise the players are destroyed. Playback also holds its position while the voice
 connection to Discord reconnects.
 
+The engine bounds what one client can make it hold: messages up to 4 MiB, queues up to 10 000
+items, graphs up to 16 nodes and 64 edges, and resume timeouts up to a day. A request that
+asks for more is refused with `bad_request`.
+
+When the engine shuts down (`SIGTERM`, `SIGINT`), `/health` answers 503, new connections are
+refused, every player ends (clients get `trackEnd` with reason `cleanup`) and leaves its voice
+channel, and each connection then closes with code 1001 ("going away"). Clients reconnect, find
+their session gone after the restart, and start over; the TypeScript client reports this as
+`playersLost`.
+
 ## Sources
 
 Tracks carry the same metadata wherever they come from: title, author (and its link), album,
@@ -123,7 +133,8 @@ artists, album, artwork, ISRC and link; only their length becomes that of what p
 
 1. Create an app at <https://developer.spotify.com/dashboard> (its owner needs Spotify Premium)
    and give the engine its credentials: `ENTROXIMER_SPOTIFY_CLIENT_ID` and
-   `ENTROXIMER_SPOTIFY_CLIENT_SECRET`. Without them there is no `spotify` provider.
+   `ENTROXIMER_SPOTIFY_CLIENT_SECRET`. Without them there is no `spotify` provider. At startup
+   the engine logs its providers and whether Spotify accepts the credentials.
 2. Optionally set `ENTROXIMER_SPOTIFY_MARKET` (the country whose catalog is read, `US` by default).
 
 A track is matched when it is first played or preloaded: the searches of `ENTROXIMER_SPOTIFY_MIRROR`
@@ -282,7 +293,7 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_YTDLP_ARGS` | | Extra yt-dlp arguments, e.g. `--extractor-args youtube:formats=duplicate` |
 | `ENTROXIMER_YTDLP_MAX_RUNS` | `2` | yt-dlp runs at once, counted separately for searches; downloads do not count |
 | `ENTROXIMER_LOG_FORMAT` | `pretty` | `json` for log collectors |
-| `RUST_LOG` | `info` | Log verbosity, e.g. `entroximer_core=debug` |
+| `RUST_LOG` | `info,songbird=warn` | Log verbosity, e.g. `info,entroximer_core=debug` |
 
 Each running engine works in its own `run-*` directory inside the cache directory and removes it
 on exit; directories left by a crashed engine are cleaned up by the next one to start.

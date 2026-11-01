@@ -52,7 +52,10 @@ type ManagerEvents = {
   stats: [stats: Stats];
   /** The engine's YouTube session changed, e.g. it expired and needs fresh cookies. */
   youtubeSession: [state: SessionState];
-  /** The client reconnected too late: the engine had destroyed these players. */
+  /**
+   * The client reconnected too late, or the engine restarted: these players are gone, and the bot
+   * has left their voice channels.
+   */
   playersLost: [players: Player[]];
   /** A background request failed. */
   error: [error: EntroximerError];
@@ -179,9 +182,13 @@ export class Entroximer extends Emitter<ManagerEvents> {
 
   #onReady(info: ReadyInfo): void {
     if (this.#connectedBefore && !info.resumed && this.#players.size > 0) {
+      // e.g. the engine restarted: its players are gone, so the bot leaves their channels too
       const lost = [...this.#players.values()];
       this.#players.clear();
       for (const player of lost) {
+        if (player.channelId !== null) {
+          this.#joinVoice(player.guildId, null, {});
+        }
         player._markDestroyed();
       }
       this.emit("playersLost", lost);

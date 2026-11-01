@@ -3,6 +3,6 @@
 export type SessionSettings = { 
 /**
  * How long players stay paused after the connection drops, waiting for the client to resume
- * the session; afterwards they are destroyed. 0 destroys them right away.
+ * the session; afterwards they are destroyed. 0 destroys them right away; at most a day.
  */
 resumeTimeoutSecs: number, };

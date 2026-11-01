@@ -120,7 +120,7 @@ impl Harness {
     }
 
     async fn add(&mut self, tracks: Vec<Track>, index: Option<u32>) {
-        let added = self.player.queue_add(tracks, index).await;
+        let added = self.player.queue_add(tracks, index).await.unwrap();
         for item in added.items {
             self.names.insert(item.id, item.track.info.title);
         }
