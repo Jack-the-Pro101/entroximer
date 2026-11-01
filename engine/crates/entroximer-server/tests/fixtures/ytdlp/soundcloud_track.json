@@ -1,0 +1,73 @@
+{
+ "uploader": "Aether",
+ "uploader_url": "https://soundcloud.com/clement-jonathan",
+ "title": "Fallen Kingdom - A Minecraft Parody",
+ "track": "Fallen Kingdom - A Minecraft Parody",
+ "duration": 287.735,
+ "webpage_url": "https://soundcloud.com/clement-jonathan/fallen-kingdom-a-minecraft",
+ "id": "98537568",
+ "thumbnails": [
+  {
+   "url": "https://i1.sndcdn.com/artworks-000051532669-8koemc-mini.jpg",
+   "width": 16,
+   "height": 16,
+   "id": "mini"
+  },
+  {
+   "url": "https://i1.sndcdn.com/artworks-000051532669-8koemc-tiny.jpg",
+   "width": 20,
+   "height": 20,
+   "id": "tiny"
+  },
+  {
+   "url": "https://i1.sndcdn.com/artworks-000051532669-8koemc-small.jpg",
+   "width": 32,
+   "height": 32,
+   "id": "small"
+  },
+  {
+   "url": "https://i1.sndcdn.com/artworks-000051532669-8koemc-badge.jpg",
+   "width": 47,
+   "height": 47,
+   "id": "badge"
+  },
+  {
+   "url": "https://i1.sndcdn.com/artworks-000051532669-8koemc-t67x67.jpg",
+   "width": 67,
+   "height": 67,
+   "id": "t67x67"
+  },
+  {
+   "url": "https://i1.sndcdn.com/artworks-000051532669-8koemc-large.jpg",
+   "width": 100,
+   "height": 100,
+   "id": "large"
+  },
+  {
+   "url": "https://i1.sndcdn.com/artworks-000051532669-8koemc-t300x300.jpg",
+   "width": 300,
+   "height": 300,
+   "id": "t300x300"
+  },
+  {
+   "url": "https://i1.sndcdn.com/artworks-000051532669-8koemc-crop.jpg",
+   "width": 400,
+   "height": 400,
+   "id": "crop"
+  },
+  {
+   "url": "https://i1.sndcdn.com/artworks-000051532669-8koemc-t500x500.jpg",
+   "width": 500,
+   "height": 500,
+   "id": "t500x500"
+  },
+  {
+   "url": "https://i1.sndcdn.com/artworks-000051532669-8koemc-original.jpg",
+   "preference": 10,
+   "id": "original"
+  }
+ ],
+ "extractor_key": "Soundcloud",
+ "thumbnail": "https://i1.sndcdn.com/artworks-000051532669-8koemc-original.jpg",
+ "_type": "video"
+}

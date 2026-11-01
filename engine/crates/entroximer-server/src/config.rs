@@ -11,9 +11,11 @@ use clap::builder::BoolishValueParser;
 use clap::{Args, ValueEnum};
 use entroximer_core::player::PlayerConfig;
 use entroximer_core::timeline::{RetentionConfig, SpillConfig};
+use tokio::sync::Semaphore;
 
 use crate::cache::CacheDir;
 use crate::managed_ytdlp::{ManagedYtDlp, YtDlpBinary};
+use crate::sources::Sources;
 use crate::youtube::{AuthPolicy, YouTube};
 
 const MIB: u64 = 1 << 20;
@@ -26,6 +28,9 @@ pub struct MediaConfig {
     #[command(flatten)]
     pub youtube: YouTubeConfig,
 
+    #[command(flatten)]
+    pub sources: SourcesConfig,
+
     /// Persistent state such as the managed yt-dlp. Defaults to `$XDG_DATA_HOME/entroximer`.
     #[arg(long, env = "ENTROXIMER_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
@@ -33,6 +38,10 @@ pub struct MediaConfig {
     /// ffmpeg executable.
     #[arg(long, env = "ENTROXIMER_FFMPEG", default_value = "ffmpeg")]
     pub ffmpeg: String,
+
+    /// ffprobe executable, which reads the tags of direct links and local files.
+    #[arg(long, env = "ENTROXIMER_FFPROBE", default_value = "ffprobe")]
+    pub ffprobe: String,
 
     /// Directory for the packet cache and in-progress downloads. Put it on fast disk, never on
     /// a RAM-backed tmpfs. Defaults to `entroximer` in the system temp directory.
@@ -100,6 +109,44 @@ pub struct YtDlpConfig {
     /// (e.g. `--extractor-args youtube:formats=duplicate`).
     #[arg(long = "ytdlp-args", env = "ENTROXIMER_YTDLP_ARGS", default_value = "")]
     pub args: ExtraArgs,
+
+    /// yt-dlp runs (searches, and loading tracks) at once, counted separately for searches so
+    /// that searching as users type never holds up playback. Each run is a Python process,
+    /// with a JavaScript runtime for YouTube, that peaks at 50 to 350 MB. Downloads do not count.
+    #[arg(
+        long = "ytdlp-max-runs",
+        env = "ENTROXIMER_YTDLP_MAX_RUNS",
+        default_value_t = 2
+    )]
+    pub max_runs: usize,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct SourcesConfig {
+    /// Search for queries that are neither links nor `prefix:terms`, as a search prefix.
+    #[arg(
+        long = "default-search",
+        env = "ENTROXIMER_DEFAULT_SEARCH",
+        default_value = "ytsearch"
+    )]
+    pub default_search: String,
+
+    /// Most tracks loaded from one playlist.
+    #[arg(
+        long = "playlist-limit",
+        env = "ENTROXIMER_PLAYLIST_LIMIT",
+        default_value_t = 500
+    )]
+    pub playlist_limit: u32,
+
+    /// Let clients play files on the engine's host by their path.
+    #[arg(long = "allow-local-files", env = "ENTROXIMER_ALLOW_LOCAL_FILES", value_parser = BoolishValueParser::new())]
+    pub allow_local_files: bool,
+
+    /// Let clients make the engine fetch links to this machine or private networks, e.g. a
+    /// media server on the LAN.
+    #[arg(long = "allow-private-urls", env = "ENTROXIMER_ALLOW_PRIVATE_URLS", value_parser = BoolishValueParser::new())]
+    pub allow_private_urls: bool,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -170,8 +217,18 @@ impl MediaConfig {
 pub struct MediaContext {
     pub config: MediaConfig,
     pub ytdlp: YtDlpBinary,
+    pub ytdlp_runs: YtDlpRuns,
     pub youtube: YouTube,
+    pub sources: Sources,
     cache: CacheDir,
+}
+
+/// Turns for yt-dlp runs; see [`YtDlpConfig::max_runs`].
+#[derive(Debug)]
+pub struct YtDlpRuns {
+    pub searches: Semaphore,
+    /// Loading links, resolving tracks to play, and checking the YouTube session.
+    pub extractions: Semaphore,
 }
 
 impl MediaContext {
@@ -182,15 +239,23 @@ impl MediaContext {
         } else {
             YtDlpBinary::System(config.ytdlp.program.clone())
         };
+        let runs = config.ytdlp.max_runs.max(1);
+        let ytdlp_runs = YtDlpRuns {
+            searches: Semaphore::new(runs),
+            extractions: Semaphore::new(runs),
+        };
         let youtube = YouTube::new(
             config.data_root().join("youtube"),
             config.youtube.auth,
             config.youtube.check_video.clone(),
         );
+        let sources = Sources::new(&config.sources);
         Ok(Self {
             config,
             ytdlp,
+            ytdlp_runs,
             youtube,
+            sources,
             cache,
         })
     }

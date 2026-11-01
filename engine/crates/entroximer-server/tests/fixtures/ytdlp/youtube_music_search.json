@@ -1,0 +1,23 @@
+{
+ "id": "viva la vida - songs",
+ "title": "viva la vida - songs",
+ "_type": "playlist",
+ "webpage_url": "https://music.youtube.com/search?q=viva+la+vida#songs",
+ "extractor_key": "YoutubeMusicSearchURL",
+ "entries": [
+  {
+   "title": "Viva La Vida",
+   "ie_key": "Youtube",
+   "id": "ALsvdSA9tOU",
+   "_type": "url",
+   "url": "https://music.youtube.com/watch?v=ALsvdSA9tOU"
+  },
+  {
+   "title": "Viva La Vida",
+   "ie_key": "Youtube",
+   "id": "HGorCGszxZU",
+   "_type": "url",
+   "url": "https://music.youtube.com/watch?v=HGorCGszxZU"
+  }
+ ]
+}

@@ -1,20 +1,21 @@
 # Entroximer engine
 
 The Rust audio engine: loads tracks (yt-dlp, ffmpeg), caches and seeks them, runs effect graphs
-and will stream to Discord voice through a Lavalink v4 compatible API.
+and plays them into Discord voice channels, controlled by bots over a WebSocket protocol inspired
+by (but not compatible with) Lavalink v4.
 
 ## Layout
 
 | Crate | Contents |
 |---|---|
-| `crates/entroximer-core` | Producers, the packet timeline, demuxing/decoding, DSP graphs, the player |
-| `crates/entroximer-server` | The `entroximer` binary: configuration, track sources, `serve` and `render` |
+| `crates/entroximer-core` | Producers, the packet timeline, demuxing/decoding, DSP graphs, the player, the gapless deck |
+| `crates/entroximer-server` | The `entroximer` binary: configuration, track sources, the client API, voice, `serve` and `render` |
 
 ## Commands
 
 ```sh
-# the engine server (currently the health endpoint; the Lavalink API builds on it)
-cargo run -p entroximer-server -- serve
+# the engine server; with a password, clients must send it
+ENTROXIMER_PASSWORD=change-me cargo run -p entroximer-server -- serve
 
 # play a track through the whole pipeline into a WAV file
 cargo run -p entroximer-server -- render "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
@@ -45,6 +46,90 @@ podman exec <container> entroximer ytdlp update
 Use `ENTROXIMER_YTDLP_NIGHTLY=true` to follow nightly builds, which get YouTube fixes first, pin
 with `ENTROXIMER_YTDLP_PACKAGE='yt-dlp[default]==<version>'`, or try a test build such as
 yt-dlp's SABR branch with `ENTROXIMER_YTDLP_PACKAGE='yt-dlp[default] @ git+https://...'`.
+
+## Client protocol
+
+Bots talk to the engine over one WebSocket, `/v1/ws`, sending the headers `User-Id` (the bot's
+Discord ID), `Authorization` (the engine's password, if it has one) and optionally `Client-Name`
+and `Session-Id` (to resume). The same connection carries requests, their responses and events, in
+order: the events a request causes always arrive before its response.
+
+```json
+→ {"id": 1, "op": "queue.add", "params": {"guildId": "123", "tracks": [{"query": "ytsearch:..."}]}}
+← {"type": "event", "event": "queueChanged", "guildId": "123", "version": 1, "change": {"type": "added", ...}}
+← {"type": "response", "id": 1, "result": {...}}
+← {"type": "event", "event": "trackStart", "guildId": "123", "track": {...}, "itemId": "..."}
+```
+
+| `op` | Does |
+|---|---|
+| `tracks.load` | Loads a link, a search (`ytsearch:terms`, or plain text with the default search) or, if allowed, a local path: a `track`, a `playlist`, `search` results or `empty` |
+| `tracks.search` | Searches one source by its prefix (`ytsearch`, `ytmsearch`, `scsearch`), up to 50 results |
+| `tracks.decode` | Reads tracks back from their `encoded` form |
+| `player.update` | Creates or changes a guild's player: `track` (plays now; `null` stops), `position`, `endTime`, `paused`, `volume`, `graph` (effects), `voice` |
+| `player.get` / `player.destroy` | Reads a player, or stops it and leaves the voice channel |
+| `queue.get` | A page of a player's queue |
+| `queue.add` | Adds tracks (encoded, or queries to load) at an index; with nothing playing, the first item starts |
+| `queue.remove` / `queue.move` / `queue.clear` / `queue.shuffle` | Edit the queue |
+| `queue.skip` | Plays the next item (or `toItem`), instantly if it is prepared |
+| `queue.configure` | Sets `repeat`: `off`, `track` or `queue` |
+| `session.configure` | Sets how long players wait, paused, for a disconnected client to resume |
+| `node.info` / `node.stats` | Versions, sources and their searches, effect node types, the YouTube session state; load and cache usage |
+
+Events: `trackStart`, `trackEnd` (with a reason), `trackError` and `trackStuck`, each with the
+track's queue `itemId`; `queueChanged` (one change, numbered by `version`) and `queueEnd`;
+`playerUpdate` (position, buffered ranges, buffering, connection; every few seconds and on
+changes), `voiceClosed`, `stats` and `youtubeSession`. Errors carry stable codes such as
+`age_restricted`, `sign_in_required`, `unavailable` or `no_results`.
+
+When a client's connection drops, its players pause where they are. The engine pings every
+client every 20 s, so a connection that silently died (say, the bot's network went away) counts as
+dropped after a minute without an answer; WebSocket libraries answer pings by themselves. If it
+reconnects with its
+`Session-Id` within the resume timeout, playback continues from the same position, the client
+receives the events it could not get meanwhile (periodic ones excepted) and each player's current
+state; otherwise the players are destroyed. Playback also holds its position while the voice
+connection to Discord reconnects.
+
+## Sources
+
+Tracks carry the same metadata wherever they come from: title, author (and its link), album,
+length, artwork, ISRC, whether they are streams or seekable, and their source. Search results
+and playlist entries come from quick listings and are resolved only when they play; resolving
+can fill in more (e.g. a YouTube Music result's artist and length), which reaches clients as a
+queue update.
+
+| Source | Links | Search |
+|---|---|---|
+| `youtube` | youtube.com, youtu.be, music.youtube.com; videos and playlists | `ytsearch`, `ytmsearch` (YouTube Music songs) |
+| `soundcloud` | soundcloud.com tracks and sets | `scsearch` |
+| `newgrounds`, `bandcamp` | their track and collection pages | |
+| `http` | Direct links to audio files and internet radio (MP3, Ogg, FLAC, WAV, M4A, HLS, ...), described from their tags | |
+| `generic` | Any other page yt-dlp can extract | |
+| `local` | Files on the engine's host; only with `ENTROXIMER_ALLOW_LOCAL_FILES` | |
+
+Everything but `http` and `local` goes through yt-dlp. `http` and `generic` refuse links to the
+engine's own machine and private networks (unless `ENTROXIMER_ALLOW_PRIVATE_URLS`), so clients
+cannot use the engine to reach internal services. Newgrounds currently refuses automated
+requests; it works as far as Newgrounds lets it.
+
+## Queues
+
+Each player plays its queue by itself. Once the current track has less than
+`ENTROXIMER_PRELOAD_SECS` left, the engine resolves the next item and starts downloading it, so
+it follows without a gap, whatever the client does meanwhile; if the queue changes so that
+another item comes next, that one is prepared instead. Items leave the queue when they start.
+Repeating a `track` plays it again; repeating the `queue` sends finished tracks to its end.
+
+An item that fails to load is reported with `trackError` and removed, and the queue goes on;
+after five failures in a row it waits until the client changes something. Clients mirror the
+queue from `queueChanged` events and fetch it again (`queue.get`) when a version is skipped.
+Queues live in memory: they survive client reconnects but not engine restarts.
+
+Plain HTTP serves `/health`, `GET /v1/info` and `GET|PUT|DELETE /v1/youtube/session` (the
+cookies.txt as the `PUT` body). The protocol's types are in
+`crates/entroximer-server/src/api/protocol.rs`; `cargo test` exports them as TypeScript to
+`client/src/generated`.
 
 ## Signing in to YouTube
 
@@ -86,10 +171,21 @@ time in a per-track *timeline*, and all seeking happens there:
 
 ## Memory and disk
 
-Packets spill to anonymous files in the cache directory as they arrive; RAM only holds a window
-around the playhead plus a small index. The window reaches `ENTROXIMER_FORWARD_BIAS` times
-further ahead than behind, and the same bias decides what is evicted first when a cap is
-reached. When the cache is full the download pauses rather than being thrown away.
+Packets are stored in blocks of about a second, which spill to anonymous files in the cache
+directory as they complete. RAM only holds a window around the playhead plus an index of the
+blocks: about 3 MB for ten hours of audio, which is downloaded to disk as fast as the source
+allows (about 640 MB for ten hours of YouTube Opus). The window reaches
+`ENTROXIMER_FORWARD_BIAS` times further ahead than behind, and the same bias decides what is
+evicted first when a cap is reached. When the cache is full the download pauses rather than
+being thrown away.
+
+yt-dlp runs as a separate process for every search and every track it loads; with YouTube's
+JavaScript challenges, one peaks at up to 350 MB. `ENTROXIMER_YTDLP_MAX_RUNS` bounds how many run
+at once, separately for searches, so that searching as users type never holds up playback.
+
+glibc keeps memory the engine freed in one arena per thread, so without a limit the engine's
+memory grows with every track played. The container image, the Nix package and the dev shell
+set `MALLOC_ARENA_MAX=2`; set it too wherever you run the binary yourself.
 
 ## Configuration
 
@@ -97,24 +193,34 @@ Every option is a flag or an environment variable (`entroximer --help`).
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `ENTROXIMER_PASSWORD` | none | What clients must send as `Authorization`; without it any client that can reach the engine may use it |
 | `ENTROXIMER_HOST` / `ENTROXIMER_PORT` | `127.0.0.1` / `2333` | Listen address (`0.0.0.0` in the image) |
+| `ENTROXIMER_PLAYER_UPDATE_SECS` | `5` | Interval of `playerUpdate` events |
+| `ENTROXIMER_STUCK_MS` | `10000` | Wait for media after which a track is reported stuck |
+| `ENTROXIMER_RESUME_TIMEOUT_SECS` | `60` | How long a disconnected client's players wait, paused, before they are destroyed |
+| `ENTROXIMER_PRELOAD_SECS` | `30` | How long before a track ends the next item of the queue starts loading |
+| `ENTROXIMER_DEFAULT_SEARCH` | `ytsearch` | Search for queries that are neither links nor prefixed |
+| `ENTROXIMER_PLAYLIST_LIMIT` | `500` | Most tracks loaded from one playlist |
+| `ENTROXIMER_ALLOW_LOCAL_FILES` | off | Let clients play files on the engine's host |
+| `ENTROXIMER_ALLOW_PRIVATE_URLS` | off | Let clients play links to private networks, e.g. a media server on the LAN |
 | `ENTROXIMER_CACHE_DIR` | `$TMPDIR/entroximer` | Spilled packets and downloads; keep it on fast disk, not tmpfs |
 | `ENTROXIMER_NO_SPILL` | off | Keep the cache in RAM only |
 | `ENTROXIMER_MEMORY_BEHIND_SECS` | `15` | Seconds kept in RAM behind the playhead |
 | `ENTROXIMER_FORWARD_BIAS` | `4` | How much more is kept ahead than behind |
 | `ENTROXIMER_MEMORY_MAX_MB` / `ENTROXIMER_DISK_MAX_MB` | `8` / `1024` | Per-track caps |
-| `ENTROXIMER_DATA_DIR` | `$XDG_DATA_HOME/entroximer` | Persistent state: the managed yt-dlp |
+| `ENTROXIMER_DATA_DIR` | `$XDG_DATA_HOME/entroximer` | Persistent state: the managed yt-dlp and the YouTube session |
 | `ENTROXIMER_YTDLP_MANAGED` | off (on in the image) | Let the engine install and update yt-dlp |
 | `ENTROXIMER_YTDLP_PACKAGE` | `yt-dlp[default]` | pip requirement for the managed install |
 | `ENTROXIMER_YTDLP_NIGHTLY` | off | Install nightly builds |
 | `ENTROXIMER_YTDLP_UPDATE_HOURS` | `24` | Update check interval; `0` installs once and never updates |
-| `ENTROXIMER_YTDLP`, `ENTROXIMER_FFMPEG` | `yt-dlp`, `ffmpeg` | Executables (`ENTROXIMER_YTDLP` only when not managed) |
+| `ENTROXIMER_YTDLP`, `ENTROXIMER_FFMPEG`, `ENTROXIMER_FFPROBE` | `yt-dlp`, `ffmpeg`, `ffprobe` | Executables (`ENTROXIMER_YTDLP` only when not managed) |
 | `ENTROXIMER_PYTHON` | `python3` | Python used for the managed install |
 | `ENTROXIMER_YOUTUBE_AUTH` | `fallback` | When to send the YouTube session: `fallback`, `always`, `never` |
 | `ENTROXIMER_YOUTUBE_COOKIES_FILE` | | cookies.txt imported whenever it changes, e.g. a secret |
 | `ENTROXIMER_YOUTUBE_CHECK_HOURS` | `12` | Session check interval; `0` disables it |
 | `ENTROXIMER_YOUTUBE_CHECK_VIDEO` | an age-restricted video | Video used to check the session |
 | `ENTROXIMER_YTDLP_ARGS` | | Extra yt-dlp arguments, e.g. `--extractor-args youtube:formats=duplicate` |
+| `ENTROXIMER_YTDLP_MAX_RUNS` | `2` | yt-dlp runs at once, counted separately for searches; downloads do not count |
 | `ENTROXIMER_LOG_FORMAT` | `pretty` | `json` for log collectors |
 | `RUST_LOG` | `info` | Log verbosity, e.g. `entroximer_core=debug` |
 
@@ -125,7 +231,7 @@ on exit; directories left by a crashed engine are cleaned up by the next one to 
 
 ```sh
 podman build -t entroximer-engine .            # or: docker build -f Containerfile -t entroximer-engine .
-podman compose up --build                      # from the repository root, using compose.yaml
+podman compose up --build                      # from the repository root; set ENTROXIMER_PASSWORD to require one
 ```
 
 The image runs as an unprivileged user under `tini`, listens on port 2333, logs JSON, shuts down
@@ -136,8 +242,12 @@ hosts add `:Z` to bind mounts. yt-dlp is not in the image, so YouTube fixes neve
 
 ## Development
 
+`nix develop` (or `nix-shell`) in the repository root provides the toolchain and every tool the
+engine runs; elsewhere, install Rust, pkg-config, libopus, ffmpeg (with libopus), yt-dlp and Deno.
+
 ```sh
-cargo test --workspace                       # needs ffmpeg with libopus for the pipeline tests
+cargo test --workspace                       # needs ffmpeg with libopus for the media tests
 cargo clippy --workspace --all-targets
 RUST_LOG=entroximer_core=debug cargo test    # shows producer and seeking decisions
+nix build                                    # the engine as a Nix package, tests included
 ```

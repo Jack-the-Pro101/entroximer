@@ -6,6 +6,10 @@ edition.workspace = true
 [lints]
 workspace = true
 
+[features]
+# TypeScript bindings for the client protocol (used by entroximer-server)
+ts = ["dep:ts-rs"]
+
 [dependencies]
 bytes.workspace = true
 fundsp.workspace = true
@@ -21,6 +25,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+ts-rs = { workspace = true, optional = true }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

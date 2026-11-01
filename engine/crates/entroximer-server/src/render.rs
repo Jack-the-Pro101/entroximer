@@ -16,7 +16,6 @@ use tokio::runtime::Handle;
 
 use crate::config::MediaContext;
 use crate::managed_ytdlp::{YtDlpBinary, log_outcome};
-use crate::sources;
 
 const BLOCK_FRAMES: usize = 960;
 const CHANNELS: usize = 2;
@@ -58,10 +57,19 @@ pub async fn run(args: RenderArgs, ctx: &MediaContext) -> anyhow::Result<()> {
         tracing::info!("installing yt-dlp");
         log_outcome(&managed.update().await.context("cannot install yt-dlp")?);
     }
-    let track = sources::resolve(&args.input, ctx)
+    let track = ctx
+        .sources
+        .resolve_query(&args.input, ctx)
         .await
         .with_context(|| format!("cannot load `{}`", args.input))?;
-    tracing::info!(title = %track.info.title, author = %track.info.author, caps = ?track.producer.caps(), "rendering");
+    let info = &track.track.info;
+    tracing::info!(
+        title = %info.title,
+        author = info.author.as_deref().unwrap_or("unknown"),
+        source = %info.source_name,
+        caps = ?track.producer.caps(),
+        "rendering"
+    );
 
     let player_cfg = ctx.player_config();
     let rt = Handle::current();

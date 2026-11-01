@@ -14,7 +14,7 @@ use tokio::process::{Child, ChildStderr};
 use tokio::task::JoinHandle;
 use tokio_util::io::ReaderStream;
 
-use super::{Producer, ProducerCaps, ProducerStream, TimestampMode};
+use super::{Producer, ProducerCaps, ProducerStream, READ_CHUNK, TimestampMode};
 use crate::timeline::Ticks;
 
 #[derive(Clone, Debug)]
@@ -127,7 +127,7 @@ async fn collect_stderr(stderr: ChildStderr, program: Arc<str>) -> String {
 pub fn stdout_stream(spec: &ProcessSpec) -> io::Result<BoxStream<'static, io::Result<Bytes>>> {
     let mut proc = spec.spawn(Stdio::piped())?;
     let stdout = proc.child.stdout.take().expect("stdout is piped");
-    let state = (ReaderStream::new(stdout), proc, false);
+    let state = (ReaderStream::with_capacity(stdout, READ_CHUNK), proc, false);
     Ok(
         futures_util::stream::unfold(state, |(mut out, mut proc, done)| async move {
             if done {

@@ -15,7 +15,7 @@ use futures_util::future::BoxFuture;
 use tokio::io::AsyncReadExt;
 
 use super::process::{ProcessSpec, RunningProcess};
-use super::{Producer, ProducerCaps, ProducerStream, TimestampMode};
+use super::{Producer, ProducerCaps, ProducerStream, READ_CHUNK, TimestampMode};
 use crate::timeline::Ticks;
 
 /// Files the writer may create next to the media that must not be mistaken for it.
@@ -103,7 +103,7 @@ struct Tail {
 
 impl Tail {
     async fn next_chunk(&mut self) -> Option<io::Result<Bytes>> {
-        let mut buf = vec![0; 64 * 1024];
+        let mut buf = vec![0; READ_CHUNK];
         loop {
             if self.done {
                 return None;

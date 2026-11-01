@@ -12,7 +12,7 @@ use entroximer_server::{render, serve, youtube};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Discord audio engine")]
+#[command(name = "entroximer", version, about = "Discord audio engine")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -38,7 +38,7 @@ enum Command {
     /// Render a track to a WAV file through the full pipeline.
     Render(render::RenderArgs),
     /// Exit successfully if the local engine is healthy (for container health checks).
-    Healthcheck(serve::ServeArgs),
+    Healthcheck(serve::ListenArgs),
     /// Manage the engine-installed yt-dlp (see `--ytdlp-managed`).
     #[command(subcommand)]
     Ytdlp(YtdlpCommand),
@@ -73,7 +73,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Healthcheck(args) => serve::check_health(&args).await,
         Command::Serve(args) => serve::run(args, Arc::new(MediaContext::new(cli.media)?)).await,
-        Command::Render(args) => render::run(args, &MediaContext::new(cli.media)?).await,
+        Command::Render(args) => {
+            // rendering is run by the operator, who may play their own files
+            let mut media = cli.media;
+            media.sources.allow_local_files = true;
+            render::run(args, &MediaContext::new(media)?).await
+        }
         Command::Youtube(command) => {
             youtube::command::run(command, &MediaContext::new(cli.media)?).await
         }

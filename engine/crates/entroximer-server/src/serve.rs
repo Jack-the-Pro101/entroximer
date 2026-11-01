@@ -1,28 +1,26 @@
-//! `entroximer serve`: the long-running engine.
-//!
-//! For now this serves the health endpoint used by container orchestration, maintains the
-//! managed yt-dlp, and shuts down gracefully on SIGTERM/SIGINT; the Lavalink v4 compatible API is
-//! added on top of it.
+//! `entroximer serve`: the long-running engine. Serves the client API (see [`crate::api`]),
+//! maintains the managed yt-dlp and the YouTube session, and shuts down gracefully on
+//! SIGTERM/SIGINT.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use axum::Router;
-use axum::routing::get;
 use clap::Args;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::api;
 use crate::config::MediaContext;
 use crate::managed_ytdlp::YtDlpBinary;
+use crate::node::{Node, NodeSettings};
 use crate::youtube;
 
 pub const HEALTH_PATH: &str = "/health";
 
 #[derive(Clone, Debug, Args)]
-pub struct ServeArgs {
+pub struct ListenArgs {
     /// Address to listen on; `0.0.0.0` inside containers.
     #[arg(long, env = "ENTROXIMER_HOST", default_value = "127.0.0.1")]
     pub host: IpAddr,
@@ -31,7 +29,49 @@ pub struct ServeArgs {
     pub port: u16,
 }
 
+#[derive(Clone, Debug, Args)]
+pub struct ServeArgs {
+    #[command(flatten)]
+    pub listen: ListenArgs,
+
+    /// Password clients must send as `Authorization`. Without one, any client that can reach
+    /// the engine may use it.
+    #[arg(long, env = "ENTROXIMER_PASSWORD", hide_env_values = true)]
+    pub password: Option<String>,
+
+    /// Seconds between `playerUpdate` events.
+    #[arg(long, env = "ENTROXIMER_PLAYER_UPDATE_SECS", default_value_t = 5)]
+    pub player_update_secs: u64,
+
+    /// A track waiting this long for media is reported stuck.
+    #[arg(long, env = "ENTROXIMER_STUCK_MS", default_value_t = 10_000)]
+    pub stuck_ms: u64,
+
+    /// How long a disconnected client's players stay paused, waiting for it to resume its
+    /// session; afterwards they are destroyed.
+    #[arg(long, env = "ENTROXIMER_RESUME_TIMEOUT_SECS", default_value_t = 60)]
+    pub resume_timeout_secs: u64,
+
+    /// Seconds before the current track ends at which a player starts loading the next item of
+    /// its queue, so that it follows without a gap.
+    #[arg(long, env = "ENTROXIMER_PRELOAD_SECS", default_value_t = 30)]
+    pub preload_secs: u64,
+}
+
 pub async fn run(args: ServeArgs, ctx: Arc<MediaContext>) -> anyhow::Result<()> {
+    let addr = SocketAddr::new(args.listen.host, args.listen.port);
+    // an empty variable, e.g. from `${ENTROXIMER_PASSWORD:-}` in compose files, means none
+    let password = args.password.filter(|p| !p.is_empty());
+    if password.is_none() {
+        if addr.ip().is_loopback() {
+            tracing::info!("no password set; local clients connect without one");
+        } else {
+            tracing::warn!(
+                %addr,
+                "no password set: anyone who can reach this address can control the engine and its YouTube session"
+            );
+        }
+    }
     if let YtDlpBinary::Managed(managed) = &ctx.ytdlp {
         let hours = ctx.config.ytdlp.update_hours;
         let interval = (hours > 0).then(|| Duration::from_secs(hours * 3600));
@@ -40,8 +80,17 @@ pub async fn run(args: ServeArgs, ctx: Arc<MediaContext>) -> anyhow::Result<()> 
     }
     start_youtube_session(&ctx);
 
-    let app = Router::new().route(HEALTH_PATH, get(|| async { "ok" }));
-    let addr = SocketAddr::new(args.host, args.port);
+    let node = Node::new(
+        Arc::clone(&ctx),
+        NodeSettings {
+            password,
+            player_update_interval: Duration::from_secs(args.player_update_secs.max(1)),
+            stuck_after: Duration::from_millis(args.stuck_ms),
+            resume_timeout: Duration::from_secs(args.resume_timeout_secs),
+            preload_lead: Duration::from_secs(args.preload_secs),
+        },
+    );
+    let app = api::router(node);
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("cannot listen on {addr}"))?;
@@ -104,7 +153,7 @@ async fn shutdown_signal() {
 
 /// Exit status for container health checks: success when the local engine answers `/health`.
 /// Uses a raw HTTP/1.1 request so the image needs no curl.
-pub async fn check_health(args: &ServeArgs) -> anyhow::Result<()> {
+pub async fn check_health(args: &ListenArgs) -> anyhow::Result<()> {
     let host = if args.host.is_unspecified() {
         IpAddr::from([127, 0, 0, 1])
     } else {

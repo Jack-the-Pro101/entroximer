@@ -30,7 +30,7 @@ const LOCK_FILE: &str = "session.lock";
 /// Sites whose cookies are kept on import; yt-dlp needs nothing else.
 const SITES: &[&str] = &["youtube.com", "google.com"];
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum SessionState {
     /// No session has been imported.
@@ -50,15 +50,20 @@ impl SessionState {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// Result of `GET /v1/youtube/session`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct SessionStatus {
     pub state: SessionState,
     /// Unix seconds.
+    #[ts(type = "number | null")]
     pub imported_at: Option<u64>,
     /// Unix seconds.
+    #[ts(type = "number | null")]
     pub checked_at: Option<u64>,
     /// When the earliest cookie the session depends on expires, in Unix seconds.
+    #[ts(type = "number | null")]
     pub expires_at: Option<u64>,
 }
 

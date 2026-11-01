@@ -36,23 +36,29 @@ pub const GRAPH_OUTPUT: &str = "output";
 /// Graphs process interleaved stereo.
 pub const CHANNELS: usize = 2;
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GraphSpec {
     pub nodes: Vec<NodeSpec>,
-    /// When empty, `nodes` form a chain from the graph input to the graph output, in order.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// When empty (or absent), `nodes` form a chain from the graph input to the graph output,
+    /// in order.
+    #[serde(default)]
     pub edges: Vec<Edge>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NodeSpec {
     pub id: String,
     #[serde(rename = "type")]
     pub kind: String,
-    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    /// Parameters by name; absent ones take their defaults.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "Record<string, number>"))]
     pub params: Map<String, Value>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edge {
     pub from: Endpoint,
@@ -62,6 +68,7 @@ pub struct Edge {
 /// `node` (every port) or `node:port`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(type = "string"))]
 pub struct Endpoint {
     pub node: String,
     pub port: Option<usize>,

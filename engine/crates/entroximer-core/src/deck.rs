@@ -89,6 +89,17 @@ impl Deck {
         }
     }
 
+    /// Ends the current track and starts the next one right away, if there is one.
+    pub fn skip(&mut self) {
+        let reason = if self.next.is_some() {
+            EndReason::Replaced
+        } else {
+            EndReason::Stopped
+        };
+        self.end_current(reason);
+        self.advance();
+    }
+
     /// Stops the current track and forgets the next one.
     pub fn stop(&mut self) {
         self.next = None;

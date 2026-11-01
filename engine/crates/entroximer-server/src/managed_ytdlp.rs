@@ -101,6 +101,17 @@ impl ManagedYtDlp {
         version
     }
 
+    /// The active install's version, asking it only while unknown, since that takes a Python
+    /// start. This process's own updates show at once, one by `entroximer ytdlp update` after
+    /// the next update check.
+    pub async fn version(&self) -> Option<String> {
+        let known = self.installed.borrow().clone();
+        match known {
+            Some(version) => Some(version),
+            None => self.installed_version().await,
+        }
+    }
+
     /// Waits up to `timeout` for an install, e.g. while the server installs on first start.
     pub async fn wait_until_installed(&self, timeout: Duration) -> Result<(), InstallError> {
         if self.executable().exists() {

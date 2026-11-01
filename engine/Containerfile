@@ -41,7 +41,11 @@ RUN groupadd --gid 10001 entroximer \
  && install -d -o entroximer -g entroximer /var/cache/entroximer
 USER entroximer
 
-ENV ENTROXIMER_HOST=0.0.0.0 \
+# MALLOC_ARENA_MAX: glibc otherwise keeps freed memory in an arena per thread, and the engine's
+# memory grows with every track played (tested: 25 MB after 30 tracks with 2 arenas, 57 MB and
+# rising without)
+ENV MALLOC_ARENA_MAX=2 \
+    ENTROXIMER_HOST=0.0.0.0 \
     ENTROXIMER_PORT=2333 \
     ENTROXIMER_DATA_DIR=/var/lib/entroximer \
     ENTROXIMER_YTDLP_MANAGED=true \

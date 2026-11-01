@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
 use tokio_util::io::ReaderStream;
 
-use super::{Producer, ProducerCaps, ProducerStream, TimestampMode};
+use super::{Producer, ProducerCaps, ProducerStream, READ_CHUNK, TimestampMode};
 use crate::timeline::Ticks;
 
 #[derive(Clone, Debug)]
@@ -25,7 +25,7 @@ impl Producer for FileProducer {
         Box::pin(async move {
             let file = tokio::fs::File::open(&path).await?;
             Ok(ProducerStream {
-                bytes: ReaderStream::new(file).boxed(),
+                bytes: ReaderStream::with_capacity(file, READ_CHUNK).boxed(),
                 timestamps: TimestampMode::Absolute,
                 hint: path.extension().map(|e| e.to_string_lossy().into_owned()),
             })

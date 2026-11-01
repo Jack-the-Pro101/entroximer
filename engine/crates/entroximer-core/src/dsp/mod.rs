@@ -30,6 +30,7 @@ pub trait NodeFactory: Send + Sync {
 }
 
 /// Public description of a node type, e.g. for clients building graphs.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NodeDescriptor {
     #[serde(rename = "type")]
@@ -38,6 +39,7 @@ pub struct NodeDescriptor {
     pub params: Vec<ParamSpec>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ParamSpec {
     pub name: String,

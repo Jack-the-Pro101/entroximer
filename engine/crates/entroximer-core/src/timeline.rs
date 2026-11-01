@@ -8,12 +8,15 @@
 //! "buffered ranges" model. Several producers can fill different ranges; when a range grows into
 //! the next one they merge and the producer that caught up is stopped.
 //!
+//! Ranges store their packets in *blocks* of about a second, the unit of storage and eviction.
 //! Storage is tiered for RAM-constrained hosts:
-//! - the index (~40 bytes per packet) always lives in RAM,
-//! - payloads are written through to anonymous temp files ("spill", on by default),
-//! - payloads are additionally kept in RAM only inside a window around the playhead that reaches
+//! - the block index (well under a hundred bytes per block, so a few megabytes for ten hours of
+//!   audio) always lives in RAM,
+//! - complete blocks are written through to anonymous temp files ("spill", on by default), one
+//!   write per block,
+//! - blocks keep their packets in RAM only inside a window around the playhead that reaches
 //!   `forward_bias` times further ahead than behind, since listeners skip forward far more often
-//!   than they skip back.
+//!   than they skip back. A block read back from disk stays in RAM until it leaves the window.
 //!
 //! When a cap is hit, the unit with the largest *weighted distance* from the playhead is evicted,
 //! where distance ahead counts `1 / forward_bias` as much as distance behind. If the incoming
@@ -29,7 +32,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use symphonia::core::codecs::audio::AudioCodecParameters;
 
 use crate::error::{CodecMismatch, CodecSummary, MediaError};
@@ -72,6 +75,13 @@ const MAX_HOLE: Ticks = TICKS_PER_SECOND / 10;
 /// How often (in playhead movement) payloads outside the RAM window are released.
 const SWEEP_INTERVAL: Ticks = TICKS_PER_SECOND;
 
+/// A block is complete once it spans this much media time or holds this many payload bytes.
+const BLOCK_SPAN: Ticks = TICKS_PER_SECOND;
+const BLOCK_BYTES: usize = 64 << 10;
+
+/// What precedes each packet's payload in a spilled block: pts, duration, trims and length.
+const PACKET_HEADER: usize = 28;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Packet {
     pub pts: Ticks,
@@ -96,7 +106,8 @@ pub struct RetentionConfig {
     /// for the RAM window, RAM eviction and disk eviction alike. `4.0` with a 15 s
     /// `memory_behind` keeps 60 s ahead in RAM.
     pub forward_bias: f64,
-    /// Hard cap on payload bytes held in RAM per timeline.
+    /// Cap on payload bytes held in RAM per timeline. With spill, the blocks being filled (one
+    /// per download) and the block being played can exceed it.
     pub memory_max_bytes: usize,
     /// Disk spill; `None` keeps every payload in RAM (bounded by `memory_max_bytes`).
     pub spill: Option<SpillConfig>,
@@ -194,47 +205,82 @@ pub struct Timeline {
     changed: Condvar,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DiskLoc {
     segment: u64,
     offset: u64,
-}
-
-/// Index entry for one packet; `len` is a `u32` to keep the always-resident index small.
-struct Entry {
-    pts: Ticks,
-    dur: Ticks,
-    trim_start: u32,
-    trim_end: u32,
     len: u32,
-    mem: Option<Bytes>,
-    disk: Option<DiskLoc>,
 }
 
-impl Entry {
-    fn end(&self) -> Ticks {
-        self.pts + self.dur
+/// Consecutive packets of one range, stored and evicted together. Only the last block of a
+/// range that a producer is filling is still open for packets.
+struct Block {
+    /// Where the first packet starts.
+    start: Ticks,
+    /// Where the last packet ends.
+    end: Ticks,
+    packets: u32,
+    /// Payload bytes: what holding the block in RAM costs.
+    bytes: usize,
+    /// The packets, while the block is held in RAM.
+    mem: Option<Vec<Packet>>,
+    /// Where the block was spilled to, once complete.
+    disk: Option<DiskLoc>,
+    /// Complete: nothing more is appended.
+    sealed: bool,
+}
+
+impl Block {
+    fn open(pkt: Packet) -> Self {
+        Self {
+            start: pkt.pts,
+            end: pkt.end(),
+            packets: 1,
+            bytes: pkt.data.len(),
+            mem: Some(vec![pkt]),
+            disk: None,
+            sealed: false,
+        }
+    }
+
+    fn push(&mut self, pkt: Packet) {
+        self.end = self.end.max(pkt.end());
+        self.packets += 1;
+        self.bytes += pkt.data.len();
+        self.mem
+            .as_mut()
+            .expect("open blocks are held in RAM")
+            .push(pkt);
+    }
+
+    fn is_full(&self) -> bool {
+        self.end - self.start >= BLOCK_SPAN || self.bytes >= BLOCK_BYTES
+    }
+
+    /// The space the block takes once spilled.
+    fn spilled_len(&self) -> u64 {
+        (self.bytes + self.packets as usize * PACKET_HEADER) as u64
     }
 }
 
 /// Never empty; ranges are kept sorted by start and do not overlap (beyond `tolerance`).
 struct Range {
-    entries: VecDeque<Entry>,
+    blocks: VecDeque<Block>,
     state: RangeState,
 }
 
 impl Range {
     fn start(&self) -> Ticks {
-        self.entries.front().map_or(0, |e| e.pts)
+        self.blocks.front().map_or(0, |b| b.start)
     }
 
     fn end(&self) -> Ticks {
-        self.entries.back().map_or(0, Entry::end)
+        self.blocks.back().map_or(0, |b| b.end)
     }
 
-    /// Index of the first entry that ends after `t`.
-    fn index_at(&self, t: Ticks) -> usize {
-        self.entries.partition_point(|e| e.end() <= t)
+    /// Index of the first block that ends after `t`.
+    fn block_at(&self, t: Ticks) -> usize {
+        self.blocks.partition_point(|b| b.end <= t)
     }
 }
 
@@ -284,14 +330,9 @@ enum RangeEnd {
 }
 
 enum Probe {
-    Buffered { range: usize, entry: usize },
+    Buffered { range: usize, block: usize },
     Pending(Pending),
     End,
-}
-
-enum Payload {
-    Memory(Bytes),
-    Disk(Arc<File>, u64),
 }
 
 impl std::fmt::Debug for Timeline {
@@ -397,39 +438,38 @@ impl Timeline {
 
     pub fn finish(&self, producer: ProducerId, outcome: Finish) {
         let mut g = self.lock();
-        let Some(p) = g.producers.remove(&producer) else {
+        let Some(cancelled) = g.producers.get(&producer).map(|p| p.cancelled) else {
             return;
         };
         // a cancelled producer's stream ends early; that is not the end of the media
         let outcome = match outcome {
-            Finish::Eof if p.cancelled => Finish::Stopped,
+            Finish::Eof if cancelled => Finish::Stopped,
             other => other,
         };
-        let range = g
-            .ranges
-            .iter_mut()
-            .find(|r| r.state == RangeState::Filling(producer));
-        match outcome {
+        let range = g.filled_by(producer);
+        match &outcome {
             Finish::Eof => {
                 let end = match range {
-                    Some(r) => {
-                        r.state = RangeState::Complete;
-                        r.end()
+                    Some(i) => {
+                        g.end_filling(i, RangeState::Complete);
+                        g.ranges[i].end()
                     }
                     // nothing delivered: the producer was opened at or past the end
-                    None => p.requested_start,
+                    None => g.producers[&producer].requested_start,
                 };
                 g.media_end = Some(g.media_end.map_or(end, |e| e.min(end)));
             }
             Finish::Stopped | Finish::Failed(_) => {
-                if let Some(r) = range {
-                    r.state = RangeState::Truncated;
+                if let Some(i) = range {
+                    g.end_filling(i, RangeState::Truncated);
                 }
             }
         }
-        if let Finish::Failed(msg) = outcome {
-            g.failure = Some(msg);
+        g.producers.remove(&producer);
+        if let Finish::Failed(error) = outcome {
+            g.failure = Some(error);
         }
+        g.enforce_caps();
         drop(g);
         self.changed.notify_all();
     }
@@ -440,56 +480,40 @@ impl Timeline {
         if let Some(p) = g.producers.get_mut(&producer) {
             p.cancelled = true;
         }
-        if let Some(r) = g
-            .ranges
-            .iter_mut()
-            .find(|r| r.state == RangeState::Filling(producer))
-        {
-            r.state = RangeState::Truncated;
+        if let Some(i) = g.filled_by(producer) {
+            g.end_filling(i, RangeState::Truncated);
+            g.enforce_caps();
         }
         drop(g);
         self.changed.notify_all();
     }
 
-    /// The packet covering `t`, or why there is none. Reads spilled payloads from disk.
+    /// The packet covering `t`, or why there is none. Reads spilled blocks from disk.
     pub fn lookup(&self, t: Ticks) -> io::Result<Lookup> {
-        let g = self.lock();
-        let (range, entry) = match g.probe(t) {
-            Probe::Buffered { range, entry } => (range, entry),
-            Probe::Pending(pending) => return Ok(Lookup::Pending(pending)),
-            Probe::End => return Ok(Lookup::End),
-        };
-        let e = &g.ranges[range].entries[entry];
-        let payload = match (&e.mem, e.disk) {
-            (Some(bytes), _) => Payload::Memory(bytes.clone()),
-            (None, Some(loc)) => {
-                let segment = g
-                    .segments
-                    .iter()
-                    .find(|s| s.id == loc.segment)
-                    .expect("entries never point at evicted segments");
-                Payload::Disk(segment.file.clone(), loc.offset)
+        let (file, loc) = {
+            let g = self.lock();
+            let (range, block) = match g.probe(t) {
+                Probe::Buffered { range, block } => (range, block),
+                Probe::Pending(pending) => return Ok(Lookup::Pending(pending)),
+                Probe::End => return Ok(Lookup::End),
+            };
+            let block = &g.ranges[range].blocks[block];
+            if let Some(packets) = &block.mem {
+                return Ok(Lookup::Ready(packet_at(packets, t).clone()));
             }
-            (None, None) => unreachable!("entries without a payload are removed"),
+            let loc = block
+                .disk
+                .expect("blocks without their packets in RAM are on disk");
+            (g.segment_file(loc.segment), loc)
         };
-        let (pts, dur, trim_start, trim_end, len) = (e.pts, e.dur, e.trim_start, e.trim_end, e.len);
-        drop(g);
 
-        let data = match payload {
-            Payload::Memory(bytes) => bytes,
-            Payload::Disk(file, offset) => {
-                let mut buf = vec![0; len as usize];
-                file.read_exact_at(&mut buf, offset)?;
-                Bytes::from(buf)
-            }
-        };
-        Ok(Lookup::Ready(Packet {
-            pts,
-            dur,
-            trim_start,
-            trim_end,
-            data,
-        }))
+        // read without the lock; the file stays readable even if its segment is evicted meanwhile
+        let mut buf = vec![0; loc.len as usize];
+        file.read_exact_at(&mut buf, loc.offset)?;
+        let packets = decode_block(Bytes::from(buf))?;
+        let packet = packet_at(&packets, t).clone();
+        self.lock().keep_in_memory(t, loc, packets);
+        Ok(Lookup::Ready(packet))
     }
 
     /// What is missing at `t`; `None` if `t` is buffered or past the end. Never touches disk.
@@ -574,7 +598,12 @@ impl Timeline {
         let g = self.lock();
         TimelineStats {
             ranges: g.ranges.len(),
-            packets: g.ranges.iter().map(|r| r.entries.len()).sum(),
+            packets: g
+                .ranges
+                .iter()
+                .flat_map(|r| &r.blocks)
+                .map(|b| b.packets as usize)
+                .sum(),
             memory_bytes: g.memory_bytes,
             disk_bytes: g.disk_bytes,
         }
@@ -591,9 +620,9 @@ impl Inner {
         let preceding = self.ranges.partition_point(|r| r.start() <= t + MAX_HOLE);
         if let Some(range) = preceding.checked_sub(1) {
             let r = &self.ranges[range];
-            let entry = r.index_at(t);
-            if entry < r.entries.len() {
-                return Probe::Buffered { range, entry };
+            let block = r.block_at(t);
+            if block < r.blocks.len() {
+                return Probe::Buffered { range, block };
             }
             match r.state {
                 RangeState::Filling(producer) => frontier = Some((producer, r.end())),
@@ -623,6 +652,32 @@ impl Inner {
         })
     }
 
+    fn segment_file(&self, id: u64) -> Arc<File> {
+        let segment = self
+            .segments
+            .iter()
+            .find(|s| s.id == id)
+            .expect("blocks never point at evicted segments");
+        Arc::clone(&segment.file)
+    }
+
+    /// Keeps a block read back from disk in RAM for the reads of its other packets, until a
+    /// sweep finds it outside the RAM window.
+    fn keep_in_memory(&mut self, t: Ticks, loc: DiskLoc, packets: Vec<Packet>) {
+        let Probe::Buffered { range, block } = self.probe(t) else {
+            return;
+        };
+        let block = &mut self.ranges[range].blocks[block];
+        if block.mem.is_some() || block.disk != Some(loc) {
+            return; // evicted or read by someone else meanwhile
+        }
+        block.mem = Some(packets);
+        self.memory_bytes += block.bytes;
+        if self.memory_bytes > self.cfg.memory_max_bytes {
+            self.sweep_memory();
+        }
+    }
+
     fn spill_active(&self) -> bool {
         self.cfg.spill.is_some() && !self.spill_failed
     }
@@ -635,10 +690,21 @@ impl Inner {
         self.weight(start, end) <= ticks(self.cfg.memory_behind)
     }
 
-    fn over_cap(&self, extra: u64) -> bool {
+    /// Whether `extra` more payload bytes would exceed the active tier's cap. Open blocks count
+    /// with the space they will take on disk.
+    fn over_cap(&self, extra: usize) -> bool {
         match &self.cfg.spill {
-            Some(spill) if !self.spill_failed => self.disk_bytes + extra > spill.max_bytes,
-            _ => self.memory_bytes as u64 + extra > self.cfg.memory_max_bytes as u64,
+            Some(spill) if !self.spill_failed => {
+                let open: u64 = self
+                    .ranges
+                    .iter()
+                    .filter_map(|r| r.blocks.back())
+                    .filter(|b| !b.sealed)
+                    .map(Block::spilled_len)
+                    .sum();
+                self.disk_bytes + open + (extra + PACKET_HEADER) as u64 > spill.max_bytes
+            }
+            _ => self.memory_bytes + extra > self.cfg.memory_max_bytes,
         }
     }
 
@@ -652,16 +718,16 @@ impl Inner {
         } else {
             self.ranges
                 .iter()
-                .flat_map(|r| [r.entries.front(), r.entries.back()])
+                .flat_map(|r| [r.blocks.front(), r.blocks.back()])
                 .flatten()
-                .map(|e| self.weight(e.pts, e.end()))
+                .map(|b| self.weight(b.start, b.end))
                 .max()
         };
         w.filter(|&w| w > 0)
     }
 
     fn must_wait_for_space(&self, pkt: &Packet) -> bool {
-        if !self.over_cap(pkt.data.len() as u64) {
+        if !self.over_cap(pkt.data.len()) {
             return false;
         }
         let w = self.weight(pkt.pts, pkt.end());
@@ -682,6 +748,13 @@ impl Inner {
         Located::Outside
     }
 
+    /// The range `producer` is appending to.
+    fn filled_by(&self, producer: ProducerId) -> Option<usize> {
+        self.ranges
+            .iter()
+            .position(|r| r.state == RangeState::Filling(producer))
+    }
+
     fn insert(&mut self, producer: ProducerId, pkt: Packet) -> PushResult {
         let p = self
             .producers
@@ -691,15 +764,11 @@ impl Inner {
         p.frontier = p.frontier.max(pkt.end());
         let tol = tolerance(pkt.dur);
 
-        let own = self
-            .ranges
-            .iter()
-            .position(|r| r.state == RangeState::Filling(producer));
-        let idx = match own {
+        let idx = match self.filled_by(producer) {
             Some(i) if pkt.pts < self.ranges[i].end() - tol => return PushResult::Continue,
             Some(i) if pkt.pts > self.ranges[i].end() + MAX_HOLE => {
                 // our tail was evicted (or the stream jumped): continue in a new range
-                self.ranges[i].state = RangeState::Truncated;
+                self.end_filling(i, RangeState::Truncated);
                 return self.insert_new_range(producer, pkt);
             }
             Some(i) => i,
@@ -723,71 +792,113 @@ impl Inner {
             },
         };
 
-        let entry = self.make_entry(producer, pkt);
-        self.ranges[idx].entries.push_back(entry);
-        self.try_merge(idx, tol)
+        self.memory_bytes += pkt.data.len();
+        let range = &mut self.ranges[idx];
+        match range.blocks.back_mut() {
+            Some(open) if !open.sealed => open.push(pkt),
+            _ => range.blocks.push_back(Block::open(pkt)),
+        }
+        self.seal_if_full(idx, producer);
+        self.try_merge(idx, producer, tol)
     }
 
     fn insert_new_range(&mut self, producer: ProducerId, pkt: Packet) -> PushResult {
         let tol = tolerance(pkt.dur);
         let start = pkt.pts;
-        let entry = self.make_entry(producer, pkt);
+        self.memory_bytes += pkt.data.len();
         let idx = self.ranges.partition_point(|r| r.start() < start);
         self.ranges.insert(
             idx,
             Range {
-                entries: VecDeque::from([entry]),
+                blocks: VecDeque::from([Block::open(pkt)]),
                 state: RangeState::Filling(producer),
             },
         );
-        self.try_merge(idx, tol)
+        self.seal_if_full(idx, producer);
+        self.try_merge(idx, producer, tol)
     }
 
     /// Joins range `idx` with its successor once they touch; the producer filling `idx` stops.
-    fn try_merge(&mut self, idx: usize, tol: Ticks) -> PushResult {
+    fn try_merge(&mut self, idx: usize, producer: ProducerId, tol: Ticks) -> PushResult {
         if idx + 1 >= self.ranges.len()
             || self.ranges[idx].end() + tol < self.ranges[idx + 1].start()
         {
             return PushResult::Continue;
         }
+        self.seal_tail(idx, producer);
         let next = self.ranges.remove(idx + 1);
         let end = self.ranges[idx].end();
-        for e in next.entries {
-            if e.pts >= end - tolerance(e.dur) {
-                self.ranges[idx].entries.push_back(e);
-            } else if let Some(m) = &e.mem {
-                self.memory_bytes -= m.len();
+        for block in next.blocks {
+            if block.end > end + tol {
+                self.ranges[idx].blocks.push_back(block);
+            } else if block.mem.is_some() {
+                // everything in it is here already
+                self.memory_bytes -= block.bytes;
             }
         }
         self.ranges[idx].state = next.state;
         PushResult::Stop
     }
 
-    fn make_entry(&mut self, producer: ProducerId, pkt: Packet) -> Entry {
-        let disk = self.write_disk(producer, &pkt);
-        let keep = disk.is_none() || self.in_memory_window(pkt.pts, pkt.end());
-        if keep {
-            self.memory_bytes += pkt.data.len();
+    /// The producer filling range `idx` is done with it.
+    fn end_filling(&mut self, idx: usize, state: RangeState) {
+        if let RangeState::Filling(producer) = self.ranges[idx].state {
+            self.seal_tail(idx, producer);
         }
-        Entry {
-            pts: pkt.pts,
-            dur: pkt.dur,
-            trim_start: pkt.trim_start,
-            trim_end: pkt.trim_end,
-            len: u32::try_from(pkt.data.len()).expect("packets are far smaller than 4 GiB"),
-            mem: keep.then_some(pkt.data),
-            disk,
+        self.ranges[idx].state = state;
+    }
+
+    fn seal_if_full(&mut self, idx: usize, producer: ProducerId) {
+        if self.ranges[idx].blocks.back().is_some_and(Block::is_full) {
+            self.seal_tail(idx, producer);
         }
     }
 
-    fn write_disk(&mut self, producer: ProducerId, pkt: &Packet) -> Option<DiskLoc> {
-        if !self.spill_active() {
-            return None;
+    /// Completes the open block at the end of range `idx`, if any: it is spilled, and keeps its
+    /// packets in RAM only inside the RAM window and the RAM cap.
+    fn seal_tail(&mut self, idx: usize, producer: ProducerId) {
+        let spill = self.spill_active();
+        let Some(block) = self.ranges[idx].blocks.back_mut().filter(|b| !b.sealed) else {
+            return;
+        };
+        block.sealed = true;
+        if !spill {
+            return;
         }
+        let (start, end) = (block.start, block.end);
+        let encoded = encode_block(block.mem.as_deref().expect("open blocks are held in RAM"));
+        let Some(loc) = self.write_disk(producer, &encoded, start, end) else {
+            return; // spilling failed, and the block stays in RAM
+        };
+        let keep =
+            self.in_memory_window(start, end) && self.memory_bytes <= self.cfg.memory_max_bytes;
+        let block = self.ranges[idx]
+            .blocks
+            .back_mut()
+            .expect("the block was just sealed");
+        block.disk = Some(loc);
+        if keep {
+            // one allocation for the whole block instead of one per packet
+            block.mem = Some(decode_block(Bytes::from(encoded)).expect("just encoded"));
+        } else {
+            block.mem = None;
+            self.memory_bytes -= block.bytes;
+        }
+    }
+
+    fn write_disk(
+        &mut self,
+        producer: ProducerId,
+        data: &[u8],
+        start: Ticks,
+        end: Ticks,
+    ) -> Option<DiskLoc> {
         let spill = self.cfg.spill.as_ref().expect("spill is active");
-        let len = pkt.data.len() as u64;
-        let current = self.producers[&producer]
-            .segment
+        let len = data.len() as u64;
+        let current = self
+            .producers
+            .get(&producer)
+            .and_then(|p| p.segment)
             .and_then(|id| self.segments.iter().position(|s| s.id == id))
             .filter(|&i| self.segments[i].len + len <= spill.segment_bytes);
         let si = match current {
@@ -800,8 +911,8 @@ impl Inner {
                         id,
                         file: Arc::new(file),
                         len: 0,
-                        start: pkt.pts,
-                        end: pkt.end(),
+                        start,
+                        end,
                     });
                     if let Some(p) = self.producers.get_mut(&producer) {
                         p.segment = Some(id);
@@ -816,7 +927,7 @@ impl Inner {
             },
         };
         let seg = &mut self.segments[si];
-        if let Err(e) = seg.file.write_all_at(&pkt.data, seg.len) {
+        if let Err(e) = seg.file.write_all_at(data, seg.len) {
             tracing::warn!("disabling disk spill: {e}");
             self.spill_failed = true;
             return None;
@@ -824,29 +935,28 @@ impl Inner {
         let loc = DiskLoc {
             segment: seg.id,
             offset: seg.len,
+            len: u32::try_from(len).expect("blocks are far smaller than 4 GiB"),
         };
         seg.len += len;
-        seg.start = seg.start.min(pkt.pts);
-        seg.end = seg.end.max(pkt.end());
+        seg.start = seg.start.min(start);
+        seg.end = seg.end.max(end);
         self.disk_bytes += len;
         Some(loc)
     }
 
-    /// Releases RAM copies of payloads that are safely on disk and outside the RAM window.
+    /// Releases RAM copies of blocks that are safely on disk and outside the RAM window, and the
+    /// farthest others while over the RAM cap.
     fn sweep_memory(&mut self) {
         if !self.spill_active() {
             return;
         }
         let behind = ticks(self.cfg.memory_behind);
         let (playhead, bias) = (self.playhead, self.cfg.forward_bias);
-        let weight = |e: &Entry| weighted_distance(playhead, bias, e.pts, e.end());
+        let weight = |b: &Block| weighted_distance(playhead, bias, b.start, b.end);
         let mut freed = 0;
-        for e in self.ranges.iter_mut().flat_map(|r| r.entries.iter_mut()) {
-            if e.disk.is_some()
-                && weight(e) > behind
-                && let Some(m) = e.mem.take()
-            {
-                freed += m.len();
+        for b in self.ranges.iter_mut().flat_map(|r| r.blocks.iter_mut()) {
+            if b.disk.is_some() && weight(b) > behind && b.mem.take().is_some() {
+                freed += b.bytes;
             }
         }
         self.memory_bytes -= freed;
@@ -854,19 +964,20 @@ impl Inner {
         if self.memory_bytes > self.cfg.memory_max_bytes {
             let mut held: Vec<(Ticks, usize, usize)> = Vec::new();
             for (ri, r) in self.ranges.iter().enumerate() {
-                for (ei, e) in r.entries.iter().enumerate() {
-                    if e.mem.is_some() && e.disk.is_some() {
-                        held.push((weight(e), ri, ei));
+                for (bi, b) in r.blocks.iter().enumerate() {
+                    if b.mem.is_some() && b.disk.is_some() {
+                        held.push((weight(b), ri, bi));
                     }
                 }
             }
             held.sort_unstable_by_key(|&(weight, ..)| Reverse(weight));
-            for (_, ri, ei) in held {
+            for (_, ri, bi) in held {
                 if self.memory_bytes <= self.cfg.memory_max_bytes {
                     break;
                 }
-                if let Some(m) = self.ranges[ri].entries[ei].mem.take() {
-                    self.memory_bytes -= m.len();
+                let block = &mut self.ranges[ri].blocks[bi];
+                if block.mem.take().is_some() {
+                    self.memory_bytes -= block.bytes;
                 }
             }
         }
@@ -874,6 +985,7 @@ impl Inner {
 
     fn enforce_caps(&mut self) {
         if self.spill_active() {
+            // RAM is kept in check where blocks enter it, and by sweeps as the playhead moves
             let max = self.cfg.spill.as_ref().map_or(u64::MAX, |s| s.max_bytes);
             while self.disk_bytes > max {
                 let Some(id) = self
@@ -888,9 +1000,6 @@ impl Inner {
                 };
                 self.evict_segment(id);
             }
-            if self.memory_bytes > self.cfg.memory_max_bytes {
-                self.sweep_memory();
-            }
         } else {
             while self.memory_bytes > self.cfg.memory_max_bytes {
                 if !self.evict_farthest_endpoint() {
@@ -900,6 +1009,7 @@ impl Inner {
         }
     }
 
+    /// Deletes a spill file and every block in it.
     fn evict_segment(&mut self, id: u64) {
         let Some(pos) = self.segments.iter().position(|s| s.id == id) else {
             return;
@@ -911,15 +1021,10 @@ impl Inner {
                 p.segment = None;
             }
         }
-        for e in self.ranges.iter_mut().flat_map(|r| r.entries.iter_mut()) {
-            if e.disk.is_some_and(|d| d.segment == id) {
-                e.disk = None;
-            }
-        }
-        self.retain_entries(|e| e.mem.is_some() || e.disk.is_some());
+        self.retain_blocks(|b| b.disk.is_none_or(|d| d.segment != id));
     }
 
-    /// Drops up to ~1 s from whichever range end is farthest from the playhead.
+    /// Drops the block at whichever range end is farthest from the playhead.
     fn evict_farthest_endpoint(&mut self) -> bool {
         let (playhead, bias) = (self.playhead, self.cfg.forward_bias);
         let farthest = self
@@ -927,10 +1032,10 @@ impl Inner {
             .iter()
             .enumerate()
             .flat_map(|(i, r)| {
-                let front = r.entries.front().map(|e| (e, RangeEnd::Front));
-                let back = r.entries.back().map(|e| (e, RangeEnd::Back));
-                front.into_iter().chain(back).map(move |(e, end)| {
-                    (weighted_distance(playhead, bias, e.pts, e.end()), i, end)
+                let front = r.blocks.front().map(|b| (b, RangeEnd::Front));
+                let back = r.blocks.back().map(|b| (b, RangeEnd::Back));
+                front.into_iter().chain(back).map(move |(b, end)| {
+                    (weighted_distance(playhead, bias, b.start, b.end), i, end)
                 })
             })
             .filter(|&(weight, ..)| weight > 0)
@@ -940,39 +1045,36 @@ impl Inner {
         };
 
         let range = &mut self.ranges[i];
-        let (mut dropped, mut freed) = (0, 0);
-        while dropped < TICKS_PER_SECOND {
-            let entry = match end {
-                RangeEnd::Front => range.entries.pop_front(),
-                RangeEnd::Back => range.entries.pop_back(),
-            };
-            let Some(entry) = entry else { break };
-            dropped += entry.dur;
-            freed += entry.mem.map_or(0, |m| m.len());
+        let block = match end {
+            RangeEnd::Front => range.blocks.pop_front(),
+            RangeEnd::Back => range.blocks.pop_back(),
         }
-        self.memory_bytes -= freed;
-        if range.entries.is_empty() {
+        .expect("ranges are never empty");
+        if range.blocks.is_empty() {
             self.ranges.remove(i);
         } else if end == RangeEnd::Back && range.state == RangeState::Complete {
             // the end of the media is no longer buffered
             range.state = RangeState::Truncated;
         }
+        if block.mem.is_some() {
+            self.memory_bytes -= block.bytes;
+        }
         true
     }
 
-    /// Removes entries failing `keep`, splitting ranges around the holes. Only the run that still
+    /// Removes blocks failing `keep`, splitting ranges around the holes. Only the run that still
     /// reaches the original end keeps the range's state; every other run is `Truncated`.
-    fn retain_entries(&mut self, keep: impl Fn(&Entry) -> bool) {
+    fn retain_blocks(&mut self, keep: impl Fn(&Block) -> bool) {
         let mut out = Vec::with_capacity(self.ranges.len());
         for r in std::mem::take(&mut self.ranges) {
-            let mut runs: Vec<VecDeque<Entry>> = Vec::new();
+            let mut runs: Vec<VecDeque<Block>> = Vec::new();
             let mut cur = VecDeque::new();
-            for e in r.entries {
-                if keep(&e) {
-                    cur.push_back(e);
+            for b in r.blocks {
+                if keep(&b) {
+                    cur.push_back(b);
                 } else {
-                    if let Some(m) = &e.mem {
-                        self.memory_bytes -= m.len();
+                    if b.mem.is_some() {
+                        self.memory_bytes -= b.bytes;
                     }
                     if !cur.is_empty() {
                         runs.push(std::mem::take(&mut cur));
@@ -984,17 +1086,68 @@ impl Inner {
                 runs.push(cur);
             }
             let last = runs.len().saturating_sub(1);
-            for (k, entries) in runs.into_iter().enumerate() {
+            for (k, blocks) in runs.into_iter().enumerate() {
                 let state = if k == last && tail_kept {
                     r.state
                 } else {
                     RangeState::Truncated
                 };
-                out.push(Range { entries, state });
+                out.push(Range { blocks, state });
             }
         }
         self.ranges = out;
     }
+}
+
+/// The packet covering `t` in a block that ends after `t`, or the first one after `t` when the
+/// block starts later.
+fn packet_at(packets: &[Packet], t: Ticks) -> &Packet {
+    let i = packets.partition_point(|p| p.end() <= t);
+    &packets[i.min(packets.len() - 1)]
+}
+
+/// A spilled block: its packets one after another, each a fixed header followed by its payload.
+fn encode_block(packets: &[Packet]) -> Vec<u8> {
+    let len = packets.iter().map(|p| PACKET_HEADER + p.data.len()).sum();
+    let mut buf = Vec::with_capacity(len);
+    for p in packets {
+        let data_len = u32::try_from(p.data.len()).expect("packets are far smaller than 4 GiB");
+        buf.extend_from_slice(&p.pts.to_le_bytes());
+        buf.extend_from_slice(&p.dur.to_le_bytes());
+        buf.extend_from_slice(&p.trim_start.to_le_bytes());
+        buf.extend_from_slice(&p.trim_end.to_le_bytes());
+        buf.extend_from_slice(&data_len.to_le_bytes());
+        buf.extend_from_slice(&p.data);
+    }
+    buf
+}
+
+/// The packets of a spilled block; their payloads share `buf`.
+fn decode_block(mut buf: Bytes) -> io::Result<Vec<Packet>> {
+    let corrupt = || io::Error::new(io::ErrorKind::InvalidData, "a spilled block is corrupt");
+    let mut packets = Vec::new();
+    while buf.has_remaining() {
+        if buf.remaining() < PACKET_HEADER {
+            return Err(corrupt());
+        }
+        let (pts, dur) = (buf.get_i64_le(), buf.get_i64_le());
+        let (trim_start, trim_end) = (buf.get_u32_le(), buf.get_u32_le());
+        let len = buf.get_u32_le() as usize;
+        if buf.remaining() < len {
+            return Err(corrupt());
+        }
+        packets.push(Packet {
+            pts,
+            dur,
+            trim_start,
+            trim_end,
+            data: buf.split_to(len),
+        });
+    }
+    if packets.is_empty() {
+        return Err(corrupt());
+    }
+    Ok(packets)
 }
 
 #[cfg(test)]
@@ -1098,6 +1251,58 @@ mod tests {
     }
 
     #[test]
+    fn merged_ranges_read_back_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let tl = Timeline::new(spill_into(&dir, 1 << 30, 1 << 20));
+        let a = tl.register_producer(Some(100 * PKT));
+        fill(&tl, a, 100..400);
+        let b = tl.register_producer(None);
+        // stops once it reaches what `a` has
+        assert!(matches!(fill(&tl, b, 0..120), PushResult::Stop));
+        tl.finish(a, Finish::Eof);
+        assert_eq!(tl.buffered(), vec![(0, 400 * PKT)]);
+
+        // far away, so that every block is read back from its spill file
+        tl.set_playhead(3600 * TICKS_PER_SECOND);
+        assert_eq!(tl.stats().memory_bytes, 0);
+        for i in 0..400 {
+            assert_eq!(ready(&tl, i * PKT + PKT / 2), pkt(i));
+        }
+        assert!(matches!(tl.lookup(400 * PKT).unwrap(), Lookup::End));
+    }
+
+    #[test]
+    fn long_media_keeps_a_small_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let tl = Timeline::new(spill_into(&dir, 1 << 30, 8 << 20));
+        let p = tl.register_producer(None);
+        let packets = packets_in(2 * 3600);
+        for i in 0..packets {
+            let pkt = Packet {
+                data: Bytes::from_static(&[0; 8]),
+                ..pkt(i)
+            };
+            tl.push(p, pkt);
+        }
+        tl.finish(p, Finish::Eof);
+
+        let stats = tl.stats();
+        assert_eq!(stats.packets, packets as usize);
+        let blocks = tl.lock().ranges[0].blocks.len();
+        assert_eq!(blocks, 2 * 3600, "one block per second");
+        // the first minute stays in RAM, the rest only on disk
+        assert!(
+            stats.memory_bytes <= packets_in(61) as usize * 8,
+            "{}",
+            stats.memory_bytes
+        );
+        assert_eq!(
+            ready(&tl, 5000 * TICKS_PER_SECOND).pts,
+            5000 * TICKS_PER_SECOND
+        );
+    }
+
+    #[test]
     fn redundant_producer_is_stopped() {
         let tl = Timeline::new(memory_only());
         let a = tl.register_producer(None);
@@ -1151,7 +1356,7 @@ mod tests {
     #[test]
     fn backpressure_pauses_producer_until_playhead_moves() {
         let dir = tempfile::tempdir().unwrap();
-        let seg = packets_in(10) as u64 * 400; // 10 s per spill file
+        let seg = packets_in(10) as u64 * 400; // ~10 s per spill file
         let tl = Arc::new(Timeline::new(spill_into(&dir, seg * 6, seg)));
         let p = tl.register_producer(None);
         let worker = std::thread::spawn({
@@ -1177,5 +1382,25 @@ mod tests {
         tl.cancel(p);
         assert!(matches!(worker.join().unwrap(), PushResult::Stop));
         assert!(tl.stats().disk_bytes <= seg * 6);
+    }
+
+    #[test]
+    fn spilled_blocks_round_trip_and_corruption_is_an_error() {
+        let packets: Vec<Packet> = (0..5)
+            .map(|i| Packet {
+                trim_start: 312,
+                trim_end: i as u32,
+                ..pkt(i)
+            })
+            .collect();
+        let encoded = encode_block(&packets);
+        assert_eq!(decode_block(Bytes::from(encoded.clone())).unwrap(), packets);
+
+        let truncated = Bytes::copy_from_slice(&encoded[..encoded.len() - 1]);
+        assert_eq!(
+            decode_block(truncated).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(decode_block(Bytes::new()).is_err());
     }
 }

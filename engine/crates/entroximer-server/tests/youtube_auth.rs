@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use entroximer_server::config::{MediaConfig, MediaContext};
 use entroximer_server::sources::ytdlp::Restriction;
-use entroximer_server::sources::{self, ResolveError};
+use entroximer_server::sources::{ResolveError, ResolvedTrack};
 use entroximer_server::youtube::{SessionState, SignInUnavailable};
 
 const VIDEO: &str = "https://www.youtube.com/watch?v=restricted";
@@ -94,6 +94,10 @@ fi
     }
 }
 
+async fn resolve(engine: &Engine, query: &str) -> Result<ResolvedTrack, ResolveError> {
+    engine.ctx.sources.resolve_query(query, &engine.ctx).await
+}
+
 /// Succeeds with cookies, rotating one of them like YouTube does.
 fn succeed_and_rotate() -> String {
     format!("sed -i 's/psid-original/psid-rotated/' \"$cookies\"\nprintf '%s' '{INFO_JSON}'")
@@ -104,7 +108,7 @@ async fn signs_in_only_for_videos_that_need_it() {
     let engine = Engine::new(&[], &succeed_and_rotate());
 
     // no session yet: one anonymous attempt, then a clear error
-    let err = sources::resolve(VIDEO, &engine.ctx).await.unwrap_err();
+    let err = resolve(&engine, VIDEO).await.unwrap_err();
     assert!(matches!(
         err,
         ResolveError::SignInRequired {
@@ -121,8 +125,8 @@ async fn signs_in_only_for_videos_that_need_it() {
 
     // the failed attempt showed the video needs an account, so the next one signs in directly
     engine.ctx.youtube.store.import(SIGNED_IN).unwrap();
-    let track = sources::resolve(VIDEO, &engine.ctx).await.unwrap();
-    assert_eq!(track.info.title, "Restricted");
+    let track = resolve(&engine, VIDEO).await.unwrap();
+    assert_eq!(track.track.info.title, "Restricted");
     assert_eq!(engine.calls(), ["anonymous", "signed-in"]);
 
     // the cookie YouTube rotated reaches the stored session once the track is done
@@ -134,7 +138,7 @@ async fn signs_in_only_for_videos_that_need_it() {
         .mode();
     assert_eq!(mode & 0o777, 0o600);
 
-    let _again = sources::resolve(VIDEO, &engine.ctx).await.unwrap();
+    let _again = resolve(&engine, VIDEO).await.unwrap();
     assert_eq!(engine.calls(), ["anonymous", "signed-in", "signed-in"]);
 }
 
@@ -143,13 +147,13 @@ async fn unrestricted_videos_never_use_the_session() {
     let engine = Engine::new(&[], &succeed_and_rotate());
     engine.ctx.youtube.store.import(SIGNED_IN).unwrap();
 
-    let track = sources::resolve(VIDEO, &engine.ctx).await.unwrap();
+    let track = resolve(&engine, VIDEO).await.unwrap();
     assert_eq!(engine.calls(), ["anonymous", "signed-in"], "fell back once");
     drop(track);
 
     // a different video: tried anonymously first again
     let other = "https://www.youtube.com/watch?v=other";
-    let _ = sources::resolve(other, &engine.ctx).await;
+    let _ = resolve(&engine, other).await;
     assert_eq!(engine.calls()[2], "anonymous");
 }
 
@@ -161,7 +165,7 @@ exit 1";
     let engine = Engine::new(&[], ended);
     engine.ctx.youtube.store.import(SIGNED_IN).unwrap();
 
-    let err = sources::resolve(VIDEO, &engine.ctx).await.unwrap_err();
+    let err = resolve(&engine, VIDEO).await.unwrap_err();
     assert!(matches!(
         err,
         ResolveError::SignInRequired {
@@ -173,7 +177,7 @@ exit 1";
     assert_eq!(status.state, SessionState::Expired);
 
     // an expired session is not sent again; the error says what to do
-    let err = sources::resolve(VIDEO, &engine.ctx).await.unwrap_err();
+    let err = resolve(&engine, VIDEO).await.unwrap_err();
     assert!(matches!(
         err,
         ResolveError::SignInRequired {
@@ -189,7 +193,7 @@ async fn never_policy_keeps_the_account_out() {
     let engine = Engine::new(&["--youtube-auth", "never"], &succeed_and_rotate());
     engine.ctx.youtube.store.import(SIGNED_IN).unwrap();
 
-    let err = sources::resolve(VIDEO, &engine.ctx).await.unwrap_err();
+    let err = resolve(&engine, VIDEO).await.unwrap_err();
     assert!(matches!(
         err,
         ResolveError::SignInRequired {

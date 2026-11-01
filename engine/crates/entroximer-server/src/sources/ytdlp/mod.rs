@@ -1,22 +1,27 @@
-//! Tracks resolved and downloaded with yt-dlp (YouTube and the many other sites it supports).
+//! Providers backed by yt-dlp: the named sites of [`profiles`] (YouTube, SoundCloud, ...) and
+//! any other site yt-dlp supports.
 //!
-//! Resolution runs `yt-dlp -J` once and the resulting info JSON is fed back with
-//! `--load-info-json -` for every download, so a page is never extracted twice. The chosen audio
-//! format's protocol decides how its bytes arrive:
+//! Links are loaded with `yt-dlp -J --flat-playlist`: a playlist comes back as a list of entries
+//! with metadata only, a single track fully extracted, ready to play. Searches list results the
+//! same way. A track is fully extracted when it is resolved for playback, and the resulting info
+//! JSON is fed back with `--load-info-json -` for every download, so a page is never extracted
+//! twice. The chosen audio format's protocol decides how its bytes arrive:
 //!
 //! - `https`: yt-dlp writes the file to stdout. Re-opening at an offset goes through ffmpeg,
 //!   which seeks the format's direct URL with range requests using the container index.
 //! - `sabr`: YouTube's server-driven streaming (yt-dlp PR #13515) cannot be written to stdout,
 //!   so yt-dlp writes a file that is read while it grows. Seeking waits for the download.
-//! - `m3u8`/`m3u8_native` (live streams): ffmpeg remuxes the playlist to Matroska; yt-dlp's own
-//!   stdout output would be MPEG-TS, which the demuxer does not read.
+//! - `m3u8`/`m3u8_native` (SoundCloud, live streams): ffmpeg plays the playlist, seeking by
+//!   segment unless it is live; yt-dlp's own stdout output would be MPEG-TS, which the demuxer
+//!   does not read.
 
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use entroximer_core::producer::ffmpeg::FfmpegProducer;
 use entroximer_core::producer::growing_file::GrowingFileProducer;
@@ -24,111 +29,340 @@ use entroximer_core::producer::process::{ProcessProducer, ProcessSpec};
 use entroximer_core::producer::{Producer, ProducerCaps, ProducerStream, TimestampMode};
 use entroximer_core::timeline::Ticks;
 use futures_util::future::BoxFuture;
+use reqwest::Url;
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::sync::Semaphore;
 
 pub use failure::{Failure, Restriction, SESSION_ENDED_WARNING, classify};
 
-use super::{ResolveError, ResolvedTrack, TrackInfo};
+use super::provider::{Provider, ProviderDescriptor};
+use super::{FoundTrack, LoadOutcome, PlaylistInfo, ResolveError, ResolvedTrack, TrackRef, net};
 use crate::config::MediaContext;
 use crate::youtube::{SessionCopy, SignInUnavailable};
 
+mod activation;
+mod entry;
 mod failure;
+mod profiles;
 
-pub(super) async fn resolve(
-    query: &str,
-    ctx: &MediaContext,
-) -> Result<ResolvedTrack, ResolveError> {
+use activation::UrlActivation;
+use entry::Entry;
+use profiles::{SITES, SearchTarget, Site, site_of};
+
+/// Most results a search may ask for.
+const MAX_SEARCH_RESULTS: usize = 50;
+
+pub struct YtDlpProvider {
+    site: &'static Site,
+    descriptor: ProviderDescriptor,
+}
+
+impl YtDlpProvider {
+    /// One provider per named site.
+    pub fn sites() -> Vec<Self> {
+        SITES.iter().copied().map(Self::new).collect()
+    }
+
+    /// Any other site yt-dlp supports; offered links last.
+    pub fn generic() -> Self {
+        Self::new(&profiles::GENERIC)
+    }
+
+    fn new(site: &'static Site) -> Self {
+        Self {
+            site,
+            descriptor: ProviderDescriptor {
+                name: site.name.to_owned(),
+                display_name: site.display_name.to_owned(),
+                search_prefixes: site.searches.iter().map(|s| s.prefix.to_owned()).collect(),
+                hosts: site.hosts.iter().map(|&h| h.to_owned()).collect(),
+            },
+        }
+    }
+
+    fn is_generic(&self) -> bool {
+        self.site.hosts.is_empty()
+    }
+
+    /// The site an entry belongs to: the named site of its link, else the loading one.
+    fn site_for(&self, entry: &Entry) -> &'static Site {
+        entry.uri().and_then(site_of).unwrap_or(self.site)
+    }
+
+    /// Fully extracts `uri` and prepares it for playback.
+    async fn resolve_uri(
+        &self,
+        uri: &str,
+        ctx: &MediaContext,
+    ) -> Result<ResolvedTrack, ResolveError> {
+        let url = Url::parse(uri).map_err(|_| ResolveError::Unsupported(uri.to_owned()))?;
+        self.guard(&url, ctx).await?;
+        ytdlp_ready(ctx).await?;
+        let (json, session) = self
+            .extract_with_policy(uri, ctx, &["-J", "--no-playlist"])
+            .await?;
+        self.resolved(json, session, uri, ctx)
+    }
+
+    /// Any link reaches the generic extractor, so it must not lead to internal services.
+    async fn guard(&self, url: &Url, ctx: &MediaContext) -> Result<(), ResolveError> {
+        if self.is_generic() && !ctx.config.sources.allow_private_urls {
+            net::ensure_public(url).await?;
+        }
+        Ok(())
+    }
+
+    /// Extracts `target`, signed in to YouTube only as the auth policy allows. Returns the info
+    /// JSON and the session copy it used, which the track's downloads keep using.
+    async fn extract_with_policy(
+        &self,
+        target: &str,
+        ctx: &MediaContext,
+        args: &[&str],
+    ) -> Result<(Value, Option<SessionCopy>), ResolveError> {
+        // the session holds YouTube cookies only
+        if !std::ptr::eq(self.site, &profiles::YOUTUBE) {
+            return Ok((extract(ctx, target, None, args).await?, None));
+        }
+        let youtube = &ctx.youtube;
+        let first = if youtube.sign_in_first(target) {
+            youtube.checkout(ctx).map_err(ResolveError::Session)?
+        } else {
+            None
+        };
+        let restriction = match extract(ctx, target, first.as_ref(), args).await {
+            Ok(json) => return Ok((json, first)),
+            Err(ResolveError::Extraction {
+                failure: Failure::Restricted(restriction),
+                ..
+            }) => restriction,
+            Err(e) => return Err(e),
+        };
+        if first.is_some() {
+            return Err(refused(ctx, target, restriction));
+        }
+
+        youtube.remember_restricted(target);
+        let Some(session) = youtube.checkout(ctx).map_err(ResolveError::Session)? else {
+            return Err(ResolveError::SignInRequired {
+                query: target.to_owned(),
+                restriction,
+                reason: youtube.unavailable_reason(),
+            });
+        };
+        tracing::debug!(target, ?restriction, "retrying signed in to YouTube");
+        match extract(ctx, target, Some(&session), args).await {
+            Ok(json) => Ok((json, Some(session))),
+            Err(ResolveError::Extraction {
+                failure: Failure::Restricted(restriction),
+                ..
+            }) => Err(refused(ctx, target, restriction)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A playlist's tracks with metadata only; they are resolved when played.
+    fn playlist(&self, json: &Value, url: &Url) -> Result<LoadOutcome, ResolveError> {
+        let list = Entry::deserialize(json).map_err(|e| ResolveError::Json("yt-dlp", e))?;
+        let tracks: Vec<FoundTrack> = entries(json)
+            .filter(|entry| !entry.is_collection())
+            .filter_map(|entry| entry.found_track(self.site_for(&entry)))
+            .collect();
+        if tracks.is_empty() {
+            return Ok(LoadOutcome::Empty);
+        }
+        let playlist = PlaylistInfo {
+            name: list.title.clone().unwrap_or_else(|| "Playlist".to_owned()),
+            author: list.author(),
+            uri: list.webpage_url.clone().or_else(|| Some(url.to_string())),
+            artwork_url: list.artwork(),
+            selected_track: selected_track(url, &tracks),
+            total_tracks: list.playlist_count.and_then(|n| u32::try_from(n).ok()),
+        };
+        Ok(LoadOutcome::Playlist { playlist, tracks })
+    }
+
+    /// A fully extracted track, ready to play.
+    fn resolved(
+        &self,
+        mut json: Value,
+        session: Option<SessionCopy>,
+        requested: &str,
+        ctx: &MediaContext,
+    ) -> Result<ResolvedTrack, ResolveError> {
+        let mut entry = Entry::deserialize(&json).map_err(|e| ResolveError::Json("yt-dlp", e))?;
+        if entry.uri().is_none() {
+            entry.webpage_url = Some(requested.to_owned());
+        }
+        let track = entry
+            .found_track(self.site_for(&entry))
+            .ok_or_else(|| ResolveError::NoAudio(requested.to_owned()))?;
+        let media = Media::deserialize(&json).map_err(|e| ResolveError::Json("yt-dlp", e))?;
+        let format = media
+            .best_audio()
+            .ok_or_else(|| ResolveError::NoAudio(requested.to_owned()))?;
+        tracing::debug!(
+            title = %track.info.title,
+            format = ?format.format_id,
+            protocol = ?format.protocol,
+            "resolved with yt-dlp"
+        );
+        // see `activation`: the engine waits for the URL itself, so yt-dlp must not wait again
+        let await_url = media.is_youtube() && format.transport() == Some(Transport::Stdout);
+        if await_url {
+            strip_available_at(&mut json);
+        }
+        // only a direct download is known to need nothing but its own format
+        let keep_format = format
+            .format_id
+            .as_deref()
+            .filter(|_| format.transport() == Some(Transport::Stdout));
+        slim_info_json(&mut json, keep_format);
+        let producer = YtDlpProducer::new(
+            ctx,
+            Bytes::from(json.to_string()),
+            &format,
+            entry.is_live(),
+            await_url,
+            session,
+        );
+        Ok(ResolvedTrack {
+            track,
+            producer: Arc::new(producer),
+        })
+    }
+}
+
+impl std::fmt::Debug for YtDlpProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("YtDlpProvider")
+            .field(&self.site.name)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl Provider for YtDlpProvider {
+    fn descriptor(&self) -> &ProviderDescriptor {
+        &self.descriptor
+    }
+
+    fn accepts(&self, url: &Url) -> bool {
+        matches!(url.scheme(), "http" | "https")
+            && (self.is_generic() || url.host_str().is_some_and(|h| self.site.claims(h)))
+    }
+
+    async fn load_url(
+        &self,
+        url: &Url,
+        ctx: &MediaContext,
+    ) -> Result<Option<LoadOutcome>, ResolveError> {
+        self.guard(url, ctx).await?;
+        ytdlp_ready(ctx).await?;
+        let items = format!("1:{}", ctx.config.sources.playlist_limit.max(1));
+        let (json, session) = self
+            .extract_with_policy(
+                url.as_str(),
+                ctx,
+                &["-J", "--flat-playlist", "--playlist-items", &items],
+            )
+            .await?;
+        let outcome = match json.get("_type").and_then(Value::as_str) {
+            Some("playlist") => self.playlist(&json, url)?,
+            // a link standing for another one, e.g. a short link
+            Some("url" | "url_transparent") => {
+                let target = json
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| ResolveError::NoAudio(url.to_string()))?;
+                LoadOutcome::Track(self.resolve_uri(target, ctx).await?)
+            }
+            _ => LoadOutcome::Track(self.resolved(json, session, url.as_str(), ctx)?),
+        };
+        Ok(Some(outcome))
+    }
+
+    async fn search(
+        &self,
+        prefix: &str,
+        terms: &str,
+        limit: usize,
+        ctx: &MediaContext,
+    ) -> Result<Vec<FoundTrack>, ResolveError> {
+        let search = self
+            .site
+            .searches
+            .iter()
+            .find(|s| s.prefix == prefix)
+            .ok_or_else(|| ResolveError::UnknownSearch(prefix.to_owned()))?;
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        ytdlp_ready(ctx).await?;
+        let limit = limit.clamp(1, MAX_SEARCH_RESULTS);
+        let target = match search.target {
+            SearchTarget::Key(key) => format!("{key}{limit}:{terms}"),
+            SearchTarget::Page(page) => page(terms),
+        };
+        let items = format!("1:{limit}");
+        // searches never carry the YouTube session, keeping the account out of that traffic
+        let output = run(
+            ctx,
+            &ctx.ytdlp_runs.searches,
+            &target,
+            None,
+            &["-J", "--flat-playlist", "--playlist-items", &items],
+        )
+        .await?;
+        let json: Value =
+            serde_json::from_slice(&output.stdout).map_err(|e| ResolveError::Json("yt-dlp", e))?;
+        Ok(entries(&json)
+            .filter(|entry| !entry.is_collection())
+            .filter_map(|entry| entry.found_track(self.site_for(&entry)))
+            .take(limit)
+            .collect())
+    }
+
+    async fn resolve(
+        &self,
+        reference: &TrackRef,
+        ctx: &MediaContext,
+    ) -> Result<ResolvedTrack, ResolveError> {
+        self.resolve_uri(&reference.uri, ctx).await
+    }
+}
+
+/// Waits for the managed yt-dlp's first install, if it is still running.
+async fn ytdlp_ready(ctx: &MediaContext) -> Result<(), ResolveError> {
     ctx.ytdlp
         .ready()
         .await
-        .map_err(ResolveError::YtDlpUnavailable)?;
-    let (mut json, session) = extract_with_policy(query, ctx).await?;
-    // searches (`ytsearch:...`) return a playlist of fully extracted entries
-    if json.get("_type").and_then(Value::as_str) == Some("playlist") {
-        json = json
-            .get_mut("entries")
-            .and_then(|entries| entries.as_array_mut())
-            .filter(|entries| !entries.is_empty())
-            .map(|entries| entries.swap_remove(0))
-            .ok_or_else(|| ResolveError::NoResults(query.to_owned()))?;
-    }
-    let info = Info::deserialize(&json).map_err(ResolveError::Json)?;
-    let format = info
-        .best_audio()
-        .ok_or_else(|| ResolveError::NoAudio(query.to_owned()))?;
-    let track = info.track_info(query);
-    tracing::debug!(
-        title = %track.title,
-        format = ?format.format_id,
-        protocol = ?format.protocol,
-        "resolved with yt-dlp"
-    );
-    // googlevideo refuses requests for about two seconds after issuing their URLs (observed
-    // November 2026); hold our own requests back instead of failing and retrying
-    let urls_valid_from = Instant::now()
-        + if info.is_youtube() {
-            YOUTUBE_URL_ACTIVATION
-        } else {
-            Duration::ZERO
-        };
-    let producer = YtDlpProducer::new(
-        ctx,
-        Bytes::from(json.to_string()),
-        &format,
-        info.live(),
-        urls_valid_from,
-        session,
-    );
-    Ok(ResolvedTrack {
-        info: track,
-        producer: Arc::new(producer),
-    })
+        .map_err(ResolveError::YtDlpUnavailable)
 }
 
-const YOUTUBE_URL_ACTIVATION: Duration = Duration::from_millis(2500);
+/// The entries of a playlist or search result.
+fn entries(json: &Value) -> impl Iterator<Item = Entry> + '_ {
+    json.get("entries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| Entry::deserialize(entry).ok())
+}
 
-/// Extracts `query`, signed in only as the YouTube auth policy allows. Returns the info JSON and
-/// the session copy it used, which the track's downloads keep using.
-async fn extract_with_policy(
-    query: &str,
-    ctx: &MediaContext,
-) -> Result<(Value, Option<SessionCopy>), ResolveError> {
-    let youtube = &ctx.youtube;
-    let first = if youtube.sign_in_first(query) {
-        youtube.checkout(ctx).map_err(ResolveError::Session)?
-    } else {
-        None
+/// The track a playlist link points at: YouTube's `v=`, or a 1-based `index=`.
+fn selected_track(url: &Url, tracks: &[FoundTrack]) -> Option<u32> {
+    let query: HashMap<_, _> = url.query_pairs().collect();
+    let position = match (query.get("v"), query.get("index")) {
+        (Some(id), _) => tracks.iter().position(|t| t.info.identifier == **id),
+        (None, Some(index)) => index
+            .parse::<usize>()
+            .ok()
+            .and_then(|i| i.checked_sub(1))
+            .filter(|&i| i < tracks.len()),
+        (None, None) => None,
     };
-    let restriction = match extract(ctx, query, first.as_ref()).await {
-        Ok(json) => return Ok((json, first)),
-        Err(ResolveError::Extraction {
-            failure: Failure::Restricted(restriction),
-            ..
-        }) => restriction,
-        Err(e) => return Err(e),
-    };
-    if first.is_some() {
-        return Err(refused(ctx, query, restriction));
-    }
-
-    youtube.remember_restricted(query);
-    let Some(session) = youtube.checkout(ctx).map_err(ResolveError::Session)? else {
-        return Err(ResolveError::SignInRequired {
-            query: query.to_owned(),
-            restriction,
-            reason: youtube.unavailable_reason(),
-        });
-    };
-    tracing::debug!(query, ?restriction, "retrying signed in to YouTube");
-    match extract(ctx, query, Some(&session)).await {
-        Ok(json) => Ok((json, Some(session))),
-        Err(ResolveError::Extraction {
-            failure: Failure::Restricted(restriction),
-            ..
-        }) => Err(refused(ctx, query, restriction)),
-        Err(e) => Err(e),
-    }
+    position.and_then(|p| u32::try_from(p).ok())
 }
 
 /// YouTube still wants an account although the session was sent.
@@ -145,11 +379,12 @@ fn refused(ctx: &MediaContext, query: &str, restriction: Restriction) -> Resolve
 
 async fn extract(
     ctx: &MediaContext,
-    query: &str,
+    target: &str,
     session: Option<&SessionCopy>,
+    args: &[&str],
 ) -> Result<Value, ResolveError> {
-    let output = run(ctx, query, session, &["-J", "--no-playlist"]).await?;
-    serde_json::from_slice(&output.stdout).map_err(ResolveError::Json)
+    let output = run(ctx, &ctx.ytdlp_runs.extractions, target, session, args).await?;
+    serde_json::from_slice(&output.stdout).map_err(|e| ResolveError::Json("yt-dlp", e))
 }
 
 /// Loads `video` signed in, without downloading; returns yt-dlp's warnings.
@@ -160,6 +395,7 @@ pub async fn probe(
 ) -> Result<String, ResolveError> {
     let output = run(
         ctx,
+        &ctx.ytdlp_runs.extractions,
         video,
         Some(session),
         &["--simulate", "--no-playlist", "--print", "id"],
@@ -173,13 +409,19 @@ struct Output {
     stderr: String,
 }
 
-/// Runs yt-dlp on `target`. Warnings stay on so that yt-dlp can report a session YouTube ended.
+/// Runs yt-dlp on `target` once it gets one of `turns`. Warnings stay on so that yt-dlp can
+/// report a session YouTube ended.
 async fn run(
     ctx: &MediaContext,
+    turns: &Semaphore,
     target: &str,
     session: Option<&SessionCopy>,
     args: &[&str],
 ) -> Result<Output, ResolveError> {
+    let _turn = turns
+        .acquire()
+        .await
+        .expect("the semaphore is never closed");
     let mut command = tokio::process::Command::new(ctx.ytdlp.program());
     command.args(&ctx.config.ytdlp.args.0).args(args);
     if let Some(session) = session {
@@ -191,7 +433,7 @@ async fn run(
         .kill_on_drop(true)
         .output()
         .await
-        .map_err(ResolveError::Spawn)?;
+        .map_err(|e| ResolveError::Spawn("yt-dlp", e))?;
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if let Some(session) = session {
         ctx.youtube.observe(session, &stderr);
@@ -210,17 +452,9 @@ async fn run(
     })
 }
 
-/// The parts of yt-dlp's info JSON we use; the rest is passed back to yt-dlp untouched.
+/// The formats of a fully extracted track.
 #[derive(Debug, Deserialize)]
-struct Info {
-    id: Option<String>,
-    title: Option<String>,
-    uploader: Option<String>,
-    channel: Option<String>,
-    duration: Option<f64>,
-    is_live: Option<bool>,
-    webpage_url: Option<String>,
-    thumbnail: Option<String>,
+struct Media {
     extractor_key: Option<String>,
     #[serde(default)]
     formats: Vec<Format>,
@@ -240,6 +474,8 @@ struct Format {
     url: Option<String>,
     #[serde(default)]
     http_headers: HashMap<String, String>,
+    /// When YouTube makes the URL available, in Unix seconds; see `activation`.
+    available_at: Option<f64>,
 }
 
 impl Format {
@@ -276,13 +512,9 @@ enum Transport {
     Hls,
 }
 
-impl Info {
+impl Media {
     fn is_youtube(&self) -> bool {
         self.extractor_key.as_deref() == Some("Youtube")
-    }
-
-    fn live(&self) -> bool {
-        self.is_live.unwrap_or(false)
     }
 
     fn best_audio(&self) -> Option<Format> {
@@ -304,36 +536,15 @@ impl Info {
             })
             .cloned()
     }
-
-    fn track_info(&self, query: &str) -> TrackInfo {
-        TrackInfo {
-            identifier: self.id.clone().unwrap_or_else(|| query.to_owned()),
-            title: self.title.clone().unwrap_or_else(|| "Unknown title".into()),
-            author: self
-                .uploader
-                .clone()
-                .or_else(|| self.channel.clone())
-                .unwrap_or_else(|| "Unknown author".into()),
-            length_ms: self.duration.map(|d| (d * 1000.0) as u64),
-            is_stream: self.live(),
-            uri: self.webpage_url.clone().unwrap_or_else(|| query.to_owned()),
-            artwork_url: self.thumbnail.clone(),
-            source_name: self
-                .extractor_key
-                .as_deref()
-                .unwrap_or("yt-dlp")
-                .to_lowercase(),
-        }
-    }
 }
 
-/// Downloads with yt-dlp, and re-opens `https` formats at an offset through ffmpeg.
+/// Downloads with yt-dlp (or ffmpeg, for HLS), and re-opens at an offset through ffmpeg.
 struct YtDlpProducer {
     download: Arc<dyn Producer>,
     seek: Option<FfmpegProducer>,
     live: bool,
-    /// Direct requests to the format's URL are not made before this.
-    urls_valid_from: Instant,
+    /// Downloads wait for YouTube to accept the format's freshly issued URL.
+    activation: Option<Arc<UrlActivation>>,
     /// The YouTube session the track was resolved with; its downloads use it too. Rotated
     /// cookies are merged back when the track is dropped.
     _session: Option<SessionCopy>,
@@ -345,7 +556,7 @@ impl YtDlpProducer {
         info_json: Bytes,
         format: &Format,
         live: bool,
-        urls_valid_from: Instant,
+        await_url: bool,
         session: Option<SessionCopy>,
     ) -> Self {
         let media = &ctx.config;
@@ -353,13 +564,13 @@ impl YtDlpProducer {
             .transport()
             .expect("best_audio only picks supported protocols");
         let direct = format.url.as_ref().map(|url| FfmpegProducer {
-            ffmpeg: media.ffmpeg.clone(),
-            input: url.clone(),
             headers: format
                 .http_headers
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
+            live,
+            ..FfmpegProducer::new(&media.ffmpeg, url)
         });
         let caps = ProducerCaps {
             time_seek: false,
@@ -417,19 +628,30 @@ impl YtDlpProducer {
                     },
                 ))
             }
-            Transport::Hls => Arc::new(LiveFfmpeg(
+            Transport::Hls => Arc::new(
                 direct
                     .clone()
                     .expect("HLS formats always carry their playlist URL"),
-            )),
+            ),
         };
+        let expected = format
+            .available_at
+            .and_then(|at| Duration::try_from_secs_f64(at).ok())
+            .map(|since_epoch| UNIX_EPOCH + since_epoch);
+        let activation = direct.as_ref().filter(|_| await_url).map(|direct| {
+            Arc::new(UrlActivation::new(
+                direct.input.clone(),
+                direct.headers.clone(),
+                expected,
+            ))
+        });
         // live streams cannot seek; SABR has no URL to seek with
-        let seek = direct.filter(|_| transport == Transport::Stdout && !live);
+        let seek = direct.filter(|_| transport != Transport::GrowingFile && !live);
         Self {
             download,
             seek,
             live,
-            urls_valid_from,
+            activation,
             _session: session,
         }
     }
@@ -444,33 +666,73 @@ impl Producer for YtDlpProducer {
     }
 
     fn open(&self, start: Option<Ticks>) -> BoxFuture<'static, io::Result<ProducerStream>> {
-        match (start.filter(|&t| t > 0), &self.seek) {
-            (Some(start), Some(seek)) => {
-                // ffmpeg is only spawned once the returned future runs
-                let (opening, valid_from) = (seek.open(Some(start)), self.urls_valid_from);
+        // both only start their process once the returned future runs
+        let opening = match (start.filter(|&t| t > 0), &self.seek) {
+            (Some(start), Some(seek)) => seek.open(Some(start)),
+            _ => self.download.open(None),
+        };
+        match &self.activation {
+            Some(activation) => {
+                let activation = Arc::clone(activation);
                 Box::pin(async move {
-                    tokio::time::sleep_until(valid_from.into()).await;
+                    activation.wait().await;
                     opening.await
                 })
             }
-            _ => self.download.open(None),
+            None => opening,
         }
     }
 }
 
-/// ffmpeg on a live playlist: never seeks.
-struct LiveFfmpeg(FfmpegProducer);
+/// Top-level keys of yt-dlp's info JSON that downloading never reads. They are most of it:
+/// YouTube's automatic captions alone take 500 KB of a typical 600 KB.
+const UNUSED_INFO_KEYS: &[&str] = &[
+    "automatic_captions",
+    "subtitles",
+    "requested_subtitles",
+    "heatmap",
+    "thumbnails",
+    "description",
+    "chapters",
+    "tags",
+    "categories",
+    "requested_downloads",
+    "requested_formats",
+];
 
-impl Producer for LiveFfmpeg {
-    fn caps(&self) -> ProducerCaps {
-        ProducerCaps {
-            time_seek: false,
-            live: true,
-        }
+/// Cuts yt-dlp's info JSON down to what the track's downloads hand back to yt-dlp, since it is
+/// kept as long as the track (in the cache of resolved tracks, too). With `keep_format`, only
+/// that format remains.
+fn slim_info_json(json: &mut Value, keep_format: Option<&str>) {
+    let Some(top) = json.as_object_mut() else {
+        return;
+    };
+    for key in UNUSED_INFO_KEYS {
+        top.remove(*key);
     }
+    if let Some(id) = keep_format
+        && let Some(formats) = top.get_mut("formats").and_then(Value::as_array_mut)
+    {
+        formats.retain(|format| format.get("format_id").and_then(Value::as_str) == Some(id));
+    }
+}
 
-    fn open(&self, _start: Option<Ticks>) -> BoxFuture<'static, io::Result<ProducerStream>> {
-        self.0.open(None)
+/// Removes `available_at` from every format of yt-dlp's info JSON; see `activation`.
+fn strip_available_at(json: &mut Value) {
+    if let Some(top) = json.as_object_mut() {
+        top.remove("available_at");
+    }
+    for key in ["formats", "requested_formats"] {
+        for format in json
+            .get_mut(key)
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(format) = format.as_object_mut() {
+                format.remove("available_at");
+            }
+        }
     }
 }
 
@@ -492,8 +754,8 @@ mod tests {
 
     use super::*;
 
-    fn info(formats: Value) -> Info {
-        Info::deserialize(json!({ "id": "x", "formats": formats })).unwrap()
+    fn media(formats: Value) -> Media {
+        Media::deserialize(json!({ "id": "x", "formats": formats })).unwrap()
     }
 
     fn audio(id: &str, acodec: &str, abr: f64, protocol: &str) -> Value {
@@ -501,8 +763,48 @@ mod tests {
     }
 
     #[test]
+    fn slims_the_info_json_to_what_downloads_need() {
+        let full = json!({
+            "id": "x",
+            "extractor": "youtube",
+            "automatic_captions": { "en": [{ "url": "https://example.invalid/captions" }] },
+            "thumbnails": [{ "url": "https://example.invalid/t.jpg" }],
+            "requested_formats": [{ "format_id": "251" }],
+            "formats": [{ "format_id": "140" }, { "format_id": "251", "protocol": "https" }],
+        });
+
+        let mut direct = full.clone();
+        slim_info_json(&mut direct, Some("251"));
+        assert_eq!(
+            direct,
+            json!({
+                "id": "x",
+                "extractor": "youtube",
+                "formats": [{ "format_id": "251", "protocol": "https" }],
+            })
+        );
+
+        let mut sabr = full;
+        slim_info_json(&mut sabr, None);
+        assert_eq!(sabr["formats"].as_array().unwrap().len(), 2);
+        assert!(sabr.get("automatic_captions").is_none());
+    }
+
+    #[test]
+    fn strips_available_at_everywhere() {
+        let mut json = json!({
+            "available_at": 1,
+            "formats": [{ "format_id": "251", "available_at": 2 }, { "format_id": "140" }],
+            "requested_formats": [{ "format_id": "251", "available_at": 3 }],
+        });
+        strip_available_at(&mut json);
+        assert!(!json.to_string().contains("available_at"), "{json}");
+        assert_eq!(json["formats"][0]["format_id"], "251");
+    }
+
+    #[test]
     fn prefers_opus_full_range_seekable_then_bitrate() {
-        let i = info(json!([
+        let i = media(json!([
             audio("140", "mp4a.40.2", 129.0, "https"),
             audio("251-drc", "opus", 107.0, "https"),
             audio("251", "opus", 106.0, "https"),
@@ -511,7 +813,7 @@ mod tests {
         ]));
         assert_eq!(i.best_audio().unwrap().format_id.as_deref(), Some("251"));
 
-        let https_beats_higher_bitrate_sabr = info(json!([
+        let https_beats_higher_bitrate_sabr = media(json!([
             audio("251-sabr", "opus", 160.0, "sabr"),
             audio("251", "opus", 106.0, "https"),
         ]));
@@ -524,16 +826,86 @@ mod tests {
             Some("251")
         );
 
-        let sabr_only = info(json!([audio("251", "opus", 160.0, "sabr")]));
+        let sabr_only = media(json!([audio("251", "opus", 160.0, "sabr")]));
         assert_eq!(
             sabr_only.best_audio().unwrap().transport(),
             Some(Transport::GrowingFile)
         );
 
+        let soundcloud = media(json!([
+            audio("hls_aac_96k", "mp4a.40.2", 96.0, "m3u8_native"),
+            audio("hls_aac_160k", "mp4a.40.2", 160.0, "m3u8_native"),
+        ]));
+        assert_eq!(
+            soundcloud.best_audio().unwrap().format_id.as_deref(),
+            Some("hls_aac_160k")
+        );
+
         assert!(
-            info(json!([audio("x", "opus", 1.0, "f4m")]))
+            media(json!([audio("x", "opus", 1.0, "f4m")]))
                 .best_audio()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn playlists_list_their_tracks_with_metadata() {
+        let json: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/ytdlp/youtube_playlist.json"
+        ))
+        .unwrap();
+        let url =
+            Url::parse("https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI")
+                .unwrap();
+        let LoadOutcome::Playlist { playlist, tracks } = YtDlpProvider::new(&profiles::YOUTUBE)
+            .playlist(&json, &url)
+            .unwrap()
+        else {
+            panic!("not a playlist");
+        };
+        assert_eq!(playlist.name, "Popular Music Videos");
+        assert_eq!(playlist.author.as_deref(), Some("Music"));
+        assert_eq!(playlist.total_tracks, Some(182));
+        assert_eq!(tracks.len(), 3, "the fixture holds the first three");
+        assert!(
+            tracks
+                .iter()
+                .all(|t| t.reference.source == "youtube" && t.info.length.is_some())
+        );
+    }
+
+    #[test]
+    fn playlist_links_select_their_track() {
+        let track = |id: &str| FoundTrack {
+            reference: TrackRef {
+                source: "youtube".into(),
+                uri: format!("https://www.youtube.com/watch?v={id}"),
+            },
+            info: Entry {
+                id: Some(id.into()),
+                webpage_url: Some(format!("https://www.youtube.com/watch?v={id}")),
+                ..Entry::default()
+            }
+            .found_track(&profiles::YOUTUBE)
+            .unwrap()
+            .info,
+        };
+        let tracks = [track("a"), track("b"), track("c")];
+        let url = |u: &str| Url::parse(u).unwrap();
+        assert_eq!(
+            selected_track(&url("https://www.youtube.com/watch?v=b&list=PL1"), &tracks),
+            Some(1)
+        );
+        assert_eq!(
+            selected_track(
+                &url("https://www.youtube.com/playlist?list=PL1&index=3"),
+                &tracks
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            selected_track(&url("https://www.youtube.com/playlist?list=PL1"), &tracks),
+            None
         );
     }
 }

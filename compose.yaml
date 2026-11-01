@@ -9,6 +9,9 @@ services:
     ports:
       - "127.0.0.1:2333:2333"
     environment:
+      # what clients must send as `Authorization`, e.g. from `ENTROXIMER_PASSWORD=...` in a .env
+      # file; unset, any client that can reach the port may use the engine
+      ENTROXIMER_PASSWORD: ${ENTROXIMER_PASSWORD:-}
       RUST_LOG: info
       # yt-dlp is installed and updated by the engine; these tune it:
       # ENTROXIMER_YTDLP_NIGHTLY: "true"            # YouTube fixes arrive in nightly builds first

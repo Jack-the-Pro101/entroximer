@@ -9,7 +9,8 @@ edition = "2024"
 [workspace.dependencies]
 entroximer-core = { path = "crates/entroximer-core" }
 
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22.1"
 bytes = "1.12.0"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 fundsp = "0.23.0"
@@ -18,18 +19,21 @@ hound = "3.5.1"
 kanal = "0.1.1"
 # matches songbird's opus2, so libopus is only linked once
 opus2 = "0.4.0"
-reqwest = { version = "0.13.4", features = ["stream"] }
+# the version songbird builds, so only one HTTP client and TLS stack is compiled
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
 # matches songbird's rubato
 rubato = "0.16.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-songbird = "0.6.0"
+# the driver only: the bot keeps its own Discord gateway connection
+songbird = { version = "0.6.0", default-features = false, features = ["driver", "rustls", "tungstenite"] }
 symphonia = { version = "0.6.1", features = ["all-codecs", "all-formats"] }
 tempfile = "3.27.0"
 thiserror = "2"
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-util = { version = "0.7.19", features = ["io"] }
 tracing = "0.1.44"
+ts-rs = { version = "11", features = ["serde-json-impl", "no-serde-warnings"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 
 [workspace.lints.rust]

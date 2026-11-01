@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
 use entroximer_core::error::display_chain;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, broadcast};
 
 pub use session::{
     ImportReport, SessionCopy, SessionError, SessionState, SessionStatus, SessionStore,
@@ -111,6 +111,7 @@ pub struct YouTube {
     check_video: String,
     recently_restricted: RecentlyRestricted,
     check_requested: Notify,
+    changes: broadcast::Sender<SessionState>,
 }
 
 impl YouTube {
@@ -124,7 +125,13 @@ impl YouTube {
             check_video,
             recently_restricted: RecentlyRestricted::default(),
             check_requested: Notify::new(),
+            changes: broadcast::Sender::new(16),
         }
+    }
+
+    /// Changes of the session's state observed by this process.
+    pub fn subscribe(&self) -> broadcast::Receiver<SessionState> {
+        self.changes.subscribe()
     }
 
     /// Whether the first attempt at `query` should already be signed in.
@@ -174,6 +181,8 @@ impl YouTube {
     fn set_state(&self, generation: u64, state: SessionState, checked: bool) {
         match self.store.record(generation, state, checked) {
             Ok(Some(previous)) => {
+                // nobody listening (e.g. in the CLI) is fine
+                let _ = self.changes.send(state);
                 if state == SessionState::Expired {
                     tracing::warn!(
                         ?previous,

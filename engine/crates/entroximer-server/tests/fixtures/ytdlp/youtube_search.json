@@ -1,0 +1,52 @@
+{
+ "id": "fallen kingdom captainsparklez",
+ "title": "fallen kingdom captainsparklez",
+ "_type": "playlist",
+ "webpage_url": "ytsearch2:fallen kingdom captainsparklez",
+ "extractor_key": "YoutubeSearch",
+ "entries": [
+  {
+   "_type": "url",
+   "ie_key": "Youtube",
+   "id": "ayl3UXKpH1g",
+   "url": "https://www.youtube.com/watch?v=ayl3UXKpH1g",
+   "title": "Fallen Kingdom: The Complete Minecraft Music Video Series",
+   "duration": 1345,
+   "channel": "CaptainSparklez",
+   "channel_url": "https://www.youtube.com/channel/UCshoKvlZGZ20rVgazZp5vnQ",
+   "uploader": "CaptainSparklez",
+   "uploader_url": "https://www.youtube.com/@CaptainSparklez",
+   "thumbnails": [
+    {
+     "url": "https://i.ytimg.com/vi/ayl3UXKpH1g/hq720.jpg?sqp=-oaymwEcCOgCEMoBSFXyq4qpAw4IARUAAIhCGAFwAcABBg==&rs=AOn4CLCYE8lJkez0YTfkoU0hCn2Nn2WwVg",
+     "width": 360,
+     "height": 202
+    },
+    {
+     "url": "https://i.ytimg.com/vi/ayl3UXKpH1g/hq720.jpg?sqp=-oaymwEcCNAFEJQDSFXyq4qpAw4IARUAAIhCGAFwAcABBg==&rs=AOn4CLDNZMEMzcva8IEUpGAaFcpIY_3n4g",
+     "width": 720,
+     "height": 404
+    }
+   ]
+  },
+  {
+   "_type": "url",
+   "ie_key": "Youtube",
+   "id": "I-sH53vXP2A",
+   "url": "https://www.youtube.com/watch?v=I-sH53vXP2A",
+   "title": "\"Fallen Kingdom\" - A Minecraft Parody of Coldplay's Viva la Vida (Music Video)",
+   "duration": 288,
+   "channel": "CaptainSparklez",
+   "channel_url": "https://www.youtube.com/channel/UCshoKvlZGZ20rVgazZp5vnQ",
+   "uploader": "CaptainSparklez",
+   "uploader_url": "https://www.youtube.com/@CaptainSparklez",
+   "thumbnails": [
+    {
+     "url": "https://i.ytimg.com/vi/I-sH53vXP2A/hqdefault.jpg?sqp=-oaymwEcCOADEI4CSFXyq4qpAw4IARUAAIhCGAFwAcABBg==&rs=AOn4CLArZuUVw5XI62vNi8fowAxgB02Zhg",
+     "width": 480,
+     "height": 270
+    }
+   ]
+  }
+ ]
+}

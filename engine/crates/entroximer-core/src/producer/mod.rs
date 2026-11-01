@@ -55,6 +55,10 @@ pub trait Producer: Send + Sync + 'static {
     fn open(&self, start: Option<Ticks>) -> BoxFuture<'static, io::Result<ProducerStream>>;
 }
 
+/// How much a producer reads at once from a pipe or file: large enough that a fast download does
+/// not cost a channel message per few kilobytes.
+pub(crate) const READ_CHUNK: usize = 64 << 10;
+
 /// Formats seconds the way ffmpeg and yt-dlp accept them.
 pub(crate) fn seconds_arg(t: Ticks) -> String {
     format!(

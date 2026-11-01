@@ -11,21 +11,30 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-entroximer-core.workspace = true
+entroximer-core = { workspace = true, features = ["ts"] }
 
 anyhow = "1.0.104"
+async-trait = "0.1"
 axum.workspace = true
+base64.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 clap.workspace = true
+fastrand = "2.5.0"
 hound.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+songbird.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+ts-rs.workspace = true
+url = "2.5.8"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio-tungstenite = "0.29"

@@ -1,7 +1,14 @@
 {
   "name": "entroximer-client",
-  "module": "index.ts",
+  "version": "0.1.0",
+  "description": "TypeScript client for the Entroximer audio engine",
   "type": "module",
+  "exports": "./src/index.ts",
+  "module": "src/index.ts",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },
