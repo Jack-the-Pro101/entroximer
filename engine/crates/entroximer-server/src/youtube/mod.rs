@@ -9,10 +9,9 @@ pub mod command;
 pub mod cookies;
 pub mod session;
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use clap::ValueEnum;
 use entroximer_core::error::display_chain;
@@ -23,6 +22,7 @@ pub use session::{
 };
 
 use crate::config::MediaContext;
+use crate::expiring::Expiring;
 use crate::sources::ResolveError;
 use crate::sources::ytdlp::{self, Failure, SESSION_ENDED_WARNING};
 
@@ -72,44 +72,14 @@ pub enum CheckOutcome {
     Inconclusive(String),
 }
 
-/// Queries that needed an account recently, so repeat plays skip the anonymous attempt.
-#[derive(Debug, Default)]
-struct RecentlyRestricted(Mutex<HashMap<String, Instant>>);
-
-impl RecentlyRestricted {
-    const KEEP_FOR: Duration = Duration::from_secs(24 * 3600);
-    const CAPACITY: usize = 4096;
-
-    fn insert(&self, query: &str) {
-        let mut seen = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if seen.len() >= Self::CAPACITY {
-            seen.retain(|_, at| at.elapsed() < Self::KEEP_FOR);
-            if seen.len() >= Self::CAPACITY
-                && let Some(oldest) = seen
-                    .iter()
-                    .min_by_key(|(_, at)| **at)
-                    .map(|(q, _)| q.clone())
-            {
-                seen.remove(&oldest);
-            }
-        }
-        seen.insert(query.to_owned(), Instant::now());
-    }
-
-    fn contains(&self, query: &str) -> bool {
-        let seen = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        seen.get(query)
-            .is_some_and(|at| at.elapsed() < Self::KEEP_FOR)
-    }
-}
-
 #[derive(Debug)]
 pub struct YouTube {
     pub store: Arc<SessionStore>,
     pub policy: AuthPolicy,
     /// An age-restricted video that only plays when signed in.
     check_video: String,
-    recently_restricted: RecentlyRestricted,
+    /// Queries that needed an account recently, so repeat plays skip the anonymous attempt.
+    recently_restricted: Expiring<String, ()>,
     check_requested: Notify,
     changes: broadcast::Sender<SessionState>,
 }
@@ -117,13 +87,18 @@ pub struct YouTube {
 impl YouTube {
     /// After YouTube refuses the session, at most this often is it checked on demand.
     const ON_DEMAND_CHECK_INTERVAL: Duration = Duration::from_secs(10 * 60);
+    const REMEMBER_RESTRICTED_FOR: Duration = Duration::from_secs(24 * 3600);
+    const REMEMBERED_RESTRICTED: usize = 4096;
 
     pub fn new(dir: PathBuf, policy: AuthPolicy, check_video: String) -> Self {
         Self {
             store: Arc::new(SessionStore::new(dir)),
             policy,
             check_video,
-            recently_restricted: RecentlyRestricted::default(),
+            recently_restricted: Expiring::new(
+                Self::REMEMBER_RESTRICTED_FOR,
+                Self::REMEMBERED_RESTRICTED,
+            ),
             check_requested: Notify::new(),
             changes: broadcast::Sender::new(16),
         }
@@ -138,13 +113,13 @@ impl YouTube {
     pub fn sign_in_first(&self, query: &str) -> bool {
         match self.policy {
             AuthPolicy::Never => false,
-            AuthPolicy::Fallback => self.recently_restricted.contains(query),
+            AuthPolicy::Fallback => self.recently_restricted.get(query).is_some(),
             AuthPolicy::Always => true,
         }
     }
 
     pub fn remember_restricted(&self, query: &str) {
-        self.recently_restricted.insert(query);
+        self.recently_restricted.insert(query.to_owned(), ());
     }
 
     /// A session copy for one yt-dlp run, if the policy allows one and a usable session exists.
@@ -257,24 +232,5 @@ pub async fn maintain_session(ctx: Arc<MediaContext>, interval: Duration) {
                 tokio::time::sleep_until(checked_at + spacing).await;
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn remembers_restricted_queries_within_capacity() {
-        let recent = RecentlyRestricted::default();
-        recent.insert("a");
-        assert!(recent.contains("a"));
-        assert!(!recent.contains("b"));
-        for i in 0..RecentlyRestricted::CAPACITY {
-            recent.insert(&i.to_string());
-        }
-        let seen = recent.0.lock().unwrap();
-        assert_eq!(seen.len(), RecentlyRestricted::CAPACITY);
-        assert!(!seen.contains_key("a"), "the oldest entry made room");
     }
 }

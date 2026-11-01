@@ -8,17 +8,19 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Args;
-use entroximer_core::dsp::{GraphRunner, GraphSpec, NodeRegistry, parse_chain};
-use entroximer_core::player::{Player, SAMPLE_RATE, Status};
+use entroximer_core::dsp::{
+    CHANNELS, Effects, GraphSpec, NodeRegistry, PresetRegistry, PresetSelection, parse_chain,
+};
+use entroximer_core::player::{PlaybackError, Player, SAMPLE_RATE, Status};
 use entroximer_core::timeline::{Ticks, duration, ticks};
 use hound::{SampleFormat, WavSpec, WavWriter};
+use serde_json::{Map, Value};
 use tokio::runtime::Handle;
 
 use crate::config::MediaContext;
 use crate::managed_ytdlp::{YtDlpBinary, log_outcome};
 
 const BLOCK_FRAMES: usize = 960;
-const CHANNELS: usize = 2;
 
 #[derive(Debug, Args)]
 pub struct RenderArgs {
@@ -41,16 +43,20 @@ pub struct RenderArgs {
     duration: Option<Timestamp>,
 
     /// Effect chain, e.g. `lowpass(800) => reverb(10, 2, 0.5)`.
-    #[arg(long, conflicts_with = "graph")]
+    #[arg(long, conflicts_with_all = ["graph", "preset"])]
     chain: Option<String>,
 
     /// Effect graph as JSON: `{"nodes": [...], "edges": [...]}`.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "preset")]
     graph: Option<String>,
+
+    /// A preset, optionally with parameters as JSON: `nightcore` or `bass_boost={"gain_db": 9}`.
+    #[arg(long)]
+    preset: Option<String>,
 }
 
 pub async fn run(args: RenderArgs, ctx: &MediaContext) -> anyhow::Result<()> {
-    let graph = build_graph(&args)?;
+    let effects = build_effects(&args)?;
     if let YtDlpBinary::Managed(managed) = &ctx.ytdlp
         && managed.installed_version().await.is_none()
     {
@@ -74,36 +80,92 @@ pub async fn run(args: RenderArgs, ctx: &MediaContext) -> anyhow::Result<()> {
     let player_cfg = ctx.player_config();
     let rt = Handle::current();
     tokio::task::spawn_blocking(move || {
-        let mut player = Player::new(
+        let player = Player::new(
             rt,
             track.producer,
             player_cfg,
             args.start.map(|t| ticks(t.0)),
         );
-        player.set_graph(graph);
-        render_to_wav(&mut player, &args)
+        render_to_wav(player, effects, &args)
     })
     .await
     .context("renderer panicked")?
 }
 
-fn build_graph(args: &RenderArgs) -> anyhow::Result<Option<GraphRunner>> {
+fn build_effects(args: &RenderArgs) -> anyhow::Result<Option<Effects>> {
     let registry = NodeRegistry::with_builtins();
-    let spec: Option<GraphSpec> = match (&args.chain, &args.graph) {
-        (Some(chain), _) => Some(parse_chain(&registry, chain).context("invalid --chain")?),
-        (None, Some(json)) => Some(serde_json::from_str(json).context("invalid --graph JSON")?),
-        (None, None) => None,
+    let spec: Option<GraphSpec> = match (&args.chain, &args.graph, &args.preset) {
+        (Some(chain), ..) => Some(parse_chain(&registry, chain).context("invalid --chain")?),
+        (_, Some(json), _) => Some(serde_json::from_str(json).context("invalid --graph JSON")?),
+        (.., Some(preset)) => Some(
+            PresetRegistry::with_builtins()
+                .build(&parse_preset(preset)?)
+                .context("invalid --preset")?,
+        ),
+        (None, None, None) => None,
     };
+    if let Some(spec) = &spec {
+        tracing::info!(graph = %serde_json::to_string(spec)?, "effects");
+    }
     spec.map(|spec| {
-        let net = registry
+        registry
             .compile(&spec, f64::from(SAMPLE_RATE))
-            .context("invalid effect graph")?;
-        Ok(GraphRunner::new(Box::new(net)))
+            .context("invalid effect graph")
     })
     .transpose()
 }
 
-fn render_to_wav(player: &mut Player, args: &RenderArgs) -> anyhow::Result<()> {
+/// `name` or `name={"param": value}`.
+fn parse_preset(text: &str) -> anyhow::Result<PresetSelection> {
+    let (name, params) = match text.split_once('=') {
+        Some((name, json)) => (
+            name,
+            Some(
+                serde_json::from_str::<Map<String, Value>>(json)
+                    .context("preset parameters must be a JSON object")?,
+            ),
+        ),
+        None => (text, None),
+    };
+    Ok(PresetSelection {
+        name: name.trim().to_owned(),
+        params,
+    })
+}
+
+/// The player as a source that never runs dry: it waits for media while buffering, as an
+/// offline renderer can, and fills with silence once the track has ended.
+struct PlayerSource {
+    player: Player,
+    ended: bool,
+    error: Option<PlaybackError>,
+}
+
+impl PlayerSource {
+    fn fill(&mut self, out: &mut [f32]) {
+        let mut filled = 0;
+        while filled < out.len() && !self.ended && self.error.is_none() {
+            match self.player.render(&mut out[filled..]) {
+                Ok(rendered) => {
+                    filled += rendered.frames * CHANNELS;
+                    match rendered.status {
+                        Status::Playing => {}
+                        Status::Buffering => self.player.wait_for_media(Duration::from_millis(50)),
+                        Status::Ended => self.ended = true,
+                    }
+                }
+                Err(e) => self.error = Some(e),
+            }
+        }
+        out[filled..].fill(0.0);
+    }
+}
+
+fn render_to_wav(
+    player: Player,
+    mut effects: Option<Effects>,
+    args: &RenderArgs,
+) -> anyhow::Result<()> {
     let spec = WavSpec {
         channels: CHANNELS as u16,
         sample_rate: SAMPLE_RATE,
@@ -119,11 +181,16 @@ fn render_to_wav(player: &mut Player, args: &RenderArgs) -> anyhow::Result<()> {
     let limit = args.duration.map(|d| ticks(d.0));
     let mut written: Ticks = 0;
     let mut block = vec![0.0; BLOCK_FRAMES * CHANNELS];
+    let mut source = PlayerSource {
+        player,
+        ended: false,
+        error: None,
+    };
 
-    loop {
+    while !source.ended {
         while let Some(seek) = seeks.next_if(|s| ticks(s.at) <= written) {
             tracing::info!(at = ?seek.at, to = ?seek.to, "seeking");
-            player.seek(ticks(seek.to))?;
+            source.player.seek(ticks(seek.to))?;
         }
         // stop exactly at the next seek or the duration limit
         let next_stop = [seeks.peek().map(|s| ticks(s.at)), limit]
@@ -138,19 +205,21 @@ fn render_to_wav(player: &mut Player, args: &RenderArgs) -> anyhow::Result<()> {
             break;
         }
 
-        let rendered = player.render(&mut block[..frames * CHANNELS])?;
-        for &sample in &block[..rendered.frames * CHANNELS] {
+        let block = &mut block[..frames * CHANNELS];
+        match &mut effects {
+            Some(effects) => effects.render(block, |input| source.fill(input)),
+            None => source.fill(block),
+        }
+        if let Some(error) = source.error.take() {
+            return Err(error.into());
+        }
+        for &sample in block.iter() {
             wav.write_sample(sample)?;
         }
-        written += rendered.frames as Ticks;
-        match rendered.status {
-            Status::Playing => {}
-            Status::Buffering => player.wait_for_media(Duration::from_millis(50)),
-            Status::Ended => break,
-        }
+        written += frames as Ticks;
     }
     wav.finalize()?;
-    let stats = player.cache_stats();
+    let stats = source.player.cache_stats();
     tracing::info!(
         output = %args.output.display(),
         seconds = duration(written).as_secs_f64(),
@@ -228,6 +297,16 @@ mod tests {
         assert_eq!(secs("1:2:3:4"), None);
         assert_eq!(secs("-5"), None);
         assert_eq!(secs("x"), None);
+    }
+
+    #[test]
+    fn parses_presets_with_and_without_parameters() {
+        let plain = parse_preset("nightcore").unwrap();
+        assert_eq!(plain.name, "nightcore");
+        assert_eq!(plain.params, None);
+        let tuned = parse_preset(r#"bass_boost={"gain_db": 9}"#).unwrap();
+        assert_eq!(tuned.params.unwrap()["gain_db"], 9);
+        assert!(parse_preset("bass_boost=9").is_err());
     }
 
     #[test]

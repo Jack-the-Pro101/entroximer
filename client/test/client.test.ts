@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
-import { Entroximer, EntroximerError } from "../src";
+import { Entroximer, EntroximerError, PROTOCOL_VERSION, append, withParams } from "../src";
 import type {
   EntroximerOptions,
   GatewayVoiceStateUpdate,
@@ -62,7 +62,7 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
 
   test("connects and describes the engine", async () => {
     const info = await client().connect();
-    expect(info.protocol).toBe(2);
+    expect(info.protocol).toBe(PROTOCOL_VERSION);
     expect(info.nodes.map((node) => node.type)).toContain("reverb");
     const youtube = info.providers.find((provider) => provider.name === "youtube");
     expect(youtube?.searchPrefixes).toEqual(["ytsearch", "ytmsearch"]);
@@ -109,6 +109,26 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
     await player.destroy();
     await destroyed.called;
     expect(manager.players.has("1")).toBe(false);
+  });
+
+  test("applies presets and builds on them", async () => {
+    const manager = client();
+    const info = await manager.connect();
+    expect(info.presets.map((preset) => preset.name)).toContain("bass_boost");
+
+    const player = manager.player("2");
+    await player.setPreset("bass_boost", { gain_db: 9 });
+    const graph = player.graph!;
+    expect(graph.nodes.find((node) => node.id === "bass")?.params["gain_db"]).toBe(9);
+
+    // the preset's graph is a starting point
+    await player.setGraph(append(withParams(graph, "bass", { gain_db: 12 }), { type: "reverb", id: "room" }));
+    expect(player.graph?.nodes.find((node) => node.id === "bass")?.params["gain_db"]).toBe(12);
+    expect(player.graph?.nodes.at(-1)?.id).toBe("room");
+
+    expect((await manager.buildPreset("nightcore")).rate).toBe(1.25);
+    expect((await failure(player.setPreset("warp"))).code).toBe("bad_request");
+    await player.destroy();
   });
 
   test("load and search errors carry the engine's error code", async () => {

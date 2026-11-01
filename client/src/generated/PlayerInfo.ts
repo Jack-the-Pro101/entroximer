@@ -9,4 +9,8 @@ export type PlayerInfo = { guildId: Snowflake, track: Track | null,
 /**
  * The current track's queue item.
  */
-itemId: string | null, queue: QueueState, paused: boolean, volume: number, graph: GraphSpec | null, state: PlayerState, };
+itemId: string | null, queue: QueueState, paused: boolean, volume: number, 
+/**
+ * The effect graph, as set or as a preset built it.
+ */
+graph: GraphSpec | null, state: PlayerState, };

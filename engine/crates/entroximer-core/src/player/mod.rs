@@ -1,4 +1,4 @@
-//! Turns a producer into processed 48 kHz stereo PCM, with seeking.
+//! Turns a producer into 48 kHz stereo PCM, with seeking.
 //!
 //! The player owns the track's [`Timeline`] and the producers filling it. Rendering never blocks:
 //! when media is missing it reports [`Status::Buffering`] and asks the coverage policy how to get
@@ -18,7 +18,7 @@ pub use coverage::{Coverage, CoverageConfig};
 
 use crate::decode::{DecodeError, Decoder};
 use crate::demux::DemuxTask;
-use crate::dsp::{CHANNELS, GraphRunner};
+use crate::dsp::CHANNELS;
 use crate::error::{MediaError, display_chain};
 use crate::producer::{Producer, ProducerCaps};
 use crate::resample::{ResampleError, Resampler};
@@ -124,7 +124,6 @@ pub struct Player {
     /// Live producers; dropping one cancels it.
     producers: Vec<DemuxTask>,
     pipeline: Option<Pipeline>,
-    graph: Option<GraphRunner>,
     /// Media time of the next packet to decode.
     cursor: Ticks,
     /// Decoded 48 kHz stereo waiting to be rendered.
@@ -172,7 +171,6 @@ impl Player {
             cfg,
             producers: Vec::new(),
             pipeline: None,
-            graph: None,
             cursor: 0,
             pcm: VecDeque::new(),
             pcm_end: None,
@@ -203,13 +201,12 @@ impl Player {
         let status = self.fill(wanted)?;
 
         let frames = wanted.min(self.pcm.len() / CHANNELS);
-        let out = &mut out[..frames * CHANNELS];
-        for (o, s) in out.iter_mut().zip(self.pcm.drain(..frames * CHANNELS)) {
-            *o = s;
-        }
-        if let Some(graph) = &mut self.graph {
-            graph.process(out);
-        }
+        let samples = frames * CHANNELS;
+        let (front, back) = self.pcm.as_slices();
+        let from_front = samples.min(front.len());
+        out[..from_front].copy_from_slice(&front[..from_front]);
+        out[from_front..samples].copy_from_slice(&back[..samples - from_front]);
+        self.pcm.drain(..samples);
 
         let status = match status {
             Status::Ended if !self.pcm.is_empty() => Status::Playing,
@@ -228,9 +225,6 @@ impl Player {
         if let Some(pipeline) = &mut self.pipeline {
             pipeline.reset()?;
         }
-        if let Some(graph) = &mut self.graph {
-            graph.reset();
-        }
         self.reposition(target.max(0));
         match self.timeline.pending_at(self.cursor) {
             Some(pending) => self.cover(pending, self.cursor),
@@ -247,11 +241,6 @@ impl Player {
             Some(end) => end - (self.pcm.len() / CHANNELS) as Ticks,
             None => self.cursor,
         }
-    }
-
-    /// Replaces the post-processing graph (`None` removes it) from the next render on.
-    pub fn set_graph(&mut self, graph: Option<GraphRunner>) {
-        self.graph = graph;
     }
 
     pub fn caps(&self) -> ProducerCaps {

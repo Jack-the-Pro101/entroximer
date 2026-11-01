@@ -16,6 +16,7 @@ use tokio::sync::Semaphore;
 use crate::cache::CacheDir;
 use crate::managed_ytdlp::{ManagedYtDlp, YtDlpBinary};
 use crate::sources::Sources;
+use crate::sources::spotify::DEFAULT_MIRROR_SEARCHES;
 use crate::youtube::{AuthPolicy, YouTube};
 
 const MIB: u64 = 1 << 20;
@@ -30,6 +31,9 @@ pub struct MediaConfig {
 
     #[command(flatten)]
     pub sources: SourcesConfig,
+
+    #[command(flatten)]
+    pub spotify: SpotifyConfig,
 
     /// Persistent state such as the managed yt-dlp. Defaults to `$XDG_DATA_HOME/entroximer`.
     #[arg(long, env = "ENTROXIMER_DATA_DIR")]
@@ -150,6 +154,41 @@ pub struct SourcesConfig {
 }
 
 #[derive(Clone, Debug, Args)]
+pub struct SpotifyConfig {
+    /// Client ID of a Spotify app (developer.spotify.com), which enables Spotify links and
+    /// `spsearch:`. Spotify only provides the metadata; tracks play from YouTube.
+    #[arg(long = "spotify-client-id", env = "ENTROXIMER_SPOTIFY_CLIENT_ID")]
+    pub client_id: Option<String>,
+
+    /// Client secret of that Spotify app.
+    #[arg(
+        long = "spotify-client-secret",
+        env = "ENTROXIMER_SPOTIFY_CLIENT_SECRET",
+        hide_env_values = true
+    )]
+    pub client_secret: Option<String>,
+
+    /// Country whose Spotify catalog is read, as a two-letter code.
+    #[arg(
+        long = "spotify-market",
+        env = "ENTROXIMER_SPOTIFY_MARKET",
+        default_value = "US"
+    )]
+    pub market: String,
+
+    /// Searches that find a Spotify track on YouTube, tried in order, comma separated. `{isrc}`,
+    /// `{title}`, `{artist}` (the first) and `{artists}` stand for the track's; searches using
+    /// `{isrc}` are skipped for tracks without one.
+    #[arg(
+        long = "spotify-mirror",
+        env = "ENTROXIMER_SPOTIFY_MIRROR",
+        value_delimiter = ',',
+        default_values = DEFAULT_MIRROR_SEARCHES
+    )]
+    pub mirror: Vec<String>,
+}
+
+#[derive(Clone, Debug, Args)]
 pub struct YouTubeConfig {
     /// When the YouTube session is sent: only for videos that need it (age-restricted, bot
     /// checks, members-only), which keeps the account out of most traffic, always, or never.
@@ -249,7 +288,7 @@ impl MediaContext {
             config.youtube.auth,
             config.youtube.check_video.clone(),
         );
-        let sources = Sources::new(&config.sources);
+        let sources = Sources::new(&config.sources, &config.spotify);
         Ok(Self {
             config,
             ytdlp,

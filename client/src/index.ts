@@ -20,9 +20,9 @@ export type {
   Requester,
   Results,
 } from "./connection";
-export { EntroximerError } from "./errors";
+export { EntroximerError, toEntroximerError } from "./errors";
 export type { ClientErrorCode } from "./errors";
-export { chain, parseChain } from "./graph";
+export { append, chain, parseChain, prepend, withParams, withRate } from "./graph";
 export type { Effect } from "./graph";
 export { Emitter } from "./emitter";
 
@@ -43,6 +43,8 @@ export type * from "./generated/PlayerInfo";
 export type * from "./generated/PlayerState";
 export type * from "./generated/PlayerUpdate";
 export type * from "./generated/PlaylistInfo";
+export type * from "./generated/PresetDescriptor";
+export type * from "./generated/PresetSelection";
 export type * from "./generated/ProviderDescriptor";
 export type * from "./generated/QueueAdded";
 export type * from "./generated/QueueChange";

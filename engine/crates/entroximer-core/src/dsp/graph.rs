@@ -1,23 +1,4 @@
 //! Graph descriptions sent by clients, and their compilation into fundsp networks.
-//!
-//! ```json
-//! {
-//!   "nodes": [
-//!     { "id": "low", "type": "lowpass", "params": { "cutoff": 400 } },
-//!     { "id": "verb", "type": "reverb" }
-//!   ],
-//!   "edges": [
-//!     { "from": "input", "to": "low" },
-//!     { "from": "input", "to": "verb" },
-//!     { "from": "low", "to": "output" },
-//!     { "from": "verb:1", "to": "output:1" }
-//!   ]
-//! }
-//! ```
-//!
-//! `input` and `output` are the graph's own stereo ports. An endpoint without a port connects
-//! all ports pairwise. Several sources feeding one input are summed. Without `edges`, the nodes
-//! form a chain from `input` to `output` in the order they are listed.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
@@ -29,16 +10,47 @@ use fundsp::prelude32::pass;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::{NodeRegistry, ParamError};
+use super::effects::Effects;
+use super::rate::{RATE_RANGE, RateStage};
+use super::{NodeRegistry, ParamError, ParamSpecs};
 
 pub const GRAPH_INPUT: &str = "input";
 pub const GRAPH_OUTPUT: &str = "output";
 /// Graphs process interleaved stereo.
 pub const CHANNELS: usize = 2;
 
+/// How nodes connect between the graph's own stereo `input` and `output`:
+///
+/// ```json
+/// {
+///   "nodes": [
+///     { "id": "low", "type": "lowpass", "params": { "cutoff": 400 } },
+///     { "id": "verb", "type": "reverb", "params": { "mix": 1 } }
+///   ],
+///   "edges": [
+///     { "from": "input", "to": "low" },
+///     { "from": "input", "to": "verb" },
+///     { "from": "low", "to": "output" },
+///     { "from": "verb:1", "to": "output:1" }
+///   ]
+/// }
+/// ```
+///
+/// An endpoint without a port connects all ports pairwise. Several sources feeding one input
+/// are summed. Without `edges`, the nodes form a chain from `input` to `output` in the order
+/// they are listed.
+///
+/// `rate` (0.5 to 2, default 1) plays what feeds `input` faster and higher or slower and lower,
+/// like a turntable at another speed; nightcore is a rate of about 1.25. It is not a node because
+/// it changes how much of the tracks is consumed, which nodes (one frame in, one frame out)
+/// cannot.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GraphSpec {
+    /// Playback rate of what feeds the graph's input, 0.5 to 2; 1 if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub rate: Option<f32>,
     pub nodes: Vec<NodeSpec>,
     /// When empty (or absent), `nodes` form a chain from the graph input to the graph output,
     /// in order.
@@ -122,6 +134,8 @@ impl fmt::Display for Endpoint {
 
 #[derive(Debug, thiserror::Error)]
 pub enum GraphError {
+    #[error("the rate must be within {min}..={max}, got {0}", min = RATE_RANGE.start(), max = RATE_RANGE.end())]
+    Rate(f32),
     #[error("unknown node type `{0}`")]
     UnknownType(String),
     #[error("node id `{0}` is used more than once")]
@@ -177,8 +191,26 @@ struct Placed {
 }
 
 impl NodeRegistry {
-    /// Validates `spec` and builds a stereo network running at `sample_rate`.
-    pub fn compile(&self, spec: &GraphSpec, sample_rate: f64) -> Result<Net, GraphError> {
+    /// Validates `spec` and builds its effects, running at `sample_rate`.
+    pub fn compile(&self, spec: &GraphSpec, sample_rate: f64) -> Result<Effects, GraphError> {
+        let passes_through = spec.nodes.is_empty() && spec.edges.is_empty();
+        let network = if passes_through {
+            None
+        } else {
+            Some(Box::new(self.network(spec, sample_rate)?) as Box<dyn AudioUnit>)
+        };
+        let rate = match spec.rate {
+            None | Some(1.0) => None,
+            Some(rate) if RATE_RANGE.contains(&rate) => {
+                Some(RateStage::new(rate).map_err(|_| GraphError::Rate(rate))?)
+            }
+            Some(rate) => return Err(GraphError::Rate(rate)),
+        };
+        Ok(Effects::new(rate, network))
+    }
+
+    /// Builds the nodes of `spec` into a stereo network running at `sample_rate`.
+    fn network(&self, spec: &GraphSpec, sample_rate: f64) -> Result<Net, GraphError> {
         let mut net = Net::new(CHANNELS, CHANNELS);
         let mut placed = Vec::with_capacity(spec.nodes.len());
         let mut index: HashMap<&str, usize> = HashMap::with_capacity(spec.nodes.len());
@@ -194,6 +226,7 @@ impl NodeRegistry {
                 .ok_or_else(|| GraphError::UnknownType(node.kind.clone()))?;
             let params = factory
                 .descriptor()
+                .params
                 .resolve(&node.params)
                 .map_err(|source| GraphError::Param {
                     node: node.id.clone(),
@@ -423,20 +456,18 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::dsp::GraphRunner;
 
     fn spec(value: serde_json::Value) -> GraphSpec {
         serde_json::from_value(value).expect("valid graph json")
     }
 
     fn run(spec: &GraphSpec, input: [f32; 2]) -> [f32; 2] {
-        let net = NodeRegistry::with_builtins()
+        let mut effects = NodeRegistry::with_builtins()
             .compile(spec, 48_000.0)
             .unwrap();
-        let mut runner = GraphRunner::new(Box::new(net));
-        let mut buf = [input[0], input[1]];
-        runner.process(&mut buf);
-        buf
+        let mut out = [0.0; 2];
+        effects.render(&mut out, |source| source.copy_from_slice(&input));
+        out
     }
 
     #[test]
@@ -523,6 +554,24 @@ mod tests {
                 json!({ "nodes": [], "edges": [{ "from": "a:x", "to": "output" }] })
             )
             .is_err()
+        );
+        assert!(matches!(
+            compile(json!({ "rate": 3.0, "nodes": [] })),
+            Some(GraphError::Rate(_))
+        ));
+    }
+
+    #[test]
+    fn rates_round_trip_and_stay_out_of_the_json_at_one() {
+        let sped_up = spec(json!({ "rate": 1.25, "nodes": [] }));
+        assert_eq!(sped_up.rate, Some(1.25));
+        let effects = NodeRegistry::with_builtins()
+            .compile(&sped_up, 48_000.0)
+            .unwrap();
+        assert_eq!(effects.rate(), 1.25);
+        assert_eq!(
+            serde_json::to_value(GraphSpec::default()).unwrap(),
+            json!({ "nodes": [], "edges": [] })
         );
     }
 }

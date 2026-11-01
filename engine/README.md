@@ -1,14 +1,14 @@
 # Entroximer engine
 
-The Rust audio engine: loads tracks (yt-dlp, ffmpeg), caches and seeks them, runs effect graphs
-and plays them into Discord voice channels, controlled by bots over a WebSocket protocol inspired
-by (but not compatible with) Lavalink v4.
+The Rust audio engine: loads tracks (yt-dlp, ffmpeg, Spotify metadata played from YouTube), caches
+and seeks them, runs effect graphs and presets, and plays them into Discord voice channels,
+controlled by bots over a WebSocket protocol inspired by (but not compatible with) Lavalink v4.
 
 ## Layout
 
 | Crate | Contents |
 |---|---|
-| `crates/entroximer-core` | Producers, the packet timeline, demuxing/decoding, DSP graphs, the player, the gapless deck |
+| `crates/entroximer-core` | Producers, the packet timeline, demuxing/decoding, effects (graphs, presets, playback rate), the player, the gapless deck |
 | `crates/entroximer-server` | The `entroximer` binary: configuration, track sources, the client API, voice, `serve` and `render` |
 
 ## Commands
@@ -19,12 +19,12 @@ ENTROXIMER_PASSWORD=change-me cargo run -p entroximer-server -- serve
 
 # play a track through the whole pipeline into a WAV file
 cargo run -p entroximer-server -- render "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
-    --start 0:30 --duration 20 --seek 5=2:00 --chain "lowpass(4000) => reverb(10, 2, 0.5)"
+    --start 0:30 --duration 20 --seek 5=2:00 --chain "lowpass(4000) => reverb(10, 2, 0.5, 0.3)"
 ```
 
 `render` accepts URLs (anything yt-dlp supports), searches such as `ytsearch:artist - title`,
-and local files. Effects can also be given as a graph with `--graph '{"nodes": [...], "edges": [...]}'`
-(see `crates/entroximer-core/src/dsp/graph.rs`).
+and local files. Effects can also be a graph, `--graph '{"nodes": [...], "edges": [...]}'`, or a
+preset, `--preset nightcore` or `--preset 'bass_boost={"gain_db": 9}'` (see [Effects](#effects)).
 
 Requires `ffmpeg`, a JavaScript runtime (Deno) for YouTube, and yt-dlp, either on the `PATH` or
 managed by the engine (below).
@@ -64,9 +64,10 @@ order: the events a request causes always arrive before its response.
 | `op` | Does |
 |---|---|
 | `tracks.load` | Loads a link, a search (`ytsearch:terms`, or plain text with the default search) or, if allowed, a local path: a `track`, a `playlist`, `search` results or `empty` |
-| `tracks.search` | Searches one source by its prefix (`ytsearch`, `ytmsearch`, `scsearch`), up to 50 results |
+| `tracks.search` | Searches one source by its prefix (`ytsearch`, `ytmsearch`, `scsearch`, `spsearch`), up to 50 results |
 | `tracks.decode` | Reads tracks back from their `encoded` form |
-| `player.update` | Creates or changes a guild's player: `track` (plays now; `null` stops), `position`, `endTime`, `paused`, `volume`, `graph` (effects), `voice` |
+| `presets.build` | The effect graph a preset builds (`name`, optional `params`), without applying it |
+| `player.update` | Creates or changes a guild's player: `track` (plays now; `null` stops), `position`, `endTime`, `paused`, `volume`, `graph` or `preset` (effects), `voice`. A refused update changes nothing |
 | `player.get` / `player.destroy` | Reads a player, or stops it and leaves the voice channel |
 | `queue.get` | A page of a player's queue |
 | `queue.add` | Adds tracks (encoded, or queries to load) at an index; with nothing playing, the first item starts |
@@ -74,7 +75,7 @@ order: the events a request causes always arrive before its response.
 | `queue.skip` | Plays the next item (or `toItem`), instantly if it is prepared |
 | `queue.configure` | Sets `repeat`: `off`, `track` or `queue` |
 | `session.configure` | Sets how long players wait, paused, for a disconnected client to resume |
-| `node.info` / `node.stats` | Versions, sources and their searches, effect node types, the YouTube session state; load and cache usage |
+| `node.info` / `node.stats` | Versions, sources and their searches, effect node types and presets, the YouTube session state; load and cache usage |
 
 Events: `trackStart`, `trackEnd` (with a reason), `trackError` and `trackStuck`, each with the
 track's queue `itemId`; `queueChanged` (one change, numbered by `version`) and `queueEnd`;
@@ -106,12 +107,68 @@ queue update.
 | `newgrounds`, `bandcamp` | their track and collection pages | |
 | `http` | Direct links to audio files and internet radio (MP3, Ogg, FLAC, WAV, M4A, HLS, ...), described from their tags | |
 | `generic` | Any other page yt-dlp can extract | |
+| `spotify` | open.spotify.com tracks, albums, playlists and artists, `spotify:` URIs; only with a Spotify app (below) | `spsearch` |
 | `local` | Files on the engine's host; only with `ENTROXIMER_ALLOW_LOCAL_FILES` | |
 
-Everything but `http` and `local` goes through yt-dlp. `http` and `generic` refuse links to the
+Everything but `http`, `local` and Spotify's metadata goes through yt-dlp. `http` and `generic` refuse links to the
 engine's own machine and private networks (unless `ENTROXIMER_ALLOW_PRIVATE_URLS`), so clients
 cannot use the engine to reach internal services. Newgrounds currently refuses automated
 requests; it works as far as Newgrounds lets it.
+
+## Spotify
+
+Spotify's audio is DRM-protected, so like Lavalink's LavaSrc the engine only reads Spotify's
+catalog and plays every Spotify track from its recording on YouTube. Tracks keep Spotify's title,
+artists, album, artwork, ISRC and link; only their length becomes that of what plays.
+
+1. Create an app at <https://developer.spotify.com/dashboard> (its owner needs Spotify Premium)
+   and give the engine its credentials: `ENTROXIMER_SPOTIFY_CLIENT_ID` and
+   `ENTROXIMER_SPOTIFY_CLIENT_SECRET`. Without them there is no `spotify` provider.
+2. Optionally set `ENTROXIMER_SPOTIFY_MARKET` (the country whose catalog is read, `US` by default).
+
+A track is matched when it is first played or preloaded: the searches of `ENTROXIMER_SPOTIFY_MIRROR`
+run in order (by default `ytsearch:"{isrc}"`, `ytmsearch:{artist} {title}`, `ytsearch:{artist} - {title}`),
+and the best result whose title shares most of the track's words, whose length is within 7 s or
+10 % of it and that is the same kind of recording (a "live" or "remix" on one side only rules it
+out) plays. Searching by ISRC finds the exact recording when YouTube knows it; its results are
+checked like the others, because it returns unrelated videos as well. Matches are remembered for
+a day.
+
+Spotify restricts apps in its default development mode (since February 2026): searches return at
+most ten results per request (the engine pages through them), playlists only list their tracks to
+apps with extended quota (the engine then explains this instead of loading them), and artists'
+top tracks are unavailable, so an artist link loads what a search for the artist finds.
+
+## Effects
+
+A player's effects are a graph of nodes between its tracks and the voice connection; they carry
+across tracks, so a reverb's tail rings into the next one. `node.info` lists the node types with
+their parameters and ranges:
+
+| Nodes | |
+|---|---|
+| `volume`, `limiter`, `drive`, `channel_mix` | Gain, peak limiting, saturation, mixing the channels (mono, swapped, center removed) |
+| `lowpass`, `highpass`, `bandpass`, `bell`, `lowshelf`, `highshelf` | Filters and equalizer bands |
+| `reverb`, `echo`, `chorus`, `flanger`, `phaser` | Space and modulation; `reverb` and `echo` have a dry/wet `mix` |
+| `tremolo`, `vibrato`, `auto_pan`, `pitch` | Periodic volume and pitch, side-to-side movement ("8D"), pitch shift at the same speed |
+
+```json
+{ "rate": 1.25,
+  "nodes": [{ "id": "low", "type": "lowpass", "params": { "cutoff": 800 } }, { "id": "room", "type": "reverb" }] }
+```
+
+Without `edges` the nodes form a chain; with them, any graph (see `GraphSpec` in
+`crates/entroximer-core/src/dsp/graph.rs`). `rate` (0.5 to 2) plays the tracks faster and higher
+or slower and lower, like a turntable: it resamples what feeds the graph, so the playhead moves
+`rate` times as fast, and it carries across tracks without gaps.
+
+Presets build ready-made graphs: `bass_boost`, `nightcore`, `sped_up`, `vaporwave`,
+`slowed_reverb`, `8d`, `karaoke`, `lofi`, `phonograph`, `telephone`, `chipmunk`, `deep` and
+`concert_hall`, several with parameters (`bass_boost` takes `gain_db` and `frequency`). Their
+nodes have readable ids, e.g. `bass_boost` is a `subsonic` high-pass, a `headroom` gain, the `bass`
+shelf, a `mud` cut and a `limiter`. `player.update` with `preset` applies one, and the player's
+`graph` then shows its nodes, ready to be changed or extended and set again as `graph`;
+`presets.build` returns the graph without applying it.
 
 ## Queues
 
@@ -215,6 +272,9 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_YTDLP_UPDATE_HOURS` | `24` | Update check interval; `0` installs once and never updates |
 | `ENTROXIMER_YTDLP`, `ENTROXIMER_FFMPEG`, `ENTROXIMER_FFPROBE` | `yt-dlp`, `ffmpeg`, `ffprobe` | Executables (`ENTROXIMER_YTDLP` only when not managed) |
 | `ENTROXIMER_PYTHON` | `python3` | Python used for the managed install |
+| `ENTROXIMER_SPOTIFY_CLIENT_ID` / `ENTROXIMER_SPOTIFY_CLIENT_SECRET` | none | A Spotify app's credentials, which enable Spotify links and `spsearch` |
+| `ENTROXIMER_SPOTIFY_MARKET` | `US` | Country whose Spotify catalog is read |
+| `ENTROXIMER_SPOTIFY_MIRROR` | see [Spotify](#spotify) | Comma-separated searches that find Spotify tracks on YouTube; `{isrc}`, `{title}`, `{artist}`, `{artists}` |
 | `ENTROXIMER_YOUTUBE_AUTH` | `fallback` | When to send the YouTube session: `fallback`, `always`, `never` |
 | `ENTROXIMER_YOUTUBE_COOKIES_FILE` | | cookies.txt imported whenever it changes, e.g. a secret |
 | `ENTROXIMER_YOUTUBE_CHECK_HOURS` | `12` | Session check interval; `0` disables it |

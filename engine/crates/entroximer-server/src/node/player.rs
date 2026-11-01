@@ -20,14 +20,14 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use entroximer_core::deck::{Deck, DeckEvent, DeckTrack, EndReason, TrackId};
-use entroximer_core::dsp::{GraphRunner, GraphSpec};
+use entroximer_core::dsp::GraphSpec;
 use entroximer_core::error::display_chain;
 use entroximer_core::player::{PlaybackError, Player, SAMPLE_RATE};
-use entroximer_core::timeline::{TICKS_PER_SECOND, Ticks, TimelineStats};
+use entroximer_core::timeline::{Ticks, TimelineStats, ticks};
 use songbird::events::context_data::DisconnectReason;
 use songbird::id::{ChannelId, GuildId, UserId};
 use songbird::input::{Input, RawAdapter};
@@ -52,6 +52,8 @@ use crate::api::protocol::{
 const PRELOAD_TICK: Duration = Duration::from_millis(500);
 /// Queue items failing to load in a row after which the queue waits for the client.
 const MAX_FAILURES: u32 = 5;
+/// Percent.
+const MAX_VOLUME: u16 = 1000;
 
 /// Something for the player's event task.
 pub(super) enum Signal {
@@ -167,56 +169,78 @@ impl GuildPlayer {
         player
     }
 
+    /// Applies a client's changes. Everything that can be refused is checked before anything
+    /// changes, so a refused update changes nothing (except joining voice, which stands on its
+    /// own).
     pub async fn update(&self, node: &Node, update: PlayerUpdate) -> Result<PlayerInfo, ApiError> {
         let _in_order = self.updating.lock().await;
 
-        if let Some(voice) = update.voice {
-            self.connect(voice).await?;
+        if update.volume.is_some_and(|volume| volume > MAX_VOLUME) {
+            return Err(bad_request(format!("volume must be 0 to {MAX_VOLUME}")));
         }
-        if let Some(volume) = update.volume {
-            if volume > 1000 {
-                return Err(ApiError::new(
-                    ErrorCode::BadRequest,
-                    "volume must be 0 to 1000",
-                ));
+        let graph = match (update.graph, update.preset) {
+            (Some(_), Some(_)) => {
+                return Err(bad_request("give either `graph` or `preset`, not both"));
             }
+            (Some(graph), None) => Some(graph),
+            (None, Some(preset)) => Some(Some(
+                node.presets
+                    .build(&preset)
+                    .map_err(|e| bad_request(display_chain(&e)))?,
+            )),
+            (None, None) => None,
+        };
+        let effects = match &graph {
+            Some(Some(spec)) => Some(Some(
+                node.registry
+                    .compile(spec, f64::from(SAMPLE_RATE))
+                    .map_err(|e| bad_request(display_chain(&e)))?,
+            )),
+            Some(None) => Some(None),
+            None => None,
+        };
+        let voice = update
+            .voice
+            .map(|voice| self.connection_info(&voice).map(|info| (voice, info)))
+            .transpose()?;
+        if let Some((voice, info)) = voice {
+            self.connect(voice, info).await;
+        }
+        // `None`: leave the track alone; `Some(None)`: stop
+        let track = match update.track {
+            Some(Some(_)) if update.only_if_idle == Some(true) && !self.deck().is_idle() => None,
+            Some(Some(selector)) => Some(Some(node.load(&selector).await?)),
+            Some(None) => Some(None),
+            None => None,
+        };
+
+        if let Some(volume) = update.volume {
             self.deck().set_volume(f32::from(volume) / 100.0);
             self.state().volume = volume;
         }
-        if let Some(graph) = update.graph {
-            let runner = graph
-                .as_ref()
-                .map(|spec| node.registry.compile(spec, f64::from(SAMPLE_RATE)))
-                .transpose()
-                .map_err(|e| ApiError::new(ErrorCode::BadRequest, display_chain(&e)))?
-                .map(|net| GraphRunner::new(Box::new(net)));
-            self.deck().set_graph(runner);
+        if let (Some(graph), Some(effects)) = (graph, effects) {
+            self.deck().set_effects(effects);
             self.state().graph = graph;
         }
         if let Some(paused) = update.paused {
             self.state().paused = paused;
         }
-
-        let end_at = update.end_time.map(|end| end.map(ticks));
-        let mut seek = update.position.map(ticks);
-        match update.track {
+        let end_at = update.end_time.map(|end| end.map(Millis::to_ticks));
+        let mut seek = update.position.map(Millis::to_ticks);
+        match track {
             Some(None) => self.halt(),
-            Some(Some(selector)) => {
-                let busy = !self.deck().is_idle();
-                if !(busy && update.only_if_idle == Some(true)) {
-                    let loaded = node.load(&selector).await?;
-                    let item = QueueItem::new(loaded.track.clone());
-                    // a position given with a track is where it starts
-                    let track = self.deck_track(node, loaded, seek.take(), end_at.flatten());
-                    let mut state = self.state();
-                    state.halted = false;
-                    // it also takes the place of an item a skip is waiting for
-                    if let Some(skip) = state.preparing.take_if(|p| p.skip) {
-                        skip.task.abort();
-                    }
-                    state.items.insert(track.id, item);
-                    self.deck().play(track);
+            Some(Some(loaded)) => {
+                let item = QueueItem::new(loaded.track.clone());
+                // a position given with a track is where it starts
+                let track = self.deck_track(node, loaded, seek.take(), end_at.flatten());
+                let mut state = self.state();
+                state.halted = false;
+                // it also takes the place of an item a skip is waiting for
+                if let Some(skip) = state.preparing.take_if(|p| p.skip) {
+                    skip.task.abort();
                 }
+                state.items.insert(track.id, item);
+                self.deck().play(track);
             }
             None => {}
         }
@@ -344,14 +368,14 @@ impl GuildPlayer {
         let deck = self.deck();
         let current = deck.current().map(|t| &t.player);
         PlayerState {
-            time: Millis(unix_millis()),
-            position: current.map_or(Millis(0), |p| millis(p.position())),
+            time: Millis::now(),
+            position: current.map_or(Millis(0), |p| Millis::from_ticks(p.position())),
             connected,
             buffering: current.is_some_and(|p| p.buffering_since().is_some()),
             buffered: current.map_or_else(Vec::new, |p| {
                 p.buffered()
                     .into_iter()
-                    .map(|(start, end)| [millis(start), millis(end)])
+                    .map(|(start, end)| [Millis::from_ticks(start), Millis::from_ticks(end)])
                     .collect()
             }),
         }
@@ -549,12 +573,12 @@ impl GuildPlayer {
             .items
             .get(&playing.id)
             .and_then(|item| item.track.info.length)
-            .map(ticks);
+            .map(Millis::to_ticks);
         let end = playing
             .end_at
             .or_else(|| playing.player.media_end())
             .or(length);
-        let lead = ticks_from(node.settings.preload_lead);
+        let lead = ticks(node.settings.preload_lead);
         end.is_some_and(|end| end - playing.player.position() <= lead)
     }
 
@@ -705,25 +729,28 @@ impl GuildPlayer {
         }
     }
 
-    async fn connect(&self, voice: VoiceState) -> Result<(), ApiError> {
-        if self.state().voice.as_ref() == Some(&voice) {
-            return Ok(());
-        }
+    /// Checks the voice details a client sent and puts them the way songbird takes them.
+    fn connection_info(&self, voice: &VoiceState) -> Result<ConnectionInfo, ApiError> {
         let id = |snowflake: Snowflake, what: &str| {
-            NonZeroU64::new(snowflake.0).ok_or_else(|| {
-                ApiError::new(ErrorCode::BadRequest, format!("{what} must not be 0"))
-            })
+            NonZeroU64::new(snowflake.0).ok_or_else(|| bad_request(format!("{what} must not be 0")))
         };
-        let info = ConnectionInfo {
+        Ok(ConnectionInfo {
             channel_id: ChannelId(id(voice.channel_id, "channelId")?),
             endpoint: voice.endpoint.clone(),
             guild_id: GuildId(id(self.guild_id, "guildId")?),
             session_id: voice.session_id.clone(),
             token: voice.token.clone(),
             user_id: UserId(id(self.user_id, "the bot's user ID")?),
-        };
+        })
+    }
+
+    /// Connects to voice with new details; unchanged ones keep the connection as it is.
+    async fn connect(&self, voice: VoiceState, info: ConnectionInfo) {
         {
             let mut state = self.state();
+            if state.voice.as_ref() == Some(&voice) {
+                return;
+            }
             state.voice = Some(voice);
             state.connected = false;
         }
@@ -743,7 +770,6 @@ impl GuildPlayer {
                 }),
             }
         });
-        Ok(())
     }
 
     /// Passes events the deck produced during a request to the event task.
@@ -784,7 +810,7 @@ impl GuildPlayer {
                             guild_id: self.guild_id,
                             track: item.track.clone(),
                             item_id: item.id.clone(),
-                            waiting: Millis(u64::try_from(waiting.as_millis()).unwrap_or(u64::MAX)),
+                            waiting: Millis::from(waiting),
                         });
                     }
                 }
@@ -1003,26 +1029,8 @@ fn playback_error(e: &PlaybackError) -> ApiError {
     ApiError::new(code, display_chain(e))
 }
 
-fn ticks(ms: Millis) -> Ticks {
-    i64::try_from(ms.0)
-        .unwrap_or(i64::MAX)
-        .saturating_mul(TICKS_PER_SECOND / 1000)
-}
-
-fn ticks_from(duration: Duration) -> Ticks {
-    ticks(Millis(
-        u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
-    ))
-}
-
-fn millis(t: Ticks) -> Millis {
-    Millis(u64::try_from(t / (TICKS_PER_SECOND / 1000)).unwrap_or(0))
-}
-
-fn unix_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+fn bad_request(message: impl Into<String>) -> ApiError {
+    ApiError::new(ErrorCode::BadRequest, message)
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@
 
 use serde_json::{Map, Value};
 
-use super::{GraphSpec, NodeRegistry, NodeSpec, ParamError};
+use super::{GraphSpec, NodeRegistry, NodeSpec, ParamError, ParamSpecs};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChainError {
@@ -35,7 +35,7 @@ pub fn parse_chain(registry: &NodeRegistry, text: &str) -> Result<GraphSpec, Cha
         .collect::<Result<_, _>>()?;
     Ok(GraphSpec {
         nodes,
-        edges: Vec::new(),
+        ..GraphSpec::default()
     })
 }
 
@@ -71,6 +71,7 @@ fn parse_step(registry: &NodeRegistry, index: usize, step: &str) -> Result<NodeS
         .descriptor();
     // validate now so errors point at the step the user wrote
     descriptor
+        .params
         .resolve_positional(&values)
         .map_err(|source| ChainError::Param {
             kind: kind.to_owned(),

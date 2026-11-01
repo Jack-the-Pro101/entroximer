@@ -11,8 +11,10 @@
 //! `client/src/generated`).
 
 use std::fmt;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use entroximer_core::dsp::{GraphSpec, NodeDescriptor};
+use entroximer_core::dsp::{GraphSpec, NodeDescriptor, PresetDescriptor, PresetSelection};
+use entroximer_core::timeline::{TICKS_PER_SECOND, Ticks};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use ts_rs::TS;
@@ -22,7 +24,7 @@ use crate::sources::{PlaylistInfo, ProviderDescriptor, TrackInfo};
 use crate::youtube::SessionState;
 
 /// Version of this protocol, reported in `node.info`.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// A Discord ID. Sent as a string, since JavaScript numbers cannot hold every ID exactly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, TS)]
@@ -57,6 +59,39 @@ impl fmt::Display for Snowflake {
 #[ts(type = "number")]
 pub struct Millis(pub u64);
 
+impl Millis {
+    const TICKS_PER_MILLI: Ticks = TICKS_PER_SECOND / 1000;
+
+    /// A media position in the engine's 48 kHz ticks; negative ones are zero.
+    pub fn from_ticks(ticks: Ticks) -> Self {
+        Self(u64::try_from(ticks / Self::TICKS_PER_MILLI).unwrap_or(0))
+    }
+
+    pub fn to_ticks(self) -> Ticks {
+        i64::try_from(self.0)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(Self::TICKS_PER_MILLI)
+    }
+
+    /// A length in seconds as sources report it; `None` unless finite and positive.
+    pub fn from_secs_f64(seconds: f64) -> Option<Self> {
+        (seconds.is_finite() && seconds > 0.0).then_some(Self((seconds * 1000.0) as u64))
+    }
+
+    /// The current time as Unix milliseconds.
+    pub fn now() -> Self {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(Self(0), Self::from)
+    }
+}
+
+impl From<Duration> for Millis {
+    fn from(duration: Duration) -> Self {
+        Self(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+    }
+}
+
 /// A request from the client. `id` is echoed in the response.
 #[derive(Debug, Deserialize)]
 pub struct Request {
@@ -80,6 +115,10 @@ pub enum Call {
     /// Reads tracks back from their `encoded` form. Result: `Track[]`.
     #[serde(rename = "tracks.decode")]
     DecodeTracks(DecodeTracks),
+    /// Builds a preset's effect graph without applying it, e.g. to extend it with more nodes
+    /// before setting it as a player's `graph`. Result: [`GraphSpec`].
+    #[serde(rename = "presets.build")]
+    BuildPreset(PresetSelection),
     /// Result: [`PlayerInfo`].
     #[serde(rename = "player.get")]
     GetPlayer(GuildRef),
@@ -222,6 +261,11 @@ pub struct PlayerUpdate {
     #[serde(default, deserialize_with = "present")]
     #[ts(optional)]
     pub graph: Option<Option<GraphSpec>>,
+    /// Replaces the effect graph with a preset's (see `node.info` for the presets). The player's
+    /// `graph` then shows the nodes it built, ready to be changed or extended. Not together with
+    /// `graph`.
+    #[ts(optional)]
+    pub preset: Option<PresetSelection>,
     /// The bot's voice connection details, from Discord's voice state and voice server
     /// updates for this guild.
     #[ts(optional)]
@@ -481,6 +525,7 @@ pub struct PlayerInfo {
     pub queue: QueueState,
     pub paused: bool,
     pub volume: u16,
+    /// The effect graph, as set or as a preset built it.
     pub graph: Option<GraphSpec>,
     pub state: PlayerState,
 }
@@ -560,6 +605,8 @@ pub struct NodeInfo {
     pub providers: Vec<ProviderDescriptor>,
     /// Effect node types usable in graphs.
     pub nodes: Vec<NodeDescriptor>,
+    /// Ready-made effect graphs, with the graph each builds at its default parameters.
+    pub presets: Vec<PresetDescriptor>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
@@ -660,10 +707,33 @@ mod tests {
             })
         ));
 
+        let call: Call = serde_json::from_value(json!({
+            "op": "player.update",
+            "params": { "guildId": "1", "preset": { "name": "bass_boost", "params": { "gain_db": 9 } } }
+        }))
+        .unwrap();
+        let Call::UpdatePlayer(update) = call else {
+            panic!("wrong call");
+        };
+        let preset = update.preset.unwrap();
+        assert_eq!(preset.name, "bass_boost");
+        assert_eq!(preset.params.unwrap()["gain_db"], 9);
+        assert!(update.graph.is_none());
+
         let call: Call = serde_json::from_value(json!({ "op": "node.stats" })).unwrap();
         assert!(matches!(call, Call::Stats));
         assert!(serde_json::from_value::<Call>(json!({ "op": "nope" })).is_err());
         assert!(serde_json::from_value::<Snowflake>(json!("12a")).is_err());
+    }
+
+    #[test]
+    fn millis_convert_to_and_from_ticks() {
+        assert_eq!(Millis(1500).to_ticks(), 72_000);
+        assert_eq!(Millis::from_ticks(72_047), Millis(1500));
+        assert_eq!(Millis::from_ticks(-5), Millis(0));
+        assert_eq!(Millis::from_secs_f64(2.5), Some(Millis(2500)));
+        assert_eq!(Millis::from_secs_f64(f64::NAN), None);
+        assert_eq!(Millis::from(Duration::from_secs(3)), Millis(3000));
     }
 
     #[test]

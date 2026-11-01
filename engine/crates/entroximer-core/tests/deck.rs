@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use entroximer_core::deck::{Deck, DeckEvent, DeckTrack};
+use entroximer_core::dsp::{GraphSpec, NodeRegistry};
 use entroximer_core::player::{Player, PlayerConfig};
 use entroximer_core::producer::Producer;
 use entroximer_core::producer::ffmpeg::FfmpegProducer;
@@ -12,7 +13,7 @@ use entroximer_core::producer::{ProducerCaps, TimestampMode};
 use entroximer_core::timeline::Ticks;
 
 mod common;
-use common::{BLOCK_FRAMES, assert_playing_second, at, fixture};
+use common::{BLOCK_FRAMES, assert_playing_second, at, expected_hz, fixture, frequency};
 
 struct Bench {
     deck: Deck,
@@ -185,5 +186,37 @@ fn ending_without_a_next_track_leaves_the_deck_idle() {
     assert_eq!(
         ids(&bench.deck.drain_events()),
         ["start 1", "end 1 Finished"]
+    );
+}
+
+#[test]
+fn a_rate_plays_the_track_faster_and_higher() {
+    let mut bench = Bench::new();
+    let graph = GraphSpec {
+        rate: Some(1.25),
+        ..GraphSpec::default()
+    };
+    let effects = NodeRegistry::with_builtins()
+        .compile(&graph, 48_000.0)
+        .unwrap();
+    bench.deck.set_effects(Some(effects));
+    bench.deck.play(bench.tone(1, Some(at(10.0))));
+
+    let audio = bench.render(2.0);
+    let position = bench.deck.current().unwrap().player.position();
+    // two seconds heard took two and a half of the track
+    assert!(
+        (position - at(12.5)).abs() < at(0.1),
+        "position {:.2} s",
+        position as f64 / 48_000.0
+    );
+    // a second into the output the track is a second and a quarter in, and its tone 1.25 times
+    // as high
+    let window = &audio[at(1.0) as usize * 2..at(1.1) as usize * 2];
+    let heard = frequency(window);
+    let expected = expected_hz(11.3) * 1.25;
+    assert!(
+        (heard - expected).abs() < 6.0,
+        "expected {expected} Hz, heard {heard:.1} Hz"
     );
 }

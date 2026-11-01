@@ -36,8 +36,8 @@ use tokio::sync::Semaphore;
 
 pub use failure::{Failure, Restriction, SESSION_ENDED_WARNING, classify};
 
-use super::provider::{Provider, ProviderDescriptor};
-use super::{FoundTrack, LoadOutcome, PlaylistInfo, ResolveError, ResolvedTrack, TrackRef, net};
+use super::provider::{MAX_SEARCH_RESULTS, Provider, ProviderDescriptor};
+use super::{FoundTrack, LoadOutcome, PlaylistInfo, ResolveError, ResolvedTrack, net};
 use crate::config::MediaContext;
 use crate::youtube::{SessionCopy, SignInUnavailable};
 
@@ -49,9 +49,6 @@ mod profiles;
 use activation::UrlActivation;
 use entry::Entry;
 use profiles::{SITES, SearchTarget, Site, site_of};
-
-/// Most results a search may ask for.
-const MAX_SEARCH_RESULTS: usize = 50;
 
 pub struct YtDlpProvider {
     site: &'static Site,
@@ -326,10 +323,10 @@ impl Provider for YtDlpProvider {
 
     async fn resolve(
         &self,
-        reference: &TrackRef,
+        track: &FoundTrack,
         ctx: &MediaContext,
     ) -> Result<ResolvedTrack, ResolveError> {
-        self.resolve_uri(&reference.uri, ctx).await
+        self.resolve_uri(&track.reference.uri, ctx).await
     }
 }
 
@@ -753,6 +750,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::sources::TrackRef;
 
     fn media(formats: Value) -> Media {
         Media::deserialize(json!({ "id": "x", "formats": formats })).unwrap()

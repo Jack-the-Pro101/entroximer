@@ -7,6 +7,7 @@ import type { GuildRef } from "./GuildRef";
 import type { LoadTrack } from "./LoadTrack";
 import type { MoveInQueue } from "./MoveInQueue";
 import type { PlayerUpdate } from "./PlayerUpdate";
+import type { PresetSelection } from "./PresetSelection";
 import type { RemoveFromQueue } from "./RemoveFromQueue";
 import type { SearchTracks } from "./SearchTracks";
 import type { SessionSettings } from "./SessionSettings";
@@ -15,4 +16,4 @@ import type { Skip } from "./Skip";
 /**
  * Everything a client can ask for, by `op`.
  */
-export type Call = { "op": "tracks.load", "params": LoadTrack } | { "op": "tracks.search", "params": SearchTracks } | { "op": "tracks.decode", "params": DecodeTracks } | { "op": "player.get", "params": GuildRef } | { "op": "player.update", "params": PlayerUpdate } | { "op": "player.destroy", "params": GuildRef } | { "op": "queue.get", "params": GetQueue } | { "op": "queue.add", "params": AddToQueue } | { "op": "queue.remove", "params": RemoveFromQueue } | { "op": "queue.move", "params": MoveInQueue } | { "op": "queue.clear", "params": GuildRef } | { "op": "queue.shuffle", "params": GuildRef } | { "op": "queue.skip", "params": Skip } | { "op": "queue.configure", "params": ConfigureQueue } | { "op": "session.configure", "params": SessionSettings } | { "op": "node.info" } | { "op": "node.stats" };
+export type Call = { "op": "tracks.load", "params": LoadTrack } | { "op": "tracks.search", "params": SearchTracks } | { "op": "tracks.decode", "params": DecodeTracks } | { "op": "presets.build", "params": PresetSelection } | { "op": "player.get", "params": GuildRef } | { "op": "player.update", "params": PlayerUpdate } | { "op": "player.destroy", "params": GuildRef } | { "op": "queue.get", "params": GetQueue } | { "op": "queue.add", "params": AddToQueue } | { "op": "queue.remove", "params": RemoveFromQueue } | { "op": "queue.move", "params": MoveInQueue } | { "op": "queue.clear", "params": GuildRef } | { "op": "queue.shuffle", "params": GuildRef } | { "op": "queue.skip", "params": Skip } | { "op": "queue.configure", "params": ConfigureQueue } | { "op": "session.configure", "params": SessionSettings } | { "op": "node.info" } | { "op": "node.stats" };

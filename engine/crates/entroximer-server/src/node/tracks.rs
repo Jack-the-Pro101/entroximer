@@ -2,10 +2,8 @@
 //! so that playing a track right after loading it, or repeating a search (e.g. while a user
 //! types into an autocomplete field), does not ask the source again.
 
-use std::collections::HashMap;
-use std::hash::Hash;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -16,6 +14,8 @@ use serde_json::Value;
 
 use crate::api::protocol::{ApiError, ErrorCode, LoadResult, SearchResult, Track};
 use crate::config::MediaContext;
+use crate::expiring::Expiring;
+use crate::sources::spotify::SpotifyError;
 use crate::sources::ytdlp::{Failure, Restriction};
 use crate::sources::{FoundTrack, LoadOutcome, ResolveError, ResolvedTrack, TrackInfo, TrackRef};
 
@@ -23,6 +23,10 @@ use crate::sources::{FoundTrack, LoadOutcome, ResolveError, ResolvedTrack, Track
 const ENCODING_VERSION: u8 = 2;
 /// Results a search returns unless asked otherwise.
 const DEFAULT_SEARCH_RESULTS: u32 = 10;
+/// How long loaded tracks and search results are reused. Media URLs stay valid for hours, so
+/// minutes of reuse are safe.
+const KEEP_FOR: Duration = Duration::from_secs(10 * 60);
+const CACHE_CAPACITY: usize = 256;
 
 /// The `encoded` form: where to load the track again, plus its info for decoding.
 #[derive(Serialize, Deserialize)]
@@ -105,13 +109,21 @@ impl std::fmt::Debug for Loaded {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TrackCache {
-    /// Resolved tracks by `encoded` form. Media URLs stay valid for hours, so minutes of reuse
-    /// are safe.
+    /// Resolved tracks by `encoded` form.
     resolved: Expiring<String, Loaded>,
     /// Search results by search prefix, lowercased terms and limit.
     searches: Expiring<(String, String, u32), SearchResult>,
+}
+
+impl Default for TrackCache {
+    fn default() -> Self {
+        Self {
+            resolved: Expiring::new(KEEP_FOR, CACHE_CAPACITY),
+            searches: Expiring::new(KEEP_FOR, CACHE_CAPACITY),
+        }
+    }
 }
 
 impl TrackCache {
@@ -177,13 +189,13 @@ impl TrackCache {
     /// An encoded track ready to play, from the cache or resolved again. Its info may be fuller
     /// than the encoded one, e.g. for a search result.
     pub async fn get(&self, ctx: &MediaContext, encoded: &str) -> Result<Loaded, ApiError> {
-        if let Some(loaded) = self.resolved.get(&encoded.to_owned()) {
+        if let Some(loaded) = self.resolved.get(encoded) {
             return Ok(loaded);
         }
         let found = decode(encoded)?;
         let loaded = Loaded::from(
             ctx.sources
-                .resolve(&found.reference, ctx)
+                .resolve(&found, ctx)
                 .await
                 .map_err(|e| load_error(&e))?,
         );
@@ -208,51 +220,6 @@ impl TrackCache {
     }
 }
 
-/// A small map whose entries expire, evicting the oldest when full.
-#[derive(Debug)]
-struct Expiring<K, V> {
-    entries: Mutex<HashMap<K, (V, Instant)>>,
-}
-
-impl<K, V> Default for Expiring<K, V> {
-    fn default() -> Self {
-        Self {
-            entries: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-impl<K: Eq + Hash + Clone, V: Clone> Expiring<K, V> {
-    const KEEP_FOR: Duration = Duration::from_secs(10 * 60);
-    const CAPACITY: usize = 256;
-
-    fn get(&self, key: &K) -> Option<V> {
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        match entries.get(key) {
-            Some((value, at)) if at.elapsed() < Self::KEEP_FOR => Some(value.clone()),
-            Some(_) => {
-                entries.remove(key);
-                None
-            }
-            None => None,
-        }
-    }
-
-    fn insert(&self, key: K, value: V) {
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        entries.retain(|_, (_, at)| at.elapsed() < Self::KEEP_FOR);
-        if entries.len() >= Self::CAPACITY
-            && let Some(oldest) = entries
-                .iter()
-                .min_by_key(|(_, (_, at))| *at)
-                .map(|(key, _)| key.clone())
-        {
-            entries.remove(&oldest);
-        }
-        entries.insert(key, (value, Instant::now()));
-    }
-}
-
 /// Attaches the client's data to a loaded track.
 pub fn with_user_data(mut loaded: Loaded, user_data: Option<&Value>) -> Loaded {
     loaded.track.user_data = user_data.cloned();
@@ -269,7 +236,15 @@ pub fn load_error(e: &ResolveError) -> ApiError {
             Failure::Unavailable => ErrorCode::Unavailable,
             Failure::Other => ErrorCode::LoadFailed,
         },
-        ResolveError::NoResults(_) => ErrorCode::NoResults,
+        ResolveError::NoResults(_) | ResolveError::NoMirror(_) => ErrorCode::NoResults,
+        ResolveError::Spotify(error) => match error {
+            SpotifyError::RateLimited(_) => ErrorCode::RateLimited,
+            SpotifyError::NotFound(_) | SpotifyError::Restricted(_) => ErrorCode::Unavailable,
+            SpotifyError::Credentials
+            | SpotifyError::Http(_)
+            | SpotifyError::Status { .. }
+            | SpotifyError::Json(_) => ErrorCode::LoadFailed,
+        },
         ResolveError::NoAudio(_) => ErrorCode::NoAudio,
         ResolveError::Unsupported(_)
         | ResolveError::UnknownSearch(_)
@@ -337,18 +312,5 @@ mod tests {
             decode("not a track").unwrap_err().code,
             ErrorCode::BadRequest
         );
-    }
-
-    #[test]
-    fn expiring_entries_make_room_for_new_ones() {
-        let cache: Expiring<u32, u32> = Expiring::default();
-        for i in 0..300 {
-            cache.insert(i, i);
-        }
-        assert_eq!(
-            cache.entries.lock().unwrap().len(),
-            Expiring::<u32, u32>::CAPACITY
-        );
-        assert_eq!(cache.get(&299), Some(299));
     }
 }

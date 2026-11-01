@@ -1,7 +1,12 @@
-//! Post-processing: node types, graph descriptions and their compilation to fundsp networks.
+//! Post-processing: node types, graph descriptions, presets, and their compilation into
+//! [`Effects`].
 //!
-//! Node types come from a [`NodeRegistry`]; built-ins are registered by
-//! [`NodeRegistry::with_builtins`] and plugins add their own through [`NodeRegistry::register`].
+//! - Node types come from a [`NodeRegistry`]; built-ins are registered by
+//!   [`NodeRegistry::with_builtins`] and plugins add their own through [`NodeRegistry::register`].
+//! - A [`GraphSpec`] wires nodes together and may set a playback rate;
+//!   [`NodeRegistry::compile`] turns it into [`Effects`].
+//! - Presets ([`PresetRegistry`]) build ready-made graphs, such as nightcore or karaoke, that
+//!   clients use as they are or extend with nodes of their own.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -12,14 +17,19 @@ use serde_json::{Map, Value};
 
 mod builtin;
 mod chain;
+mod effects;
 mod graph;
-mod runner;
+mod nodes;
+mod presets;
+mod rate;
 
 pub use chain::{ChainError, parse_chain};
+pub use effects::Effects;
 pub use graph::{
     CHANNELS, Edge, Endpoint, GRAPH_INPUT, GRAPH_OUTPUT, GraphError, GraphSpec, NodeSpec,
 };
-pub use runner::GraphRunner;
+pub use presets::{PresetDescriptor, PresetError, PresetFactory, PresetRegistry, PresetSelection};
+pub use rate::RATE_RANGE;
 
 /// A node type that graphs can instantiate.
 pub trait NodeFactory: Send + Sync {
@@ -39,6 +49,7 @@ pub struct NodeDescriptor {
     pub params: Vec<ParamSpec>,
 }
 
+/// A numeric parameter of a node type or a preset.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ParamSpec {
@@ -72,27 +83,37 @@ pub struct ParamValues(Vec<(String, f32)>);
 
 impl ParamValues {
     /// # Panics
-    /// If `name` is not a parameter declared by the node's descriptor.
+    /// If `name` is not a parameter declared by the node's or preset's descriptor.
     pub fn get(&self, name: &str) -> f32 {
         self.0
             .iter()
             .find(|(n, _)| n == name)
             .map(|&(_, v)| v)
-            .unwrap_or_else(|| panic!("node read undeclared parameter `{name}`"))
+            .unwrap_or_else(|| panic!("read undeclared parameter `{name}`"))
     }
 }
 
-impl NodeDescriptor {
+/// Validation of given parameters against their declarations, shared by nodes and presets.
+pub trait ParamSpecs {
     /// Validates named parameters, filling in defaults for missing ones.
-    pub fn resolve(&self, given: &Map<String, Value>) -> Result<ParamValues, ParamError> {
-        if let Some(unknown) = given
-            .keys()
-            .find(|k| !self.params.iter().any(|p| &p.name == *k))
-        {
+    fn resolve(&self, given: &Map<String, Value>) -> Result<ParamValues, ParamError>;
+
+    /// Validates parameters given in declaration order, filling in defaults for the rest.
+    fn resolve_positional(&self, given: &[f32]) -> Result<ParamValues, ParamError>;
+
+    /// Every parameter at its default.
+    fn defaults(&self) -> ParamValues {
+        self.resolve_positional(&[])
+            .expect("defaults lie within their ranges")
+    }
+}
+
+impl ParamSpecs for [ParamSpec] {
+    fn resolve(&self, given: &Map<String, Value>) -> Result<ParamValues, ParamError> {
+        if let Some(unknown) = given.keys().find(|k| !self.iter().any(|p| &p.name == *k)) {
             return Err(ParamError::Unknown(unknown.clone()));
         }
-        self.params
-            .iter()
+        self.iter()
             .map(|spec| {
                 let value = match given.get(&spec.name) {
                     None => spec.default,
@@ -107,16 +128,14 @@ impl NodeDescriptor {
             .map(ParamValues)
     }
 
-    /// Validates parameters given in declaration order, filling in defaults for the rest.
-    pub fn resolve_positional(&self, given: &[f32]) -> Result<ParamValues, ParamError> {
-        if given.len() > self.params.len() {
+    fn resolve_positional(&self, given: &[f32]) -> Result<ParamValues, ParamError> {
+        if given.len() > self.len() {
             return Err(ParamError::TooMany {
-                max: self.params.len(),
+                max: self.len(),
                 given: given.len(),
             });
         }
-        self.params
-            .iter()
+        self.iter()
             .enumerate()
             .map(|(i, spec)| spec.check(given.get(i).copied().unwrap_or(spec.default)))
             .collect::<Result<_, _>>()

@@ -3,14 +3,14 @@
 //!
 //! A deck never ends: with nothing to play it outputs silence. When the current track finishes,
 //! the preloaded next track takes over within the same render call, so tracks follow each other
-//! without a gap. Effects and volume belong to the deck, so they carry across tracks, and effect
-//! tails (reverb, echo) ring out into whatever follows.
+//! without a gap. Effects (including a playback rate) and volume belong to the deck, so they
+//! carry across tracks, and effect tails (reverb, echo) ring out into whatever follows.
 //!
 //! Everything that happens is reported as [`DeckEvent`]s, drained by the owner.
 
 use std::time::Duration;
 
-use crate::dsp::{CHANNELS, GraphRunner};
+use crate::dsp::{CHANNELS, Effects};
 use crate::player::{PlaybackError, Player, Status};
 use crate::timeline::Ticks;
 
@@ -48,10 +48,16 @@ pub enum DeckEvent {
 
 #[derive(Debug)]
 pub struct Deck {
+    tracks: Tracks,
+    effects: Option<Effects>,
+    volume: f32,
+}
+
+/// The deck's tracks and what happens to them; everything but the processing of their audio.
+#[derive(Debug)]
+struct Tracks {
     current: Option<Playing>,
     next: Option<DeckTrack>,
-    graph: Option<GraphRunner>,
-    volume: f32,
     stuck_after: Duration,
     events: Vec<DeckEvent>,
 }
@@ -65,49 +71,50 @@ struct Playing {
 impl Deck {
     pub fn new(stuck_after: Duration) -> Self {
         Self {
-            current: None,
-            next: None,
-            graph: None,
+            tracks: Tracks {
+                current: None,
+                next: None,
+                stuck_after,
+                events: Vec::new(),
+            },
+            effects: None,
             volume: 1.0,
-            stuck_after,
-            events: Vec::new(),
         }
     }
 
     /// Starts `track` now, replacing the current one.
     pub fn play(&mut self, track: DeckTrack) {
-        self.end_current(EndReason::Replaced);
-        self.start(track);
+        self.tracks.end_current(EndReason::Replaced);
+        self.tracks.start(track);
     }
 
     /// Sets (or clears) the track that follows the current one; its download starts right away.
     /// With nothing playing, it starts immediately.
     pub fn set_next(&mut self, track: Option<DeckTrack>) {
-        self.next = track;
-        if self.current.is_none() {
-            self.advance();
+        self.tracks.next = track;
+        if self.tracks.current.is_none() {
+            self.tracks.advance();
         }
     }
 
     /// Ends the current track and starts the next one right away, if there is one.
     pub fn skip(&mut self) {
-        let reason = if self.next.is_some() {
+        let reason = if self.tracks.next.is_some() {
             EndReason::Replaced
         } else {
             EndReason::Stopped
         };
-        self.end_current(reason);
-        self.advance();
+        self.tracks.finish_current(reason);
     }
 
     /// Stops the current track and forgets the next one.
     pub fn stop(&mut self) {
-        self.next = None;
-        self.end_current(EndReason::Stopped);
+        self.tracks.next = None;
+        self.tracks.end_current(EndReason::Stopped);
     }
 
     pub fn seek(&mut self, position: Ticks) -> Result<(), PlaybackError> {
-        match &mut self.current {
+        match &mut self.tracks.current {
             Some(playing) => {
                 playing.stuck_reported = false;
                 playing.track.player.seek(position)
@@ -118,13 +125,14 @@ impl Deck {
 
     /// Changes where the current track stops; `None` plays it to the end.
     pub fn set_end_at(&mut self, end_at: Option<Ticks>) {
-        if let Some(playing) = &mut self.current {
+        if let Some(playing) = &mut self.tracks.current {
             playing.track.end_at = end_at;
         }
     }
 
-    pub fn set_graph(&mut self, graph: Option<GraphRunner>) {
-        self.graph = graph;
+    /// Replaces the effects (`None` removes them) from the next render on.
+    pub fn set_effects(&mut self, effects: Option<Effects>) {
+        self.effects = effects;
     }
 
     /// Linear gain applied after the effects.
@@ -133,24 +141,41 @@ impl Deck {
     }
 
     pub fn current(&self) -> Option<&DeckTrack> {
-        self.current.as_ref().map(|p| &p.track)
+        self.tracks.current.as_ref().map(|p| &p.track)
     }
 
     pub fn next(&self) -> Option<&DeckTrack> {
-        self.next.as_ref()
+        self.tracks.next.as_ref()
     }
 
     pub fn is_idle(&self) -> bool {
-        self.current.is_none()
+        self.tracks.current.is_none()
     }
 
     pub fn drain_events(&mut self) -> Vec<DeckEvent> {
-        std::mem::take(&mut self.events)
+        std::mem::take(&mut self.tracks.events)
     }
 
     /// Fills `out` (interleaved stereo) completely: track audio where there is any, silence
-    /// elsewhere. Never blocks.
+    /// elsewhere, through the effects. Never blocks.
     pub fn render(&mut self, out: &mut [f32]) {
+        let tracks = &mut self.tracks;
+        match &mut self.effects {
+            Some(effects) => effects.render(out, |input| tracks.render(input)),
+            None => tracks.render(out),
+        }
+        if self.volume != 1.0 {
+            for sample in out.iter_mut() {
+                *sample *= self.volume;
+            }
+        }
+    }
+}
+
+impl Tracks {
+    /// Fills `out` with the tracks' audio, moving on to the next track where one ends, and with
+    /// silence where there is nothing to play.
+    fn render(&mut self, out: &mut [f32]) {
         let frames = out.len() / CHANNELS;
         let mut filled = 0;
         while filled < frames {
@@ -187,15 +212,6 @@ impl Deck {
             }
         }
         out[filled * CHANNELS..].fill(0.0);
-
-        if let Some(graph) = &mut self.graph {
-            graph.process(out);
-        }
-        if self.volume != 1.0 {
-            for sample in out.iter_mut() {
-                *sample *= self.volume;
-            }
-        }
     }
 
     fn report_if_stuck(&mut self) {

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
-import { EntroximerError, chain, parseChain } from "../src";
-import type { NodeDescriptor } from "../src";
+import { EntroximerError, append, chain, parseChain, prepend, withParams, withRate } from "../src";
+import type { GraphSpec, NodeDescriptor } from "../src";
 
 const catalog: NodeDescriptor[] = [
   {
@@ -53,5 +53,67 @@ describe("parseChain", () => {
     expect(error).toBeInstanceOf(EntroximerError);
     expect((error as EntroximerError).code).toBe("bad_request");
     expect((error as EntroximerError).message).toContain(message);
+  });
+});
+
+/** The karaoke preset's shape: two branches between input and output. */
+const branched: GraphSpec = {
+  nodes: [
+    { id: "low", type: "lowpass", params: { cutoff: 220 } },
+    { id: "high", type: "highpass", params: { cutoff: 220 } },
+  ],
+  edges: [
+    { from: "input", to: "low" },
+    { from: "input", to: "high" },
+    { from: "low", to: "output" },
+    { from: "high:1", to: "output:0" },
+  ],
+};
+
+describe("building on graphs", () => {
+  test("appending to a chain extends it", () => {
+    const graph = append(chain({ type: "lowpass" }), { type: "reverb", params: { mix: 0.2 } });
+    expect(graph.nodes.map((node) => node.id)).toEqual(["lowpass0", "reverb1"]);
+    expect(graph.edges).toEqual([]);
+    expect(append(null, { type: "reverb", id: "room" }).nodes[0]?.id).toBe("room");
+  });
+
+  test("appending to wired graphs takes over the output, ports included", () => {
+    const graph = append(branched, { type: "reverb", id: "room" }, { type: "limiter" });
+    expect(graph.edges).toEqual([
+      { from: "input", to: "low" },
+      { from: "input", to: "high" },
+      { from: "low", to: "room" },
+      { from: "high:1", to: "room:0" },
+      { from: "room", to: "limiter3" },
+      { from: "limiter3", to: "output" },
+    ]);
+  });
+
+  test("prepending to wired graphs takes over the input", () => {
+    const graph = prepend(branched, { type: "volume", id: "gain" });
+    expect(graph.nodes[0]?.id).toBe("gain");
+    expect(graph.edges.slice(0, 3)).toEqual([
+      { from: "input", to: "gain" },
+      { from: "gain", to: "low" },
+      { from: "gain", to: "high" },
+    ]);
+  });
+
+  test("parameters change in place and rates come and go", () => {
+    const tuned = withParams(branched, "low", { q: 2 });
+    expect(tuned.nodes[0]?.params).toEqual({ cutoff: 220, q: 2 });
+    expect(branched.nodes[0]?.params).toEqual({ cutoff: 220 });
+    expect(() => withParams(branched, "nope", {})).toThrow("has no node `nope`");
+
+    const fast = withRate(branched, 1.25);
+    expect(fast.rate).toBe(1.25);
+    expect("rate" in withRate(fast, 1)).toBe(false);
+  });
+
+  test("ids stay unique", () => {
+    expect(() => append(branched, { type: "lowpass", id: "low" })).toThrow("already has a node `low`");
+    const graph = append(chain({ type: "lowpass" }, { type: "lowpass" }), { type: "lowpass" });
+    expect(new Set(graph.nodes.map((node) => node.id)).size).toBe(3);
   });
 });

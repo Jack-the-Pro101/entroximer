@@ -7,6 +7,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::{Arc, Mutex};
 
 use entroximer_core::deck::Deck;
+use entroximer_core::dsp::CHANNELS;
 use songbird::input::core::io::MediaSource;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -14,7 +15,6 @@ use super::player::Signal;
 
 /// Discord's frame: 20 ms at 48 kHz.
 const FRAMES_PER_FILL: usize = 960;
-const CHANNELS: usize = 2;
 
 /// Interleaved little-endian f32 stereo, as songbird's `RawAdapter` expects.
 pub(super) struct DeckSource {
@@ -31,7 +31,7 @@ impl DeckSource {
             deck,
             signals,
             samples: vec![0.0; FRAMES_PER_FILL * CHANNELS],
-            bytes: Vec::with_capacity(FRAMES_PER_FILL * CHANNELS * 4),
+            bytes: Vec::with_capacity(FRAMES_PER_FILL * CHANNELS * size_of::<f32>()),
             read: 0,
         }
     }

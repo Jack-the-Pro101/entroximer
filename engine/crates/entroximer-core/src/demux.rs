@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::MediaError;
 use crate::producer::{Producer, ProducerStream, TimestampMode};
 use crate::timeline::{Finish, Packet, ProducerId, PushResult, TICKS_PER_SECOND, Ticks, Timeline};
-use crate::transport::stream_source::{WebMediaSource, stream_media};
+use crate::transport::{StreamReader, stream_reader};
 
 /// A running producer. Dropping it cancels the producer.
 #[derive(Debug)]
@@ -105,10 +105,11 @@ async fn run(
             forwarded
         }
     });
-    let (download, source) = stream_media(bytes);
+    let (download, source) = stream_reader(bytes);
     let (timestamps, hint) = (stream.timestamps, stream.hint);
     let demux = tokio::task::spawn_blocking(move || {
-        demux_loop(&timeline, producer, source, timestamps, hint.as_deref())
+        demux_into(&timeline, producer, source, timestamps, hint.as_deref())
+            .unwrap_or_else(Finish::Failed)
     });
     // closing the byte channel unblocks the demuxer; the demux result is what matters
     let download = async {
@@ -130,23 +131,10 @@ async fn run(
     }
 }
 
-fn demux_loop(
-    timeline: &Timeline,
-    producer: ProducerId,
-    source: WebMediaSource,
-    timestamps: TimestampMode,
-    hint: Option<&str>,
-) -> Finish {
-    match demux_into(timeline, producer, source, timestamps, hint) {
-        Ok(finish) => finish,
-        Err(e) => Finish::Failed(e),
-    }
-}
-
 fn demux_into(
     timeline: &Timeline,
     producer: ProducerId,
-    source: WebMediaSource,
+    source: StreamReader,
     timestamps: TimestampMode,
     hint: Option<&str>,
 ) -> Result<Finish, MediaError> {

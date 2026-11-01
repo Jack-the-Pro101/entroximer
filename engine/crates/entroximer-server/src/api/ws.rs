@@ -11,6 +11,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use bytes::Bytes;
+use entroximer_core::error::display_chain;
 use futures_util::future::try_join_all;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
@@ -173,6 +174,11 @@ async fn dispatch(node: &Arc<Node>, session: &Arc<Session>, call: Call) -> Resul
                 .iter()
                 .map(|encoded| tracks::decode_track(encoded))
                 .collect::<Result<Vec<_>, ApiError>>()?,
+        ),
+        Call::BuildPreset(selection) => to_value(
+            node.presets
+                .build(&selection)
+                .map_err(|e| ApiError::new(ErrorCode::BadRequest, display_chain(&e)))?,
         ),
         Call::GetPlayer(params) => to_value(player(session, params.guild_id)?.info()),
         Call::UpdatePlayer(update) => {

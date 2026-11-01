@@ -70,11 +70,11 @@ impl Provider for HttpProvider {
 
     async fn resolve(
         &self,
-        reference: &TrackRef,
+        track: &FoundTrack,
         ctx: &MediaContext,
     ) -> Result<ResolvedTrack, ResolveError> {
-        let url = Url::parse(&reference.uri)
-            .map_err(|_| ResolveError::Unsupported(reference.uri.clone()))?;
+        let uri = &track.reference.uri;
+        let url = Url::parse(uri).map_err(|_| ResolveError::Unsupported(uri.clone()))?;
         if !ctx.config.sources.allow_private_urls {
             net::ensure_public(&url).await?;
         }
@@ -120,13 +120,14 @@ impl Provider for LocalProvider {
 
     async fn resolve(
         &self,
-        reference: &TrackRef,
+        track: &FoundTrack,
         ctx: &MediaContext,
     ) -> Result<ResolvedTrack, ResolveError> {
-        if !Path::new(&reference.uri).is_file() {
-            return Err(ResolveError::Unsupported(reference.uri.clone()));
+        let path = &track.reference.uri;
+        if !Path::new(path).is_file() {
+            return Err(ResolveError::Unsupported(path.clone()));
         }
-        describe(&reference.uri, "local", None, ctx).await
+        describe(path, "local", None, ctx).await
     }
 }
 
@@ -369,8 +370,7 @@ impl Probe {
             .duration
             .as_deref()
             .and_then(|d| d.parse::<f64>().ok())
-            .filter(|d| d.is_finite() && *d > 0.0)
-            .map(|d| Millis((d * 1000.0) as u64))
+            .and_then(Millis::from_secs_f64)
     }
 
     /// A tag by name, ignoring case: from the container, else from the audio stream (where Ogg

@@ -8,6 +8,7 @@ mod direct;
 pub mod metadata;
 mod net;
 pub mod provider;
+pub mod spotify;
 pub mod ytdlp;
 
 use std::io;
@@ -17,10 +18,13 @@ use entroximer_core::producer::Producer;
 use serde::{Deserialize, Serialize};
 
 pub use metadata::{PlaylistInfo, TrackInfo};
-pub use provider::{DEFAULT_SEARCH_LIMIT, ProviderDescriptor, SearchOutcome, Sources};
+pub use provider::{
+    DEFAULT_SEARCH_LIMIT, MAX_SEARCH_RESULTS, ProviderDescriptor, SearchOutcome, Sources,
+};
 
 use crate::managed_ytdlp::InstallError;
 use crate::youtube::{SessionError, SignInUnavailable};
+use spotify::SpotifyError;
 use ytdlp::{Failure, Restriction};
 
 /// What is needed to load a track again: its provider and its URI there.
@@ -116,4 +120,8 @@ pub enum ResolveError {
     HttpStatus { url: String, status: u16 },
     #[error("ffprobe cannot read `{target}`: {message}")]
     Probe { target: String, message: String },
+    #[error(transparent)]
+    Spotify(#[from] SpotifyError),
+    #[error("found no recording of `{0}` on YouTube")]
+    NoMirror(String),
 }

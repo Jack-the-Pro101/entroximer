@@ -471,3 +471,80 @@ async fn queues_over_the_protocol() {
         json!({ "version": 6, "length": 0, "repeat": "track" })
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn presets_build_graphs_that_players_apply_and_extend() {
+    let engine = Engine::start(None).await;
+    let mut client = engine.connect(None, None).await.unwrap();
+    client.recv().await;
+
+    let (_, info) = client.exchange("node.info", Value::Null).await;
+    let presets = info["result"]["presets"].as_array().unwrap();
+    let bass_boost = presets
+        .iter()
+        .find(|p| p["name"] == "bass_boost")
+        .expect("bass_boost is a preset");
+    assert!(bass_boost["graph"]["nodes"].as_array().unwrap().len() > 1);
+    assert!(
+        presets.iter().any(|p| p["name"] == "nightcore"),
+        "{presets:?}"
+    );
+
+    let (_, built) = client
+        .exchange(
+            "presets.build",
+            json!({ "name": "nightcore", "params": { "rate": 1.5 } }),
+        )
+        .await;
+    assert_eq!(
+        built["result"],
+        json!({ "rate": 1.5, "nodes": [], "edges": [] })
+    );
+
+    // a preset's graph is the player's graph, ready to change
+    let (_, applied) = client
+        .exchange(
+            "player.update",
+            json!({ "guildId": "1", "preset": { "name": "bass_boost" } }),
+        )
+        .await;
+    let mut graph = applied["result"]["graph"].clone();
+    let ids: Vec<&str> = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"bass") && ids.contains(&"limiter"), "{ids:?}");
+
+    // built upon: a reverb after the preset's nodes
+    graph["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "id": "room", "type": "reverb", "params": { "mix": 0.2 } }));
+    let (_, extended) = client
+        .exchange("player.update", json!({ "guildId": "1", "graph": graph }))
+        .await;
+    assert_eq!(extended["result"]["graph"], graph);
+
+    // a refused update changes nothing, not even the parts that were valid
+    let (_, refused) = client
+        .exchange(
+            "player.update",
+            json!({ "guildId": "1", "volume": 50, "graph": { "nodes": [{ "id": "x", "type": "warp" }] } }),
+        )
+        .await;
+    assert_eq!(refused["error"]["code"], "bad_request", "{refused}");
+    let (_, both) = client
+        .exchange(
+            "player.update",
+            json!({ "guildId": "1", "graph": null, "preset": { "name": "nightcore" } }),
+        )
+        .await;
+    assert_eq!(both["error"]["code"], "bad_request");
+    let (_, player) = client
+        .exchange("player.get", json!({ "guildId": "1" }))
+        .await;
+    assert_eq!(player["result"]["volume"], 100);
+    assert_eq!(player["result"]["graph"], graph);
+}

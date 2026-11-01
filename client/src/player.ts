@@ -1,6 +1,6 @@
 import type { Requester } from "./connection";
 import { Emitter } from "./emitter";
-import { EntroximerError } from "./errors";
+import { EntroximerError, toEntroximerError } from "./errors";
 import type { Event } from "./generated/Event";
 import type { GraphSpec } from "./generated/GraphSpec";
 import type { PlayerInfo } from "./generated/PlayerInfo";
@@ -107,14 +107,18 @@ export class Player extends Emitter<PlayerEvents> {
     return this.#destroyed;
   }
 
-  /** The current position in milliseconds, extrapolated from the engine's last report. */
+  /**
+   * The current position in milliseconds, extrapolated from the engine's last report (at the
+   * graph's playback rate, if it sets one).
+   */
   get position(): number {
     const state = this.state;
     if (!state) {
       return 0;
     }
     const flowing = this.track !== null && !this.paused && state.connected && !state.buffering;
-    const elapsed = flowing ? Math.max(0, Date.now() - this.#stateReceivedAt) : 0;
+    const rate = this.graph?.rate ?? 1;
+    const elapsed = flowing ? Math.max(0, Date.now() - this.#stateReceivedAt) * rate : 0;
     const length = this.track?.info.length;
     const position = state.position + elapsed;
     return length == null ? position : Math.min(position, length);
@@ -184,9 +188,21 @@ export class Player extends Emitter<PlayerEvents> {
     return this.update({ endTime: positionMs });
   }
 
-  /** The effect graph, e.g. from `chain()` or `parseChain()`; `null` removes it. */
+  /**
+   * The effect graph, e.g. from `chain()` or `parseChain()`, or a preset's extended with
+   * `append()`; `null` removes it.
+   */
   setGraph(graph: GraphSpec | null): Promise<PlayerInfo> {
     return this.update({ graph });
+  }
+
+  /**
+   * Replaces the effects with a preset's (see `NodeInfo.presets`), e.g. `setPreset("nightcore")`
+   * or `setPreset("bass_boost", { gain_db: 9 })`. Afterwards `graph` holds the nodes it built,
+   * to change with `withParams()` or extend with `append()`.
+   */
+  setPreset(name: string, params?: Record<string, number>): Promise<PlayerInfo> {
+    return this.update({ preset: params === undefined ? { name } : { name, params } });
   }
 
   /** Applies several changes at once. */
@@ -328,10 +344,7 @@ export class Player extends Emitter<PlayerEvents> {
   }
 
   #report(error: unknown): void {
-    this.emit(
-      "error",
-      error instanceof EntroximerError ? error : new EntroximerError("internal", String(error)),
-    );
+    this.emit("error", toEntroximerError(error));
   }
 
   #ensureUsable(): void {

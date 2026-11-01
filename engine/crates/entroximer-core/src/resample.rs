@@ -43,10 +43,9 @@ impl Resampler {
 
     /// Feeds interleaved stereo; appends whatever resampled interleaved stereo is ready.
     pub fn process(&mut self, interleaved: &[f32], out: &mut Vec<f32>) {
-        for &[left, right] in interleaved.as_chunks::<2>().0 {
-            self.input[0].push(left);
-            self.input[1].push(right);
-        }
+        let (frames, _) = interleaved.as_chunks::<2>();
+        self.input[0].extend(frames.iter().map(|&[left, _]| left));
+        self.input[1].extend(frames.iter().map(|&[_, right]| right));
         loop {
             let need = self.inner.input_frames_next();
             if self.input[0].len() < need {
@@ -59,10 +58,11 @@ impl Resampler {
                 .expect("buffers are sized by the resampler");
             let skip = self.skip.min(produced);
             self.skip -= skip;
-            for i in skip..produced {
-                out.push(self.output[0][i]);
-                out.push(self.output[1][i]);
-            }
+            let [left, right] = [
+                &self.output[0][skip..produced],
+                &self.output[1][skip..produced],
+            ];
+            out.extend(left.iter().zip(right).flat_map(|(&l, &r)| [l, r]));
             self.input[0].drain(..need);
             self.input[1].drain(..need);
         }

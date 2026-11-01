@@ -1,8 +1,9 @@
 import { Connection, PROTOCOL_VERSION } from "./connection";
 import type { ConnectionOptions, DisconnectInfo, ReadyInfo } from "./connection";
 import { Emitter } from "./emitter";
-import { EntroximerError } from "./errors";
+import { EntroximerError, toEntroximerError } from "./errors";
 import type { Event } from "./generated/Event";
+import type { GraphSpec } from "./generated/GraphSpec";
 import type { LoadResult } from "./generated/LoadResult";
 import type { NodeInfo } from "./generated/NodeInfo";
 import type { SearchResult } from "./generated/SearchResult";
@@ -129,6 +130,14 @@ export class Entroximer extends Emitter<ManagerEvents> {
     return this.connection.request("tracks.decode", { encoded });
   }
 
+  /**
+   * The effect graph a preset builds (see `info().presets`), without applying it: to extend it
+   * with `append()` before `player.setGraph()`. `player.setPreset()` applies one directly.
+   */
+  buildPreset(name: string, params?: Record<string, number>): Promise<GraphSpec> {
+    return this.connection.request("presets.build", params === undefined ? { name } : { name, params });
+  }
+
   info(): Promise<NodeInfo> {
     return this.connection.request("node.info");
   }
@@ -232,9 +241,6 @@ export class Entroximer extends Emitter<ManagerEvents> {
   }
 
   #report(error: unknown): void {
-    this.emit(
-      "error",
-      error instanceof EntroximerError ? error : new EntroximerError("internal", String(error)),
-    );
+    this.emit("error", toEntroximerError(error));
   }
 }

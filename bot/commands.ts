@@ -8,7 +8,7 @@ import {
   StringSelectMenuBuilder,
 } from "discord.js";
 import type { AutocompleteInteraction, ChatInputCommandInteraction, SharedSlashCommand } from "discord.js";
-import { EntroximerError, parseChain } from "entroximer-client";
+import { EntroximerError, append, parseChain } from "entroximer-client";
 import type { PlaylistInfo, Player, QueueAdded, QueueItem, Repeat, Track } from "entroximer-client";
 
 import { nowPlayingEmbed, queueEmbed, searchEmbed } from "./embeds";
@@ -48,6 +48,8 @@ const SEARCH_SOURCES = [
   { name: "YouTube", value: "ytsearch" },
   { name: "YouTube Music", value: "ytmsearch" },
   { name: "SoundCloud", value: "scsearch" },
+  // only if the engine has a Spotify app configured; plays from YouTube
+  { name: "Spotify", value: "spsearch" },
 ];
 
 export const commands: Command[] = [
@@ -347,22 +349,31 @@ export const commands: Command[] = [
     (b) =>
       b
         .setName("effects")
-        .setDescription("Apply an effect chain, or remove effects")
+        .setDescription("Apply a preset, an effect chain or both; with neither, remove effects")
         .addStringOption((o) =>
-          o.setName("chain").setDescription("Like lowpass(800) => reverb(10, 2); leave out to remove effects"),
+          o.setName("preset").setDescription("A ready-made effect, like nightcore or bass_boost").setAutocomplete(true),
+        )
+        .addStringOption((o) =>
+          o.setName("chain").setDescription("Like lowpass(800) => reverb(10, 2); with a preset, added after it"),
         ),
     async (interaction, engine) => {
-      const text = interaction.options.getString("chain") ?? "";
+      const preset = interaction.options.getString("preset")?.trim() || null;
+      const text = interaction.options.getString("chain")?.trim() ?? "";
       const player = existingPlayer(interaction, engine);
-      if (text.trim() === "") {
+      if (preset === null && text === "") {
         await player.setGraph(null);
         await interaction.reply("Effects removed.");
         return;
       }
       const { nodes } = await engine.manager.info();
-      await player.setGraph(parseChain(text, nodes));
-      await interaction.reply(`Effects: \`${text}\``);
+      // the chain is checked before anything changes, so a typo leaves the effects alone
+      const extra = parseChain(text, nodes).nodes.map(({ type, params }) => ({ type, params }));
+      const base = preset === null ? null : await engine.manager.buildPreset(preset);
+      await player.setGraph(append(base, ...extra));
+      const parts = [...(preset === null ? [] : [`preset **${escape(preset)}**`]), ...(text ? [`\`${text}\``] : [])];
+      await interaction.reply(`Effects: ${parts.join(" then ")}`);
     },
+    suggestPresets,
   ),
   command(
     (b) => b.setName("stop").setDescription("Stop playback; the queue waits until something plays"),
@@ -403,6 +414,7 @@ export const commands: Command[] = [
           `sources: ${info.providers.map((provider) => provider.displayName).join(", ")}`,
           `searches: ${searches.join(", ")}`,
           `effects: ${info.nodes.map((node) => node.type).join(", ")}`,
+          `presets: ${info.presets.map((preset) => preset.name).join(", ")}`,
         ].join("\n"),
       );
     },
@@ -470,6 +482,17 @@ async function suggestTracks(interaction: GuildAutocomplete, engine: Engine): Pr
       latestSuggestions.delete(user);
     }
   }
+  await interaction.respond(choices);
+}
+
+/** The engine's presets whose names contain what is typed so far. */
+async function suggestPresets(interaction: GuildAutocomplete, engine: Engine): Promise<void> {
+  const typed = interaction.options.getFocused().trim().toLowerCase();
+  const { presets } = await withTimeout(engine.manager.info(), SUGGESTION_TIMEOUT_MS).catch(() => ({ presets: [] }));
+  const choices = presets
+    .filter((preset) => preset.name.includes(typed))
+    .slice(0, 25)
+    .map((preset) => ({ name: truncate(`${preset.name}: ${preset.description}`, 100), value: preset.name }));
   await interaction.respond(choices);
 }
 
@@ -553,12 +576,14 @@ function existingPlayer(interaction: GuildInteraction, engine: Engine): Player {
 }
 
 /**
- * Web URLs and searches (`scsearch:...`) are loaded as they are; anything else searches
- * YouTube. Nothing else gets through, so users cannot make the engine open files on its host.
+ * Web URLs, Spotify URIs and searches (`scsearch:...`) are loaded as they are; anything else
+ * searches YouTube. Nothing else gets through, so users cannot make the engine open files on its
+ * host.
  */
 function asQuery(text: string): string {
   const query = text.trim();
-  return /^https?:\/\//i.test(query) || /^[a-z]+search\d*:/i.test(query) ? query : `ytsearch:${query}`;
+  const passes = [/^https?:\/\//i, /^spotify:/i, /^[a-z]+search\d*:/i].some((pattern) => pattern.test(query));
+  return passes ? query : `ytsearch:${query}`;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {

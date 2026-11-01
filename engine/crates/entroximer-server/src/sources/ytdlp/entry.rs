@@ -117,8 +117,8 @@ impl Entry {
             album: nonempty(&self.album).map(str::to_owned),
             length: self
                 .duration
-                .filter(|d| !live && d.is_finite() && *d > 0.0)
-                .map(|d| Millis((d * 1000.0) as u64)),
+                .filter(|_| !live)
+                .and_then(Millis::from_secs_f64),
             is_stream: live,
             is_seekable: !live,
             uri: uri.clone(),

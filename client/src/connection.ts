@@ -2,6 +2,7 @@ import { Emitter } from "./emitter";
 import { EntroximerError } from "./errors";
 import type { Call } from "./generated/Call";
 import type { Event } from "./generated/Event";
+import type { GraphSpec } from "./generated/GraphSpec";
 import type { LoadResult } from "./generated/LoadResult";
 import type { NodeInfo } from "./generated/NodeInfo";
 import type { PlayerInfo } from "./generated/PlayerInfo";
@@ -15,7 +16,7 @@ import type { Stats } from "./generated/Stats";
 import type { Track } from "./generated/Track";
 
 /** The protocol version this client speaks; see `node.info`. */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 const CLIENT_NAME = "entroximer-client/0.1.0";
 
@@ -27,6 +28,7 @@ export interface Results {
   "tracks.load": LoadResult;
   "tracks.search": SearchResult;
   "tracks.decode": Track[];
+  "presets.build": GraphSpec;
   "player.get": PlayerInfo;
   "player.update": PlayerInfo;
   "player.destroy": null;

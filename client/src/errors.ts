@@ -26,3 +26,11 @@ export class EntroximerError extends Error {
     return new EntroximerError(error.code, error.message);
   }
 }
+
+/** `error` as an `EntroximerError`; anything else becomes an `internal` one. */
+export function toEntroximerError(error: unknown): EntroximerError {
+  if (error instanceof EntroximerError) {
+    return error;
+  }
+  return new EntroximerError("internal", error instanceof Error ? error.message : String(error));
+}

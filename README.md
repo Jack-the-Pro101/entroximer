@@ -1,7 +1,7 @@
 # Entroximer
 
-Lavalink but in Rust: a Discord audio engine with seekable streaming, effect graphs and YouTube
-support, and a TypeScript client.
+Lavalink but in Rust: a Discord audio engine with seekable streaming, effect graphs and presets,
+YouTube and Spotify support, and a TypeScript client.
 
 | Directory | Contents |
 |---|---|

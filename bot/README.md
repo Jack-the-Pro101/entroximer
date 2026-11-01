@@ -21,9 +21,9 @@ guild, permission to view, connect to and speak in voice channels.
 | Command | Does |
 |---|---|
 | `/join [channel]` | Joins your voice channel, or the one given |
-| `/play query` | Plays a URL, playlist or YouTube search, or queues it if something is playing; joins your channel if needed. Suggests search results as you type |
+| `/play query` | Plays a URL (Spotify links too, if the engine has a Spotify app), playlist or YouTube search, or queues it if something is playing; joins your channel if needed. Suggests search results as you type |
 | `/next query` | Queues a track to play right after the current one |
-| `/search query [source]` | Searches YouTube, YouTube Music or SoundCloud and queues the results you pick |
+| `/search query [source]` | Searches YouTube, YouTube Music, SoundCloud or Spotify (if the engine has a Spotify app) and queues the results you pick |
 | `/queue [page]` | Shows the queue |
 | `/skip [to]` | Skips to the next track, or to a position in the queue |
 | `/remove position`, `/move from to`, `/shuffle`, `/clear` | Edit the queue |
@@ -32,7 +32,7 @@ guild, permission to view, connect to and speak in voice channels.
 | `/stop` | Stops playback; `/skip` continues with the queue |
 | `/seek position` | Jumps to `90`, `1:30` or `1:02:03` |
 | `/volume percent` | 0 to 1000; 100 leaves the audio unchanged |
-| `/effects [chain]` | Applies e.g. `lowpass(800) => reverb(10, 2)`; without a chain, removes effects |
+| `/effects [preset] [chain]` | Applies a preset (suggested as you type, e.g. `nightcore`, `bass_boost`, `karaoke`), a chain such as `lowpass(800) => reverb(10, 2)`, or a preset followed by a chain; with neither, removes effects |
 | `/nowplaying` | The track with its artwork, position, downloaded parts and what comes next |
 | `/leave` | Stops and leaves the voice channel |
 | `/engine` | The engine's versions, sources, YouTube session state and load |

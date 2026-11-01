@@ -17,6 +17,9 @@ services:
       # ENTROXIMER_YTDLP_NIGHTLY: "true"            # YouTube fixes arrive in nightly builds first
       # ENTROXIMER_YTDLP_PACKAGE: "yt-dlp[default]==2026.10.26"   # pin a version
       # ENTROXIMER_YTDLP_UPDATE_HOURS: "24"         # 0 = install once, never update
+      # Spotify links and `spsearch:` (played from YouTube), with a Spotify app's credentials:
+      # ENTROXIMER_SPOTIFY_CLIENT_ID: ${ENTROXIMER_SPOTIFY_CLIENT_ID:-}
+      # ENTROXIMER_SPOTIFY_CLIENT_SECRET: ${ENTROXIMER_SPOTIFY_CLIENT_SECRET:-}
       # YouTube session for age-restricted videos; or run `entroximer youtube cookies import -`
       # ENTROXIMER_YOUTUBE_COOKIES_FILE: /run/secrets/youtube-cookies
     # secrets:

@@ -1,9 +1,10 @@
 //! Providers and the registry that routes user input to them.
 //!
 //! - A URL goes to the first provider that accepts it and does not decline it: the site
-//!   providers by host, then `http` for links to media files, then yt-dlp's generic extractor.
-//! - `prefix:terms` with a known search prefix (`ytsearch:`, `ytmsearch:`, `scsearch:`) searches
-//!   with the provider that owns the prefix.
+//!   providers by host (and Spotify, which also takes `spotify:` URIs), then `http` for links to
+//!   media files, then yt-dlp's generic extractor.
+//! - `prefix:terms` with a known search prefix (`ytsearch:`, `ytmsearch:`, `scsearch:`,
+//!   `spsearch:`) searches with the provider that owns the prefix.
 //! - A path on the engine's host plays the file, if local files are allowed.
 //! - Anything else is searched with the default search prefix.
 
@@ -16,9 +17,15 @@ use serde::Serialize;
 use ts_rs::TS;
 
 use super::direct::{HttpProvider, LocalProvider};
+use super::spotify::SpotifyProvider;
 use super::ytdlp::YtDlpProvider;
-use super::{FoundTrack, LoadOutcome, ResolveError, ResolvedTrack, TrackRef};
-use crate::config::{MediaContext, SourcesConfig};
+use super::{FoundTrack, LoadOutcome, ResolveError, ResolvedTrack};
+use crate::config::{MediaContext, SourcesConfig, SpotifyConfig};
+
+/// Results of searches made through `tracks.load`.
+pub const DEFAULT_SEARCH_LIMIT: usize = 10;
+/// Most results one search may ask for.
+pub const MAX_SEARCH_RESULTS: usize = 50;
 
 /// A source of tracks, as clients see it in `node.info`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
@@ -60,10 +67,11 @@ pub trait Provider: Send + Sync {
         Err(ResolveError::UnknownSearch(prefix.to_owned()))
     }
 
-    /// Makes a track it produced playable again, with its full metadata.
+    /// Makes a track it produced playable again, with its full metadata. `track` is what the
+    /// provider reported for it before, e.g. as a search result.
     async fn resolve(
         &self,
-        reference: &TrackRef,
+        track: &FoundTrack,
         ctx: &MediaContext,
     ) -> Result<ResolvedTrack, ResolveError>;
 }
@@ -84,11 +92,17 @@ pub struct Sources {
 }
 
 impl Sources {
-    pub fn new(config: &SourcesConfig) -> Self {
+    pub fn new(config: &SourcesConfig, spotify: &SpotifyConfig) -> Self {
         let mut providers: Vec<Arc<dyn Provider>> = YtDlpProvider::sites()
             .into_iter()
             .map(|site| Arc::new(site) as Arc<dyn Provider>)
             .collect();
+        match SpotifyProvider::new(spotify) {
+            Some(spotify) => providers.push(Arc::new(spotify)),
+            None => tracing::debug!(
+                "Spotify is off: set ENTROXIMER_SPOTIFY_CLIENT_ID and ENTROXIMER_SPOTIFY_CLIENT_SECRET"
+            ),
+        }
         providers.push(Arc::new(HttpProvider::new()));
         providers.push(Arc::new(YtDlpProvider::generic()));
         if config.allow_local_files {
@@ -154,15 +168,16 @@ impl Sources {
     /// Makes a track loaded earlier playable.
     pub async fn resolve(
         &self,
-        reference: &TrackRef,
+        track: &FoundTrack,
         ctx: &MediaContext,
     ) -> Result<ResolvedTrack, ResolveError> {
+        let source = &track.reference.source;
         let provider = self
             .providers
             .iter()
-            .find(|p| p.descriptor().name == reference.source)
-            .ok_or_else(|| ResolveError::UnknownSource(reference.source.clone()))?;
-        provider.resolve(reference, ctx).await
+            .find(|p| &p.descriptor().name == source)
+            .ok_or_else(|| ResolveError::UnknownSource(source.clone()))?;
+        provider.resolve(track, ctx).await
     }
 
     /// Loads `query` and makes one track of it playable: a search's first result, or the track a
@@ -182,15 +197,19 @@ impl Sources {
             LoadOutcome::Empty => None,
         };
         let found = found.ok_or_else(|| ResolveError::NoResults(query.to_owned()))?;
-        self.resolve(&found.reference, ctx).await
+        self.resolve(&found, ctx).await
     }
 
-    /// Web links, and paths on the engine's host when local files are allowed.
+    /// Web links, URIs a provider takes (e.g. `spotify:track:...`), and paths on the engine's
+    /// host when local files are allowed.
     fn as_url(&self, query: &str) -> Option<Url> {
-        if let Ok(url) = Url::parse(query)
-            && matches!(url.scheme(), "http" | "https")
-        {
-            return Some(url);
+        if let Ok(url) = Url::parse(query) {
+            let web = matches!(url.scheme(), "http" | "https");
+            // files only by their path, which is checked below
+            let taken = url.scheme() != "file" && self.providers.iter().any(|p| p.accepts(&url));
+            if web || taken {
+                return Some(url);
+            }
         }
         if !self.local_files {
             return None;
@@ -218,9 +237,6 @@ impl Sources {
         })
     }
 }
-
-/// Results of searches made through `tracks.load`.
-pub const DEFAULT_SEARCH_LIMIT: usize = 10;
 
 impl std::fmt::Debug for Sources {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

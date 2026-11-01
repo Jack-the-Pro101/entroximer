@@ -9,8 +9,11 @@ use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::packet::PacketRef;
 use symphonia::core::units::{Duration as SymphDuration, Timestamp};
 
+use crate::dsp::CHANNELS;
 use crate::timeline::{Packet, TICKS_PER_SECOND, Ticks};
 
+/// Opus always decodes at 48 kHz.
+const OPUS_SAMPLE_RATE: u32 = 48_000;
 /// 120 ms, the longest Opus packet, at 48 kHz.
 const OPUS_MAX_FRAMES: usize = 5760;
 
@@ -52,9 +55,12 @@ impl Decoder {
     pub fn new(params: &AudioCodecParameters) -> Result<Self, DecodeError> {
         if params.codec == CODEC_ID_OPUS {
             return Ok(Self {
-                kind: Kind::Opus(opus2::Decoder::new(48_000, opus2::Channels::Stereo)?),
-                sample_rate: 48_000,
-                scratch: vec![0.0; OPUS_MAX_FRAMES * 2],
+                kind: Kind::Opus(opus2::Decoder::new(
+                    OPUS_SAMPLE_RATE,
+                    opus2::Channels::Stereo,
+                )?),
+                sample_rate: OPUS_SAMPLE_RATE,
+                scratch: vec![0.0; OPUS_MAX_FRAMES * CHANNELS],
             });
         }
         let decoder = symphonia::default::get_codecs()
@@ -62,7 +68,7 @@ impl Decoder {
             .map_err(DecodeError::UnsupportedCodec)?;
         Ok(Self {
             kind: Kind::Symphonia(decoder),
-            sample_rate: params.sample_rate.unwrap_or(48_000),
+            sample_rate: params.sample_rate.unwrap_or(OPUS_SAMPLE_RATE),
             scratch: Vec::new(),
         })
     }
@@ -88,7 +94,7 @@ impl Decoder {
                 let frames = dec.decode_float(&pkt.data, &mut self.scratch, false)?;
                 let start = (pkt.trim_start as usize).min(frames);
                 let end = frames.saturating_sub(pkt.trim_end as usize).max(start);
-                out.extend_from_slice(&self.scratch[start * 2..end * 2]);
+                out.extend_from_slice(&self.scratch[start * CHANNELS..end * CHANNELS]);
                 Ok(end - start)
             }
             Kind::Symphonia(dec) => {

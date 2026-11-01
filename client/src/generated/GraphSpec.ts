@@ -2,7 +2,38 @@
 import type { Edge } from "./Edge";
 import type { NodeSpec } from "./NodeSpec";
 
-export type GraphSpec = { nodes: Array<NodeSpec>, 
+/**
+ * How nodes connect between the graph's own stereo `input` and `output`:
+ *
+ * ```json
+ * {
+ *   "nodes": [
+ *     { "id": "low", "type": "lowpass", "params": { "cutoff": 400 } },
+ *     { "id": "verb", "type": "reverb", "params": { "mix": 1 } }
+ *   ],
+ *   "edges": [
+ *     { "from": "input", "to": "low" },
+ *     { "from": "input", "to": "verb" },
+ *     { "from": "low", "to": "output" },
+ *     { "from": "verb:1", "to": "output:1" }
+ *   ]
+ * }
+ * ```
+ *
+ * An endpoint without a port connects all ports pairwise. Several sources feeding one input
+ * are summed. Without `edges`, the nodes form a chain from `input` to `output` in the order
+ * they are listed.
+ *
+ * `rate` (0.5 to 2, default 1) plays what feeds `input` faster and higher or slower and lower,
+ * like a turntable at another speed; nightcore is a rate of about 1.25. It is not a node because
+ * it changes how much of the tracks is consumed, which nodes (one frame in, one frame out)
+ * cannot.
+ */
+export type GraphSpec = { 
+/**
+ * Playback rate of what feeds the graph's input, 0.5 to 2; 1 if absent.
+ */
+rate?: number, nodes: Array<NodeSpec>, 
 /**
  * When empty (or absent), `nodes` form a chain from the graph input to the graph output,
  * in order.

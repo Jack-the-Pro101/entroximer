@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
-use entroximer_core::dsp::NodeRegistry;
+use entroximer_core::dsp::{NodeRegistry, PresetRegistry};
 use tokio::sync::{OnceCell, broadcast};
 
 pub use session::Session;
@@ -40,7 +40,9 @@ pub struct NodeSettings {
 pub struct Node {
     pub ctx: Arc<MediaContext>,
     pub settings: NodeSettings,
+    /// Effect node types.
     pub registry: NodeRegistry,
+    pub presets: PresetRegistry,
     pub tracks: TrackCache,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     system_ytdlp_version: OnceCell<Option<String>>,
@@ -55,6 +57,7 @@ impl Node {
             ctx,
             settings,
             registry: NodeRegistry::with_builtins(),
+            presets: PresetRegistry::with_builtins(),
             tracks: TrackCache::default(),
             sessions: Mutex::new(HashMap::new()),
             system_ytdlp_version: OnceCell::new(),
@@ -156,7 +159,7 @@ impl Node {
             players: u32::try_from(players.len()).unwrap_or(u32::MAX),
             playing_players: u32::try_from(players.iter().filter(|p| p.is_playing()).count())
                 .unwrap_or(u32::MAX),
-            uptime: Millis(u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+            uptime: Millis::from(self.started.elapsed()),
             memory_bytes: resident_memory().unwrap_or(0),
             cache_memory_bytes,
             cache_disk_bytes,
@@ -194,6 +197,7 @@ impl Node {
                 .unwrap_or_default(),
             providers: self.ctx.sources.descriptors(),
             nodes: self.registry.descriptors().cloned().collect(),
+            presets: self.presets.descriptors().cloned().collect(),
         }
     }
 
