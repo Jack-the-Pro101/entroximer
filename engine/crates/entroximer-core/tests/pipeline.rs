@@ -249,7 +249,7 @@ fn failing_source_is_retried_then_reported_with_its_own_error() {
 
 #[test]
 fn inspecting_finds_the_length_and_tags_and_refuses_what_does_not_play() {
-    let facts = inspect(std::fs::File::open(fixture()).unwrap()).unwrap();
+    let facts = inspect(std::fs::File::open(fixture()).unwrap(), Some("webm")).unwrap();
     let expected = FIXTURE_SECONDS * TICKS_PER_SECOND;
     assert!(
         facts.length.abs_diff(expected) < 1920,
@@ -272,9 +272,10 @@ fn inspecting_finds_the_length_and_tags_and_refuses_what_does_not_play() {
         .status()
         .expect("ffmpeg must be installed to run these tests");
     assert!(status.success());
-    let facts = inspect(std::fs::File::open(&tagged).unwrap()).unwrap();
+    let facts = inspect(std::fs::File::open(&tagged).unwrap(), None).unwrap();
     assert_eq!(facts.title.as_deref(), Some("Doorbell"));
     assert_eq!(facts.artist.as_deref(), Some("Front door"));
+    assert!(!facts.has_cover);
     assert!(
         facts.length.abs_diff(2 * TICKS_PER_SECOND) < 4800,
         "{}",
@@ -282,5 +283,5 @@ fn inspecting_finds_the_length_and_tags_and_refuses_what_does_not_play() {
     );
 
     let text = std::io::Cursor::new(b"definitely not audio, only words".repeat(100));
-    assert!(inspect(text).is_err());
+    assert!(inspect(text, None).is_err());
 }

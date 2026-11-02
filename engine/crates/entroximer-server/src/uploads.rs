@@ -202,7 +202,8 @@ impl UploadStore {
         let reading = partial.0.clone();
         let facts = tokio::task::spawn_blocking(move || {
             let file = std::fs::File::open(reading).map_err(MediaError::Source)?;
-            inspect(file)
+            // no hint: upload files have no extension, as when they play
+            inspect(file, None)
         })
         .await
         .unwrap_or(Err(MediaError::Panicked))

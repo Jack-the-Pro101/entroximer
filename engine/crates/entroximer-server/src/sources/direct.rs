@@ -1,6 +1,7 @@
 //! Media that ffmpeg plays directly: `http` for links to media files and internet radio, and
-//! `local` for files on the engine's host. Their metadata comes from the files' own tags, read
-//! with ffprobe, and their artwork is the cover embedded in them, if any (see `artwork`).
+//! files on the engine's host that its own demuxer does not read (see `local`). Their metadata
+//! comes from the files' own tags, read with ffprobe, and their artwork is the cover embedded in
+//! them, if any (see `artwork`).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -16,7 +17,7 @@ use serde::Deserialize;
 
 use super::provider::{Provider, ProviderDescriptor};
 use super::{
-    FoundTrack, LoadOutcome, ResolveError, ResolvedTrack, TrackInfo, TrackRef, artwork, net,
+    FoundTrack, LoadOutcome, ResolveError, ResolvedTrack, TrackInfo, TrackRef, artwork, local, net,
 };
 use crate::api::protocol::Millis;
 use crate::config::MediaContext;
@@ -88,55 +89,7 @@ impl Provider for HttpProvider {
     }
 }
 
-/// Files on the engine's host; only registered when the operator allows them.
-pub(super) struct LocalProvider {
-    descriptor: ProviderDescriptor,
-}
-
-impl LocalProvider {
-    pub(super) fn new() -> Self {
-        Self {
-            descriptor: descriptor("local", "Local file"),
-        }
-    }
-}
-
-#[async_trait]
-impl Provider for LocalProvider {
-    fn descriptor(&self) -> &ProviderDescriptor {
-        &self.descriptor
-    }
-
-    fn accepts(&self, url: &Url) -> bool {
-        url.scheme() == "file"
-    }
-
-    async fn load_url(
-        &self,
-        url: &Url,
-        ctx: &MediaContext,
-    ) -> Result<Option<LoadOutcome>, ResolveError> {
-        let path = url
-            .to_file_path()
-            .map_err(|()| ResolveError::Unsupported(url.to_string()))?;
-        let track = describe(&path.to_string_lossy(), "local", None, ctx).await?;
-        Ok(Some(LoadOutcome::Track(track)))
-    }
-
-    async fn resolve(
-        &self,
-        track: &FoundTrack,
-        ctx: &MediaContext,
-    ) -> Result<ResolvedTrack, ResolveError> {
-        let path = &track.reference.uri;
-        if !Path::new(path).is_file() {
-            return Err(ResolveError::Unsupported(path.clone()));
-        }
-        describe(path, "local", None, ctx).await
-    }
-}
-
-fn descriptor(name: &str, display_name: &str) -> ProviderDescriptor {
+pub(super) fn descriptor(name: &str, display_name: &str) -> ProviderDescriptor {
     ProviderDescriptor {
         name: name.to_owned(),
         display_name: display_name.to_owned(),
@@ -217,6 +170,15 @@ fn has_media_extension(url: &Url) -> bool {
         })
 }
 
+/// A file on the engine's host, read with ffprobe and played through ffmpeg.
+pub(super) async fn describe_file(
+    file: &Path,
+    source: &str,
+    ctx: &MediaContext,
+) -> Result<ResolvedTrack, ResolveError> {
+    describe(&file.to_string_lossy(), source, None, ctx).await
+}
+
 /// Reads `input`'s metadata with ffprobe and prepares ffmpeg to play it.
 async fn describe(
     input: &str,
@@ -273,7 +235,7 @@ pub(super) async fn embedded_cover(
 ) -> Result<Option<Bytes>, ResolveError> {
     let input = &reference.uri;
     match reference.source.as_str() {
-        "local" if ctx.config.sources.allow_local_files && Path::new(input).is_file() => {}
+        local::SOURCE if ctx.sources.local_files().permit(Path::new(input)).is_some() => {}
         "http" => {
             let url = Url::parse(input).map_err(|_| ResolveError::Unsupported(input.clone()))?;
             if !ctx.config.sources.allow_private_urls {
@@ -321,7 +283,7 @@ pub(super) async fn embedded_cover(
 }
 
 /// The file name without its extension, e.g. `My Song` for `https://host/music/My%20Song.mp3`.
-fn title_from(input: &str) -> String {
+pub(super) fn title_from(input: &str) -> String {
     let name = match Url::parse(input) {
         Ok(url) => url
             .path_segments()

@@ -5,7 +5,8 @@
 //!   are on, then `http` for links to media files, then yt-dlp's generic extractor.
 //! - `prefix:terms` with a known search prefix (`ytsearch:`, `ytmsearch:`, `scsearch:`,
 //!   `spsearch:`) searches with the provider that owns the prefix.
-//! - A path on the engine's host plays the file, if local files are allowed.
+//! - A path on the engine's host plays the file, if local files are allowed, and if they are
+//!   confined to a directory, only one within it.
 //! - Anything else is searched with the default search prefix.
 
 use std::path::Path;
@@ -16,7 +17,8 @@ use reqwest::Url;
 use serde::Serialize;
 use ts_rs::TS;
 
-use super::direct::{HttpProvider, LocalProvider};
+use super::direct::HttpProvider;
+use super::local::{LocalFiles, LocalProvider};
 use super::spotify::SpotifyProvider;
 use super::upload::UploadProvider;
 use super::ytdlp::YtDlpProvider;
@@ -92,7 +94,7 @@ pub struct Sources {
     /// Also among `providers`, for its startup check.
     spotify: Option<Arc<SpotifyProvider>>,
     default_search: String,
-    local_files: bool,
+    local_files: LocalFiles,
 }
 
 impl Sources {
@@ -100,7 +102,8 @@ impl Sources {
         config: &SourcesConfig,
         spotify: &SpotifyConfig,
         uploads: Option<Arc<UploadStore>>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
+        let local_files = LocalFiles::new(config)?;
         let mut providers: Vec<Arc<dyn Provider>> = YtDlpProvider::sites()
             .into_iter()
             .map(|site| Arc::new(site) as Arc<dyn Provider>)
@@ -114,15 +117,20 @@ impl Sources {
         }
         providers.push(Arc::new(HttpProvider::new()));
         providers.push(Arc::new(YtDlpProvider::generic()));
-        if config.allow_local_files {
-            providers.push(Arc::new(LocalProvider::new()));
+        if local_files.is_on() {
+            providers.push(Arc::new(LocalProvider::new(local_files.clone())));
         }
-        Self {
+        Ok(Self {
             providers,
             spotify,
             default_search: config.default_search.clone(),
-            local_files: config.allow_local_files,
-        }
+            local_files,
+        })
+    }
+
+    /// Which files on the engine's host clients may play.
+    pub fn local_files(&self) -> &LocalFiles {
+        &self.local_files
     }
 
     /// Logs the providers, and whether Spotify accepts the configured app, so that operators
@@ -134,6 +142,15 @@ impl Sources {
             .map(|p| p.descriptor().name.as_str())
             .collect();
         tracing::info!(providers = %names.join(", "), "sources");
+        match &self.local_files {
+            LocalFiles::Off => {}
+            LocalFiles::Anywhere => {
+                tracing::info!("clients may play any file the engine can read")
+            }
+            LocalFiles::Within(dir) => {
+                tracing::info!(dir = %dir.display(), "clients may play the files in this directory")
+            }
+        }
         match &self.spotify {
             None => tracing::info!(
                 "Spotify is off; set ENTROXIMER_SPOTIFY_CLIENT_ID and ENTROXIMER_SPOTIFY_CLIENT_SECRET to enable it"
@@ -158,7 +175,7 @@ impl Sources {
     /// Loads a URL, a path, or a search (`prefix:terms`, or plain text with the default search).
     pub async fn load(&self, query: &str, ctx: &MediaContext) -> Result<LoadOutcome, ResolveError> {
         let query = query.trim();
-        if let Some(url) = self.as_url(query) {
+        if let Some(url) = self.as_url(query)? {
             for provider in self.providers.iter().filter(|p| p.accepts(&url)) {
                 if let Some(outcome) = provider.load_url(&url, ctx).await? {
                     return Ok(outcome);
@@ -233,24 +250,27 @@ impl Sources {
         self.resolve(&found, ctx).await
     }
 
-    /// Web links, URIs a provider takes (e.g. `spotify:track:...`), and paths on the engine's
-    /// host when local files are allowed.
-    fn as_url(&self, query: &str) -> Option<Url> {
+    /// Web links, URIs a provider takes (e.g. `spotify:track:...`), and paths of files on the
+    /// engine's host that clients may play. If local files are allowed, an absolute path that
+    /// names none of those is an error rather than a search.
+    fn as_url(&self, query: &str) -> Result<Option<Url>, ResolveError> {
         if let Ok(url) = Url::parse(query) {
             let web = matches!(url.scheme(), "http" | "https");
             // files only by their path, which is checked below
             let taken = url.scheme() != "file" && self.providers.iter().any(|p| p.accepts(&url));
             if web || taken {
-                return Some(url);
+                return Ok(Some(url));
             }
         }
-        if !self.local_files {
-            return None;
+        if !self.local_files.is_on() {
+            return Ok(None);
         }
-        let path = std::fs::canonicalize(Path::new(query)).ok()?;
-        path.is_file()
-            .then(|| Url::from_file_path(path).ok())
-            .flatten()
+        let path = Path::new(query);
+        match self.local_files.permit(path) {
+            Some(file) => Ok(Url::from_file_path(file).ok()),
+            None if path.is_absolute() => Err(ResolveError::NoLocalFile(query.to_owned())),
+            None => Ok(None),
+        }
     }
 
     /// `ytsearch:terms` with a known prefix, else the whole query with the default search.

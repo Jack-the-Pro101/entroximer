@@ -77,6 +77,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             // rendering is run by the operator, who may play their own files
             let mut media = cli.media;
             media.sources.allow_local_files = true;
+            media.sources.local_files_dir = None;
             render::run(args, &MediaContext::new(media)?).await
         }
         Command::Youtube(command) => {

@@ -1098,3 +1098,25 @@ async fn uploads_play_as_tracks_within_the_limits() {
         .await;
     assert_eq!(gone["error"]["code"], "unavailable", "{gone}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_files_directory_confines_paths_to_it() {
+    let sounds = tempfile::tempdir().unwrap();
+    std::fs::copy(fixture(), sounds.path().join("ding.webm")).unwrap();
+    let dir = sounds.path().to_str().unwrap();
+    let engine = Engine::start_with(None, &["--local-files-dir", dir]).await;
+    let mut client = engine.connect(None, None).await.unwrap();
+    client.recv().await;
+
+    let (_, loaded) = client
+        .exchange("tracks.load", json!({ "query": "ding.webm" }))
+        .await;
+    assert_eq!(
+        loaded["result"]["track"]["info"]["title"], "ding",
+        "{loaded}"
+    );
+    let (_, refused) = client
+        .exchange("tracks.load", json!({ "query": fixture() }))
+        .await;
+    assert_eq!(refused["error"]["code"], "not_found", "{refused}");
+}

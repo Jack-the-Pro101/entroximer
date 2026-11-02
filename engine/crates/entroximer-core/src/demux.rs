@@ -169,16 +169,21 @@ pub struct MediaFacts {
     pub artist: Option<String>,
     pub album: Option<String>,
     pub isrc: Option<String>,
+    /// Whether it embeds a picture, such as an album cover.
+    pub has_cover: bool,
 }
 
 /// Packets decoded by [`inspect`], of which one must decode.
 const INSPECTED_PACKETS: usize = 8;
 
-/// Reads media front to back the way a producer's stream is played: unseekable and without a
-/// format hint. It decodes the first packets, so that media it accepts is media the engine
-/// plays, and reads the rest for the length and tags. Blocks while reading.
-pub fn inspect(source: impl io::Read + Send + Sync + 'static) -> Result<MediaFacts, MediaError> {
-    let mut demuxer = AudioDemuxer::open(Box::new(ReadOnlySource::new(source)), None, 0)?;
+/// Reads media front to back the way a producer's stream with the same `hint` (a file extension)
+/// is played: unseekable. It decodes the first packets, so that media it accepts is media the
+/// engine plays, and reads the rest for the length and tags. Blocks while reading.
+pub fn inspect(
+    source: impl io::Read + Send + Sync + 'static,
+    hint: Option<&str>,
+) -> Result<MediaFacts, MediaError> {
+    let mut demuxer = AudioDemuxer::open(Box::new(ReadOnlySource::new(source)), hint, 0)?;
     let mut decoder = Decoder::new(&demuxer.params).map_err(MediaError::Decode)?;
     let mut facts = MediaFacts::default();
     let (mut decoded, mut tried, mut last_error) = (false, 0, None);
@@ -300,8 +305,8 @@ impl AudioDemuxer {
         }
     }
 
-    /// Fills in the facts' tags from the media's and the audio track's metadata, the first value
-    /// found for each.
+    /// Fills in the facts' tags and cover from the media's and the audio track's metadata, the
+    /// first value found for each.
     fn read_tags(&mut self, facts: &mut MediaFacts) {
         let track_id = u64::from(self.track_id);
         let mut metadata = self.format.metadata();
@@ -312,10 +317,10 @@ impl AudioDemuxer {
                     .iter()
                     .filter(|t| t.track_id == track_id)
                     .map(|t| &t.metadata);
-                for tag in std::iter::once(&revision.media)
-                    .chain(per_track)
-                    .flat_map(|m| &m.tags)
-                {
+                let containers: Vec<_> =
+                    std::iter::once(&revision.media).chain(per_track).collect();
+                facts.has_cover |= containers.iter().any(|m| !m.visuals.is_empty());
+                for tag in containers.iter().flat_map(|m| &m.tags) {
                     let (field, value) = match &tag.std {
                         Some(StandardTag::TrackTitle(v)) => (&mut facts.title, v),
                         Some(StandardTag::Artist(v) | StandardTag::AlbumArtist(v)) => {

@@ -252,6 +252,7 @@ pub fn load_error(e: &ResolveError) -> ApiError {
             | SpotifyError::Json(_) => ErrorCode::LoadFailed,
         },
         ResolveError::NoAudio(_) => ErrorCode::NoAudio,
+        ResolveError::NoLocalFile(_) => ErrorCode::NotFound,
         ResolveError::Unsupported(_)
         | ResolveError::UnknownSearch(_)
         | ResolveError::UnknownSource(_)

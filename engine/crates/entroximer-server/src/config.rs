@@ -150,9 +150,14 @@ pub struct SourcesConfig {
     )]
     pub playlist_limit: u32,
 
-    /// Let clients play files on the engine's host by their path.
+    /// Let clients play any file on the engine's host that it can read, by its path.
     #[arg(long = "allow-local-files", env = "ENTROXIMER_ALLOW_LOCAL_FILES", value_parser = BoolishValueParser::new())]
     pub allow_local_files: bool,
+
+    /// Let clients play the files within this directory by their path (relative paths are
+    /// within it), and no others, e.g. a bot's sounds on a volume it shares with the engine.
+    #[arg(long = "local-files-dir", env = "ENTROXIMER_LOCAL_FILES_DIR")]
+    pub local_files_dir: Option<PathBuf>,
 
     /// Let clients make the engine fetch links to this machine or private networks, e.g. a
     /// media server on the LAN.
@@ -351,7 +356,7 @@ impl MediaContext {
         } else {
             None
         };
-        let sources = Sources::new(&config.sources, &config.spotify, uploads.clone());
+        let sources = Sources::new(&config.sources, &config.spotify, uploads.clone())?;
         Ok(Self {
             config,
             ytdlp,

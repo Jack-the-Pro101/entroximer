@@ -122,13 +122,26 @@ queue update.
 | `http` | Direct links to audio files and internet radio (MP3, Ogg, FLAC, WAV, M4A, HLS, ...), described from their tags | |
 | `generic` | Any other page yt-dlp can extract | |
 | `spotify` | open.spotify.com tracks, albums, playlists and artists, `spotify:` URIs; only with a Spotify app (below) | `spsearch` |
-| `local` | Files on the engine's host; only with `ENTROXIMER_ALLOW_LOCAL_FILES` | |
+| `local` | Files on the engine's host, by their path; only with `ENTROXIMER_LOCAL_FILES_DIR` or `ENTROXIMER_ALLOW_LOCAL_FILES` (see [Local files](#local-files)) | |
 | `upload` | Files clients uploaded, as `upload:<id>`; only with `ENTROXIMER_UPLOADS` (see [Uploads](#uploads)) | |
 
 Everything but `http`, `local` and Spotify's metadata goes through yt-dlp. `http` and `generic` refuse links to the
 engine's own machine and private networks (unless `ENTROXIMER_ALLOW_PRIVATE_URLS`), so clients
 cannot use the engine to reach internal services. Newgrounds currently refuses automated
 requests; it works as far as Newgrounds lets it.
+
+### Local files
+
+A bot's own sounds, such as a soundboard's, are best kept as files the engine plays by their
+path. Clients may play the files within `ENTROXIMER_LOCAL_FILES_DIR` and no others: relative
+paths are within it, and paths that lead out of it, through `..` or links, are refused.
+`ENTROXIMER_ALLOW_LOCAL_FILES` instead allows any file the engine can read. Loading an absolute
+path that is not a file clients may play fails with `not_found`.
+
+Files of up to 64 MiB that the engine's own demuxer reads (Ogg, Opus, MP3, FLAC, WAV, WebM,
+...) play straight from the file. What one holds (length, tags, whether it has a cover) is read
+once and kept while the file is unchanged, so playing it again starts no process. Other files,
+such as MP4s with their index at the end, play through ffprobe and ffmpeg each time.
 
 ### Artwork
 
@@ -366,7 +379,8 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_PRELOAD_SECS` | `30` | How long before a track ends the next item of the queue starts loading |
 | `ENTROXIMER_DEFAULT_SEARCH` | `ytsearch` | Search for queries that are neither links nor prefixed |
 | `ENTROXIMER_PLAYLIST_LIMIT` | `500` | Most tracks loaded from one playlist |
-| `ENTROXIMER_ALLOW_LOCAL_FILES` | off | Let clients play files on the engine's host |
+| `ENTROXIMER_LOCAL_FILES_DIR` | none | Let clients play the files within this directory; see [Local files](#local-files) |
+| `ENTROXIMER_ALLOW_LOCAL_FILES` | off | Let clients play any file on the engine's host that it can read |
 | `ENTROXIMER_ALLOW_PRIVATE_URLS` | off | Let clients play links to private networks, e.g. a media server on the LAN |
 | `ENTROXIMER_UPLOADS` | off | Let clients upload audio files to play; see [Uploads](#uploads) |
 | `ENTROXIMER_UPLOAD_MAX_MB` | `50` | The largest upload |
@@ -411,6 +425,10 @@ cleanly on `SIGTERM`, and has a health check (`entroximer healthcheck`). It has 
 `/var/lib/entroximer` holds the managed yt-dlp and the YouTube session, which therefore survive
 restarts and image upgrades, and `/var/cache/entroximer` holds the packet cache and belongs on fast disk. On SELinux
 hosts add `:Z` to bind mounts. yt-dlp is not in the image, so YouTube fixes never need a rebuild.
+
+When the bot runs beside the engine, e.g. in the same pod, its sounds can be a volume mounted
+into both containers at the same path, read-only in the engine's, with
+`ENTROXIMER_LOCAL_FILES_DIR` set to that path: the bot then plays them by the paths it sees.
 
 ## Development
 

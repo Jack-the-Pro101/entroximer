@@ -6,6 +6,7 @@
 
 pub mod artwork;
 mod direct;
+pub mod local;
 pub mod metadata;
 mod net;
 pub mod provider;
@@ -134,4 +135,6 @@ pub enum ResolveError {
     NoMirror(String),
     #[error("the upload `{0}` was deleted or has expired")]
     UploadGone(String),
+    #[error("`{0}` is not a file the engine may play")]
+    NoLocalFile(String),
 }
