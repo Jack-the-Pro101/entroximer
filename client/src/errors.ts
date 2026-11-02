@@ -9,8 +9,16 @@ import type { ErrorCode } from "./generated/ErrorCode";
  * - `timeout`: no answer in time.
  * - `closed`: the client was closed.
  * - `protocol_mismatch`: the engine speaks a different protocol version.
+ * - `voice_conflict`: another gateway session of the same bot joined voice in the player's guild,
+ *   which takes the voice connection from this one; usually the bot is running twice.
  */
-export type ClientErrorCode = ErrorCode | "connection_lost" | "timeout" | "closed" | "protocol_mismatch";
+export type ClientErrorCode =
+  | ErrorCode
+  | "connection_lost"
+  | "timeout"
+  | "closed"
+  | "protocol_mismatch"
+  | "voice_conflict";
 
 export class EntroximerError extends Error {
   override readonly name = "EntroximerError";

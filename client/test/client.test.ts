@@ -255,6 +255,37 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
     expect(sent.at(-1)?.[1].d.channel_id).toBeNull();
   }, 30_000);
 
+  test("ignores voice states of the bot's other gateway sessions, reporting the conflict", async () => {
+    const sent: Array<[string, GatewayVoiceStateUpdate]> = [];
+    const manager = client({ sendToGateway: (guildId, payload) => sent.push([guildId, payload]) });
+    await manager.connect();
+    const errors: Array<[string, string | undefined]> = [];
+    manager.on("error", (error, guildId) => errors.push([error.code, guildId]));
+    manager.handleRawEvent({ t: "READY", d: { session_id: "mine" } });
+    const player = manager.player("8");
+    player.connect("80");
+    const destroyed = nextCall<[]>(500);
+    player.on("destroyed", destroyed.listener);
+
+    // e.g. a second instance of the bot joining; reported once, not passed on
+    for (const channel_id of ["80", "80", null]) {
+      manager.handleRawEvent({
+        t: "VOICE_STATE_UPDATE",
+        d: { guild_id: "8", user_id: BOT, session_id: "theirs", channel_id },
+      });
+    }
+    expect(errors).toEqual([["voice_conflict", "8"]]);
+    expect(player.channelId).toBeNull();
+    await expect(destroyed.called).rejects.toThrow();
+
+    manager.handleRawEvent({
+      t: "VOICE_STATE_UPDATE",
+      d: { guild_id: "8", user_id: BOT, session_id: "mine", channel_id: "80" },
+    });
+    expect(player.channelId).toBe("80");
+    await player.destroy();
+  });
+
   test("resumes its session after the connection drops", async () => {
     const manager = client();
     await manager.connect();

@@ -93,6 +93,8 @@ export class Player extends Emitter<PlayerEvents> {
   #voiceSession: string | null = null;
   #voiceServer: { token: string; endpoint: string } | null = null;
   #sentVoice: VoiceState | null = null;
+  /** The other gateway session last reported for joining voice in this guild. */
+  #conflictingSession: string | null = null;
 
   constructor(
     readonly guildId: string,
@@ -269,6 +271,8 @@ export class Player extends Emitter<PlayerEvents> {
         this.emit("update", event.state);
         break;
       case "voiceClosed":
+        // the engine forgets details it gave up on; send them again if Discord does
+        this.#sentVoice = null;
         this.emit("voiceClosed", {
           reason: event.reason,
           byRemote: event.byRemote,
@@ -278,8 +282,26 @@ export class Player extends Emitter<PlayerEvents> {
     }
   }
 
-  /** @internal Discord's voice state for the bot in this guild. */
-  _handleVoiceState(sessionId: string, channelId: string | null): void {
+  /**
+   * @internal Discord's voice state for the bot in this guild; `ours` is false if it belongs to
+   * another gateway session of the bot.
+   */
+  _handleVoiceState(sessionId: string, channelId: string | null, ours = true): void {
+    if (!ours) {
+      // passing it on would make both sessions take the voice connection from each other
+      if (channelId !== null && this.#conflictingSession !== sessionId) {
+        this.#conflictingSession = sessionId;
+        this.#report(
+          new EntroximerError(
+            "voice_conflict",
+            `another session of this bot joined voice in guild ${this.guildId}, which ends this ` +
+              "player's voice connection; is the bot running twice?",
+          ),
+        );
+      }
+      return;
+    }
+    this.#conflictingSession = null;
     this.channelId = channelId;
     if (channelId === null) {
       // the bot left or was disconnected from the voice channel

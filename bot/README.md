@@ -48,3 +48,11 @@ gapless transition to a queued track, a SoundCloud search result skipped to and 
 repeating a track, and skipping past the end. It checks each step against what the engine
 reports; with `RUST_LOG=entroximer_server::node::player=debug`, the engine's log shows when it
 prepares each next track.
+
+## Troubleshooting
+
+If commands fail with "Interaction has already been acknowledged", the bot warns that another
+instance answered first, or it posts that another instance joined voice: the bot is running
+twice with the same token, e.g. in a terminal that outlived its editor window. Discord sends
+every command to both, both join voice, and each join ends the other's voice connection (close
+code 4006), so nothing plays and `/leave` may leave the bot behind. Stop the other instance.

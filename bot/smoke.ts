@@ -7,7 +7,7 @@ import { Client, Events, GatewayIntentBits } from "discord.js";
 import { parseChain } from "entroximer-client";
 import type { PlayerState, Track, TrackEndReason } from "entroximer-client";
 
-import { connectEngine } from "./engine";
+import { connectEngine, keepGatewayReady } from "./engine";
 import { env } from "./env";
 import { formatTime } from "./format";
 
@@ -19,9 +19,10 @@ if (!channelId || !query) {
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
 const ready = new Promise<Client<true>>((resolve) => client.once(Events.ClientReady, resolve));
+const gatewayReady = keepGatewayReady(client);
 await client.login(env.BOT_TOKEN);
 const bot = await ready;
-const { manager } = await connectEngine(bot);
+const { manager } = await connectEngine(bot, gatewayReady);
 
 const channel = await bot.channels.fetch(channelId);
 if (!channel?.isVoiceBased()) {
@@ -34,7 +35,16 @@ player.on("trackEnd", (_, reason, itemId) => log.push(`${Date.now()} end ${reaso
 player.on("trackError", (_, error) => log.push(`${Date.now()} error ${error.code}: ${error.message}`));
 player.on("queueEnd", () => log.push(`${Date.now()} queue end`));
 player.queue.on("change", (change) => log.push(`${Date.now()} queue ${change.type}`));
-player.on("voiceClosed", (info) => log.push(`${Date.now()} voice closed: ${JSON.stringify(info)}`));
+// positions advance whether or not Discord takes the audio, so losing voice fails the run
+const voiceLost: string[] = [];
+player.on("voiceClosed", (info) => {
+  log.push(`${Date.now()} voice closed: ${JSON.stringify(info)}`);
+  if (info.byRemote) voiceLost.push(info.reason);
+});
+manager.on("error", (error) => {
+  log.push(`${Date.now()} error ${error.code}: ${error.message}`);
+  if (error.code === "voice_conflict") voiceLost.push(error.message);
+});
 
 /** The engine's current state of the player. */
 async function state(): Promise<PlayerState> {
@@ -219,6 +229,13 @@ await step("leave", async () => {
   await destroyed;
   return "left the voice channel";
 });
+
+results.push(
+  voiceLost.length === 0
+    ? { step: "voice stayed connected", ok: true, detail: "" }
+    : { step: "voice stayed connected", ok: false, detail: voiceLost.join("; ") },
+);
+if (voiceLost.length > 0) console.log(`✗ voice stayed connected: ${voiceLost.join("; ")}`);
 
 console.log(`\nevents:\n${log.map((line) => `  ${line}`).join("\n")}`);
 const failed = results.filter((result) => !result.ok).length;

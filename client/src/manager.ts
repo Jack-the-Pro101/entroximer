@@ -69,8 +69,8 @@ type ManagerEvents = {
    * has left their voice channels.
    */
   playersLost: [players: Player[]];
-  /** A background request failed. */
-  error: [error: EntroximerError];
+  /** A background request failed, or a player's did (`guildId` names it). */
+  error: [error: EntroximerError, guildId?: string];
 };
 
 /**
@@ -85,6 +85,8 @@ export class Entroximer extends Emitter<ManagerEvents> {
   readonly #sendToGateway: EntroximerOptions["sendToGateway"];
   readonly #resumeTimeoutSecs: number | undefined;
   readonly #host: PlayerHost;
+  /** This process's gateway sessions, from `READY`; empty if none was passed on. */
+  readonly #gatewaySessions = new Set<string>();
   #connectedBefore = false;
 
   constructor(options: EntroximerOptions) {
@@ -196,6 +198,7 @@ export class Entroximer extends Emitter<ManagerEvents> {
     let player = this.#players.get(guildId);
     if (!player) {
       player = new Player(guildId, this.#host);
+      player.on("error", (error) => this.emit("error", error, guildId));
       this.#players.set(guildId, player);
     }
     return player;
@@ -204,9 +207,19 @@ export class Entroximer extends Emitter<ManagerEvents> {
   /**
    * Passes on the gateway dispatches players need (the bot's voice state and voice server
    * updates); others are ignored. With discord.js: `client.on(Events.Raw, (p) => manager.handleRawEvent(p))`.
+   *
+   * Pass on `READY` too (it arrives before `clientReady`, so listen before logging in): it tells
+   * the client which voice states are this process's. Discord sends the bot's voice states from
+   * every session to every session, so without it a second instance of the bot, or another
+   * shard process, takes over the voice connections of this one's players.
    */
   handleRawEvent(dispatch: GatewayDispatch): void {
-    if (dispatch.t === "VOICE_STATE_UPDATE") {
+    if (dispatch.t === "READY") {
+      const d = dispatch.d as { session_id?: string };
+      if (d.session_id) {
+        this.#gatewaySessions.add(d.session_id);
+      }
+    } else if (dispatch.t === "VOICE_STATE_UPDATE") {
       const d = dispatch.d as {
         guild_id?: string;
         user_id: string;
@@ -214,7 +227,8 @@ export class Entroximer extends Emitter<ManagerEvents> {
         channel_id: string | null;
       };
       if (d.user_id === this.#userId && d.guild_id !== undefined) {
-        this.#players.get(d.guild_id)?._handleVoiceState(d.session_id, d.channel_id);
+        const ours = this.#gatewaySessions.size === 0 || this.#gatewaySessions.has(d.session_id);
+        this.#players.get(d.guild_id)?._handleVoiceState(d.session_id, d.channel_id, ours);
       }
     } else if (dispatch.t === "VOICE_SERVER_UPDATE") {
       const d = dispatch.d as { guild_id: string; token: string; endpoint: string | null };

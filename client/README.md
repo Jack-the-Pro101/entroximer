@@ -7,8 +7,12 @@ Bun, whose `WebSocket` can send the headers the engine expects.
 ```ts
 import { Client, Events, GatewayIntentBits } from "discord.js";
 import { Entroximer } from "entroximer-client";
+import type { GatewayDispatch } from "entroximer-client";
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
+// READY comes before `clientReady`; keep it for the engine's client (see below)
+const gatewayReady: GatewayDispatch[] = [];
+client.on(Events.Raw, (packet) => packet.t === "READY" && gatewayReady.push(packet));
 
 client.once(Events.ClientReady, async (ready) => {
   const engine = new Entroximer({
@@ -17,6 +21,7 @@ client.once(Events.ClientReady, async (ready) => {
     userId: ready.user.id,
     sendToGateway: (guildId, payload) => ready.guilds.cache.get(guildId)?.shard.send(payload),
   });
+  for (const packet of gatewayReady) engine.handleRawEvent(packet);
   ready.on(Events.Raw, (packet) => engine.handleRawEvent(packet));
   await engine.connect();
 
@@ -49,8 +54,16 @@ change.
 A player keeps the engine's view of `track` (and its queue `itemId`), `paused`, `volume`, `graph`
 and `state` (buffered ranges, connection, buffering), and estimates `position` between updates.
 It emits `trackStart`, `trackEnd`, `trackError`, `trackStuck` (each with the track's item id),
-`queueEnd`, `update`, `voiceClosed`, `error` and `destroyed`. Leaving the voice channel in
-Discord destroys the player as well.
+`queueEnd`, `update`, `voiceClosed`, `error` and `destroyed`; its errors reach the client's
+`error` event too, with the guild ID. Leaving the voice channel in Discord destroys the player as
+well.
+
+Discord sends the bot's voice states from every gateway session to every session. Given `READY`,
+the client knows its own sessions and ignores the others' voice states: when another instance of
+the bot (or another shard process) joins voice in a guild, which ends this one's voice connection
+with close code 4006, the player reports a `voice_conflict` error instead of taking the
+connection back. Without `READY` it cannot tell, and both instances keep replacing each other's
+voice sessions: no audio, and `voiceClosed` with code 4006.
 
 ## Effects
 

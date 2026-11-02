@@ -74,6 +74,9 @@ pub struct GuildPlayer {
     driver: tokio::sync::Mutex<Driver>,
     /// songbird's track playing the deck; paused while there is nothing to hear.
     output: TrackHandle,
+    /// Whether `output` was last told to play; held while telling it, so that changes apply in
+    /// order. `None` once telling it failed.
+    output_playing: Mutex<Option<bool>>,
     signals: mpsc::UnboundedSender<Signal>,
     state: Mutex<State>,
     next_track: AtomicU64,
@@ -82,7 +85,7 @@ pub struct GuildPlayer {
     updating: tokio::sync::Mutex<()>,
 }
 
-/// Lock order: `state`, then `deck`; never the other way around.
+/// Lock order: `output_playing`, `state`, then `deck`; never the other way around.
 #[derive(Default)]
 struct State {
     /// The queue item each deck track plays.
@@ -142,7 +145,8 @@ impl GuildPlayer {
             let source = DeckSource::new(Arc::clone(&deck), signals.clone());
             let output =
                 driver.play_only_input(Input::from(RawAdapter::new(source, SAMPLE_RATE, 2)));
-            if let Err(e) = output.pause() {
+            let paused = output.pause();
+            if let Err(e) = &paused {
                 tracing::warn!(%guild_id, "cannot pause the new output: {e}");
             }
             Self {
@@ -154,6 +158,7 @@ impl GuildPlayer {
                 deck,
                 driver: tokio::sync::Mutex::new(driver),
                 output,
+                output_playing: Mutex::new(paused.is_ok().then_some(false)),
                 signals,
                 state: Mutex::new(State {
                     volume: 100,
@@ -756,31 +761,28 @@ impl GuildPlayer {
     }
 
     /// Connects to voice with new details; unchanged ones keep the connection as it is.
+    ///
+    /// Discord answers asynchronously: the outcome arrives as a driver event (see
+    /// [`VoiceEvents`]), not in the response. A connection that fails or that Discord closes
+    /// forgets its details, so that sending the same ones again retries.
     async fn connect(&self, voice: VoiceState, info: ConnectionInfo) {
         {
             let mut state = self.state();
             if state.voice.as_ref() == Some(&voice) {
                 return;
             }
+            tracing::info!(
+                guild_id = %self.guild_id,
+                channel_id = %voice.channel_id,
+                endpoint = %voice.endpoint,
+                session = short(&voice.session_id),
+                "connecting to voice"
+            );
             state.voice = Some(voice);
             state.connected = false;
         }
-        let connecting = self.driver.lock().await.connect(info);
-        // Discord answers asynchronously; the outcome arrives as an event, not in the response
-        let me = self.me.clone();
-        tokio::spawn(async move {
-            let result = connecting.await;
-            let Some(player) = me.upgrade() else { return };
-            match result {
-                Ok(()) => player.state().connected = true,
-                Err(e) => player.emit(Event::VoiceClosed {
-                    guild_id: player.guild_id,
-                    code: None,
-                    reason: format!("could not connect: {e}"),
-                    by_remote: false,
-                }),
-            }
-        });
+        // songbird keeps connecting when the outcome is not awaited
+        drop(self.driver.lock().await.connect(info));
     }
 
     /// Passes events the deck produced during a request to the event task.
@@ -916,16 +918,28 @@ impl GuildPlayer {
     }
 
     /// Plays the songbird output only while there is something to hear, so Discord gets no
-    /// stream of silence.
+    /// stream of silence. Tells songbird only about changes: this runs after every event.
     fn sync_output(&self) {
-        let result = if self.is_playing() {
+        let mut output_playing = self
+            .output_playing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let playing = self.is_playing();
+        if *output_playing == Some(playing) {
+            return;
+        }
+        let result = if playing {
             self.output.play()
         } else {
             self.output.pause()
         };
-        if let Err(e) = result {
-            tracing::warn!(guild_id = %self.guild_id, "cannot control the voice output: {e}");
-        }
+        *output_playing = match result {
+            Ok(()) => Some(playing),
+            Err(e) => {
+                tracing::warn!(guild_id = %self.guild_id, "cannot control the voice output: {e}");
+                None
+            }
+        };
     }
 
     fn emit(&self, event: Event) {
@@ -1005,22 +1019,53 @@ impl songbird::EventHandler for VoiceEvents {
     async fn act(&self, ctx: &EventContext<'_>) -> Option<songbird::Event> {
         let player = self.0.upgrade()?;
         match ctx {
-            EventContext::DriverConnect(_) | EventContext::DriverReconnect(_) => {
+            EventContext::DriverConnect(data) | EventContext::DriverReconnect(data) => {
+                tracing::info!(
+                    guild_id = %player.guild_id,
+                    channel_id = data.channel_id.0.get(),
+                    server = data.server,
+                    session = short(data.session_id),
+                    reconnected = matches!(ctx, EventContext::DriverReconnect(_)),
+                    "voice connected"
+                );
                 player.state().connected = true;
                 player.sync_output();
             }
             EventContext::DriverDisconnect(data) => {
-                player.state().connected = false;
+                let requested = matches!(data.reason, Some(DisconnectReason::Requested));
+                {
+                    let mut state = player.state();
+                    state.connected = false;
+                    // songbird gave up on these details; the same ones sent again retry
+                    if state
+                        .voice
+                        .as_ref()
+                        .is_some_and(|v| v.session_id == data.session_id)
+                    {
+                        state.voice = None;
+                    }
+                }
                 let (code, by_remote) = match data.reason {
                     Some(DisconnectReason::WsClosed(code)) => (code.map(|c| c as u16), true),
                     _ => (None, false),
                 };
+                let reason = disconnect_reason(data);
+                if requested {
+                    tracing::debug!(guild_id = %player.guild_id, "left voice");
+                } else {
+                    // 4006 right after connecting usually means another gateway session of the
+                    // bot joined this guild's voice since (e.g. the bot runs twice)
+                    tracing::warn!(
+                        guild_id = %player.guild_id,
+                        code,
+                        session = short(data.session_id),
+                        "voice connection lost: {reason}"
+                    );
+                }
                 player.emit(Event::VoiceClosed {
                     guild_id: player.guild_id,
                     code,
-                    reason: data
-                        .reason
-                        .map_or_else(|| "disconnected".to_owned(), |r| format!("{r:?}")),
+                    reason,
                     by_remote,
                 });
             }
@@ -1028,6 +1073,31 @@ impl songbird::EventHandler for VoiceEvents {
         }
         None
     }
+}
+
+/// Why songbird dropped a voice connection, for people.
+fn disconnect_reason(data: &songbird::events::context_data::DisconnectData<'_>) -> String {
+    use songbird::events::context_data::DisconnectKind;
+    let cause = match data.reason {
+        None | Some(DisconnectReason::Requested) => return "left the voice channel".to_owned(),
+        Some(DisconnectReason::WsClosed(Some(code))) => {
+            format!("Discord closed it with {} ({code:?})", code as u16)
+        }
+        Some(DisconnectReason::WsClosed(None)) => "Discord closed it".to_owned(),
+        Some(DisconnectReason::TimedOut) => "Discord did not answer in time".to_owned(),
+        Some(DisconnectReason::Io) => "a network error".to_owned(),
+        Some(other) => format!("{other:?}"),
+    };
+    match data.kind {
+        DisconnectKind::Connect => format!("could not connect: {cause}"),
+        DisconnectKind::Reconnect => format!("could not reconnect: {cause}"),
+        _ => cause,
+    }
+}
+
+/// The start of a voice session ID: enough to tell sessions apart in logs.
+fn short(session_id: &str) -> &str {
+    session_id.get(..8).unwrap_or(session_id)
 }
 
 fn playback_error(e: &PlaybackError) -> ApiError {
