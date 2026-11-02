@@ -2,7 +2,8 @@
 
 TypeScript client for the Entroximer engine. It works with any Discord library: it only needs
 a way to send a payload on the bot's gateway, and the gateway's raw voice events. It runs on
-Bun, whose `WebSocket` can send the headers the engine expects.
+Bun and on Node 22 or later, whose `WebSocket` can send the headers the engine expects (a
+browser's cannot).
 
 ```ts
 import { Client, Events, GatewayIntentBits } from "discord.js";
@@ -31,6 +32,17 @@ client.once(Events.ClientReady, async (ready) => {
   // with nothing playing, the first track of the queue starts
   await player.queue.add("https://www.youtube.com/watch?v=I-sH53vXP2A");
 });
+```
+
+## Installing
+
+The package is JavaScript compiled to `dist/`, with type declarations. In this repository's
+workspace, depend on it with `"entroximer-client": "workspace:*"`; elsewhere, install the tarball
+`bun pm pack` makes, which builds it first:
+
+```sh
+(cd client && bun pm pack)                  # entroximer-client-0.1.0.tgz
+bun add ./path/to/entroximer-client-0.1.0.tgz
 ```
 
 ## Players
@@ -136,6 +148,7 @@ Sounds with a URL, such as Discord attachments, play from it. For ones without, 
 operator allows it (`info().uploads`, `null` if not) takes uploads:
 
 ```ts
+// on Node, `await fs.openAsBlob("doorbell.ogg")`
 const upload = await manager.upload(Bun.file("doorbell.ogg"), { title: "Doorbell" });
 await player.layer("sfx").play(upload.track);
 // later, or let it expire: it is kept for `info().uploads.keep` after it was last used
@@ -203,4 +216,13 @@ The protocol's types in `src/generated` are produced from the engine by `cargo t
 ```sh
 bun test            # integration tests start the engine built by `cargo build` in ../engine
 bun run typecheck
+bun run build       # dist/; packing builds it by itself
 ```
+
+Imports within the package name their files with `.js` (`./player.js`), as Node's ES modules
+need; TypeScript and Bun find the `.ts` source behind them.
+
+Packages in the workspace can use the TypeScript source instead of `dist/`, so that changes need
+no build: the `entroximer-source` export condition points at it. The bot sets it for TypeScript
+(`"customConditions": ["entroximer-source"]` in its `tsconfig.json`) and for Bun (`bun run
+--conditions=entroximer-source`).

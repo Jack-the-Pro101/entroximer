@@ -1,22 +1,20 @@
 {
-  "name": "bot",
-  "module": "index.ts",
+  "name": "entroximer-bot",
+  "description": "A Discord bot for trying the Entroximer engine through its client library",
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "bun run index.ts",
-    "register": "bun run register.ts",
-    "smoke": "bun run smoke.ts",
+    "start": "bun run --conditions=entroximer-source src/index.ts",
+    "register": "bun run --conditions=entroximer-source scripts/register.ts",
+    "smoke": "bun run --conditions=entroximer-source scripts/smoke.ts",
     "typecheck": "tsc --noEmit"
-  },
-  "devDependencies": {
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
   },
   "dependencies": {
     "discord.js": "^14.26.4",
     "entroximer-client": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
   }
 }

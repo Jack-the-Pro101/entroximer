@@ -1,8 +1,8 @@
-import { EntroximerError } from "./errors";
-import type { Edge } from "./generated/Edge";
-import type { GraphSpec } from "./generated/GraphSpec";
-import type { NodeDescriptor } from "./generated/NodeDescriptor";
-import type { NodeSpec } from "./generated/NodeSpec";
+import { EntroximerError } from "./errors.js";
+import type { Edge } from "./generated/Edge.js";
+import type { GraphSpec } from "./generated/GraphSpec.js";
+import type { NodeDescriptor } from "./generated/NodeDescriptor.js";
+import type { NodeSpec } from "./generated/NodeSpec.js";
 
 /** One effect: a node type (see `NodeInfo.nodes`) and named parameters. */
 export interface Effect {

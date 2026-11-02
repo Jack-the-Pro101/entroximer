@@ -1,6 +1,6 @@
-import type { Track } from "./generated/Track";
-import type { TrackSelector } from "./generated/TrackSelector";
-import type { JsonValue } from "./generated/serde_json/JsonValue";
+import type { Track } from "./generated/Track.js";
+import type { TrackSelector } from "./generated/TrackSelector.js";
+import type { JsonValue } from "./generated/serde_json/JsonValue.js";
 
 /**
  * A track to play: one from `load` or `search`, or a URL, search (`ytsearch:...`) or path for

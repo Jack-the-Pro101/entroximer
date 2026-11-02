@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
-import { EntroximerError, append, chain, parseChain, prepend, withParams, withRate } from "../src";
-import type { GraphSpec, NodeDescriptor } from "../src";
+import { EntroximerError, append, chain, parseChain, prepend, withParams, withRate } from "../src/index.js";
+import type { GraphSpec, NodeDescriptor } from "../src/index.js";
 
 const catalog: NodeDescriptor[] = [
   {

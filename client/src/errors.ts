@@ -1,5 +1,5 @@
-import type { ApiError } from "./generated/ApiError";
-import type { ErrorCode } from "./generated/ErrorCode";
+import type { ApiError } from "./generated/ApiError.js";
+import type { ErrorCode } from "./generated/ErrorCode.js";
 
 /**
  * Why something failed: one of the engine's error codes, or one raised by the client itself.

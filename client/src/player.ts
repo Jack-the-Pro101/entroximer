@@ -1,20 +1,20 @@
-import type { Requester } from "./connection";
-import { Emitter } from "./emitter";
-import { EntroximerError, toEntroximerError } from "./errors";
-import type { Event } from "./generated/Event";
-import type { GraphSpec } from "./generated/GraphSpec";
-import type { PlayerInfo } from "./generated/PlayerInfo";
-import type { PlayerState } from "./generated/PlayerState";
-import type { PlayerUpdate } from "./generated/PlayerUpdate";
-import type { Track } from "./generated/Track";
-import type { TrackEndReason } from "./generated/TrackEndReason";
-import type { VoiceState } from "./generated/VoiceState";
-import type { JsonValue } from "./generated/serde_json/JsonValue";
-import { Layer } from "./layer";
-import { Queue } from "./queue";
-import { selector } from "./tracks";
-import type { Playable } from "./tracks";
-import { whole } from "./units";
+import type { Requester } from "./connection.js";
+import { Emitter } from "./emitter.js";
+import { EntroximerError, toEntroximerError } from "./errors.js";
+import type { Event } from "./generated/Event.js";
+import type { GraphSpec } from "./generated/GraphSpec.js";
+import type { PlayerInfo } from "./generated/PlayerInfo.js";
+import type { PlayerState } from "./generated/PlayerState.js";
+import type { PlayerUpdate } from "./generated/PlayerUpdate.js";
+import type { Track } from "./generated/Track.js";
+import type { TrackEndReason } from "./generated/TrackEndReason.js";
+import type { VoiceState } from "./generated/VoiceState.js";
+import type { JsonValue } from "./generated/serde_json/JsonValue.js";
+import { Layer } from "./layer.js";
+import { Queue } from "./queue.js";
+import { selector } from "./tracks.js";
+import type { Playable } from "./tracks.js";
+import { whole } from "./units.js";
 
 export interface PlayOptions {
   /** Data echoed back in this track's events, e.g. who requested it. */

@@ -10,9 +10,9 @@ import { Client, Events, GatewayIntentBits } from "discord.js";
 import { parseChain } from "entroximer-client";
 import type { ClipOptions, PlayerState, Track, TrackEndReason } from "entroximer-client";
 
-import { connectEngine, keepGatewayReady } from "./engine";
-import { env } from "./env";
-import { formatTime } from "./format";
+import { connectEngine, keepGatewayReady } from "../src/engine";
+import { env } from "../src/env";
+import { formatTime } from "../src/format";
 
 const [channelId, query] = process.argv.slice(2);
 if (!channelId || !query) {

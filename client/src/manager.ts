@@ -1,18 +1,18 @@
-import { Connection, PROTOCOL_VERSION } from "./connection";
-import type { ConnectionOptions, DisconnectInfo, ReadyInfo } from "./connection";
-import { Emitter } from "./emitter";
-import { EntroximerError, fromResponse, toEntroximerError } from "./errors";
-import type { Event } from "./generated/Event";
-import type { GraphSpec } from "./generated/GraphSpec";
-import type { LoadResult } from "./generated/LoadResult";
-import type { NodeInfo } from "./generated/NodeInfo";
-import type { SearchResult } from "./generated/SearchResult";
-import type { SessionState } from "./generated/SessionState";
-import type { Stats } from "./generated/Stats";
-import type { Track } from "./generated/Track";
-import type { Upload } from "./generated/Upload";
-import { Player } from "./player";
-import type { JoinOptions, PlayerHost } from "./player";
+import { Connection, PROTOCOL_VERSION } from "./connection.js";
+import type { ConnectionOptions, DisconnectInfo, ReadyInfo } from "./connection.js";
+import { Emitter } from "./emitter.js";
+import { EntroximerError, fromResponse, toEntroximerError } from "./errors.js";
+import type { Event } from "./generated/Event.js";
+import type { GraphSpec } from "./generated/GraphSpec.js";
+import type { LoadResult } from "./generated/LoadResult.js";
+import type { NodeInfo } from "./generated/NodeInfo.js";
+import type { SearchResult } from "./generated/SearchResult.js";
+import type { SessionState } from "./generated/SessionState.js";
+import type { Stats } from "./generated/Stats.js";
+import type { Track } from "./generated/Track.js";
+import type { Upload } from "./generated/Upload.js";
+import { Player } from "./player.js";
+import type { JoinOptions, PlayerHost } from "./player.js";
 
 /** The voice state update a bot sends on Discord's gateway to join or leave a voice channel. */
 export interface GatewayVoiceStateUpdate {

@@ -1,15 +1,15 @@
-import type { Requester } from "./connection";
-import { Emitter } from "./emitter";
-import { EntroximerError } from "./errors";
-import type { QueueAdded } from "./generated/QueueAdded";
-import type { QueueChange } from "./generated/QueueChange";
-import type { QueueItem } from "./generated/QueueItem";
-import type { QueueState } from "./generated/QueueState";
-import type { Repeat } from "./generated/Repeat";
-import type { JsonValue } from "./generated/serde_json/JsonValue";
-import { selector } from "./tracks";
-import type { Playable } from "./tracks";
-import { whole } from "./units";
+import type { Requester } from "./connection.js";
+import { Emitter } from "./emitter.js";
+import { EntroximerError } from "./errors.js";
+import type { QueueAdded } from "./generated/QueueAdded.js";
+import type { QueueChange } from "./generated/QueueChange.js";
+import type { QueueItem } from "./generated/QueueItem.js";
+import type { QueueState } from "./generated/QueueState.js";
+import type { Repeat } from "./generated/Repeat.js";
+import type { JsonValue } from "./generated/serde_json/JsonValue.js";
+import { selector } from "./tracks.js";
+import type { Playable } from "./tracks.js";
+import { whole } from "./units.js";
 
 /** Items one `queue.get` fetches while syncing. */
 const PAGE = 1000;

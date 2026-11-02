@@ -4,15 +4,15 @@ import type { Client } from "discord.js";
 import { Entroximer } from "entroximer-client";
 import type { Event, GatewayDispatch } from "entroximer-client";
 
-import { Announcements } from "./announcements";
-import type { PostKind } from "./announcements";
 import { env } from "./env";
 import { describeTrack, formatTime } from "./format";
+import { PlaybackMessages } from "./messages";
+import type { PostKind } from "./messages";
 
 export interface Engine {
   manager: Entroximer;
   /** Posts about playback in each player's text channel. */
-  announcements: Announcements;
+  messages: PlaybackMessages;
 }
 
 /**
@@ -45,12 +45,12 @@ export async function connectEngine(client: Client<true>, gatewayReady: GatewayD
   }
   client.on(Events.Raw, (packet) => manager.handleRawEvent(packet));
 
-  const announcements = new Announcements(client, manager);
+  const messages = new PlaybackMessages(client, manager);
   manager.on("event", (event) => {
     const post = describeEvent(event);
     const player = "guildId" in event ? manager.players.get(event.guildId) : undefined;
     if (post && player) {
-      announcements.post(player, post.content, post.kind);
+      messages.post(player, post.content, post.kind);
     }
   });
   manager.on("youtubeSession", (state) => {
@@ -68,14 +68,14 @@ export async function connectEngine(client: Client<true>, gatewayReady: GatewayD
   manager.on("ready", ({ resumed }) => console.log(`engine connected${resumed ? " (session resumed)" : ""}`));
   manager.on("playersLost", (players) => {
     for (const player of players) {
-      announcements.post(player, "Lost the engine's player (it restarted, or reconnecting took too long); playback stopped.", "problem");
+      messages.post(player, "Lost the engine's player (it restarted, or reconnecting took too long); playback stopped.", "problem");
     }
   });
   manager.on("error", (error, guildId) => {
     console.error(`engine error${guildId ? ` in guild ${guildId}` : ""}:`, error);
     const player = guildId === undefined ? undefined : manager.players.get(guildId);
     if (error.code === "voice_conflict" && player) {
-      announcements.post(
+      messages.post(
         player,
         "⚠️ Another instance of this bot joined voice here, which takes over its voice connection. Stop the other one.",
         "problem",
@@ -85,7 +85,7 @@ export async function connectEngine(client: Client<true>, gatewayReady: GatewayD
 
   const info = await manager.connect();
   console.log(`engine ${info.version} (yt-dlp ${info.ytdlp ?? "unknown"}, YouTube session ${info.youtubeSession})`);
-  return { manager, announcements };
+  return { manager, messages };
 }
 
 function describeEvent(event: Event): { content: string; kind: PostKind } | null {

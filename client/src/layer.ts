@@ -1,19 +1,19 @@
-import type { Requester } from "./connection";
-import { Emitter } from "./emitter";
-import { EntroximerError } from "./errors";
-import type { ClipInfo } from "./generated/ClipInfo";
-import type { ClipMode } from "./generated/ClipMode";
-import type { Duck } from "./generated/Duck";
-import type { Event } from "./generated/Event";
-import type { GraphSpec } from "./generated/GraphSpec";
-import type { LayerInfo } from "./generated/LayerInfo";
-import type { LayerUpdate } from "./generated/LayerUpdate";
-import type { Track } from "./generated/Track";
-import type { TrackEndReason } from "./generated/TrackEndReason";
-import type { JsonValue } from "./generated/serde_json/JsonValue";
-import { selector } from "./tracks";
-import type { Playable } from "./tracks";
-import { whole } from "./units";
+import type { Requester } from "./connection.js";
+import { Emitter } from "./emitter.js";
+import { EntroximerError } from "./errors.js";
+import type { ClipInfo } from "./generated/ClipInfo.js";
+import type { ClipMode } from "./generated/ClipMode.js";
+import type { Duck } from "./generated/Duck.js";
+import type { Event } from "./generated/Event.js";
+import type { GraphSpec } from "./generated/GraphSpec.js";
+import type { LayerInfo } from "./generated/LayerInfo.js";
+import type { LayerUpdate } from "./generated/LayerUpdate.js";
+import type { Track } from "./generated/Track.js";
+import type { TrackEndReason } from "./generated/TrackEndReason.js";
+import type { JsonValue } from "./generated/serde_json/JsonValue.js";
+import { selector } from "./tracks.js";
+import type { Playable } from "./tracks.js";
+import { whole } from "./units.js";
 
 /** Clip events name the clip; every clip that `play` resolved ends once with `clipEnd`. */
 export type LayerEvents = {

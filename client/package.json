@@ -2,17 +2,36 @@
   "name": "entroximer-client",
   "version": "0.1.0",
   "description": "TypeScript client for the Entroximer audio engine",
+  "keywords": ["discord", "audio", "music", "voice", "entroximer"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jack-the-Pro101/entroximer.git",
+    "directory": "client"
+  },
   "type": "module",
-  "exports": "./src/index.ts",
-  "module": "src/index.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "entroximer-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "src"],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "prepack": "bun run build",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
+    "@types/bun": "latest",
     "typescript": "^5"
   }
 }

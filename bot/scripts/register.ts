@@ -3,8 +3,8 @@
 import { REST, Routes } from "discord.js";
 import type { APIApplication } from "discord.js";
 
-import { commands } from "./commands";
-import { env } from "./env";
+import { commands } from "../src/commands";
+import { env } from "../src/env";
 
 const guildId = process.argv[2];
 if (!guildId) {

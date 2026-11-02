@@ -1,30 +1,22 @@
 {
+  // Type-checks the library and its tests; `tsconfig.build.json` compiles the library to `dist/`.
   "compilerOptions": {
-    // Environment setup & latest features
-    "lib": ["ESNext"],
-    "target": "ESNext",
-    "module": "Preserve",
-    "moduleDetection": "force",
-    "jsx": "react-jsx",
-    "allowJs": true,
-    "types": ["bun"],
-
-    // Bundler mode
-    "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
+    // Node 22 and Bun run all of ES2024
+    "target": "ES2024",
+    "lib": ["ES2024"],
+    // Node's own module rules: the output runs on Node and Bun and in every bundler
+    "module": "NodeNext",
     "verbatimModuleSyntax": true,
+    "types": ["bun"],
     "noEmit": true,
 
-    // Best practices
     "strict": true,
     "skipLibCheck": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
-
-    // Some stricter flags (disabled by default)
-    "noUnusedLocals": false,
-    "noUnusedParameters": false,
-    "noPropertyAccessFromIndexSignature": false
-  }
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
+  },
+  "include": ["src", "test"]
 }

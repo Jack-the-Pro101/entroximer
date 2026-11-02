@@ -1,14 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
-import { Entroximer, EntroximerError, PROTOCOL_VERSION, append, withParams } from "../src";
+import { Entroximer, EntroximerError, PROTOCOL_VERSION, append, withParams } from "../src/index.js";
 import type {
   EntroximerOptions,
   GatewayVoiceStateUpdate,
   Track,
   TrackEndReason,
-} from "../src";
-import { canRunEngine, nextCall, startEngine } from "./engine";
-import type { TestEngine } from "./engine";
+} from "../src/index.js";
+import { canRunEngine, nextCall, startEngine } from "./engine.js";
+import type { TestEngine } from "./engine.js";
 
 const BOT = "1000";
 const PASSWORD = "test password";

@@ -42,7 +42,7 @@ export function whyCannotPostIn(channel: Channel): string | null {
   return null;
 }
 
-export class Announcements {
+export class PlaybackMessages {
   readonly #client: Client<true>;
   /** Players that only post problems; forgotten with the player, like its queue's repeat. */
   readonly #silent = new WeakSet<Player>();

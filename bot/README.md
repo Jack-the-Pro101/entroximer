@@ -64,6 +64,17 @@ the engine reports; with
 `RUST_LOG=entroximer_server::node::player=debug`, the engine's log shows when it prepares each
 next track.
 
+## Code
+
+| Path | Contents |
+|---|---|
+| `src/index.ts` | Logs in and hands interactions to the commands |
+| `src/engine.ts` | Connects to the engine and chooses which of its events to post |
+| `src/messages.ts` | Where and whether each player's playback messages are posted |
+| `src/embeds.ts`, `src/format.ts` | Embeds for what is playing, the queue and search results; times and tracks as text |
+| `src/commands/` | The slash commands by area: `channels`, `play`, `queue`, `playback`, `sound`, `info` |
+| `scripts/register.ts`, `scripts/smoke.ts` | `bun run register` and `bun run smoke` |
+
 ## Troubleshooting
 
 If commands fail with "Interaction has already been acknowledged", the bot warns that another

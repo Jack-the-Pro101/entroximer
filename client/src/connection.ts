@@ -1,26 +1,27 @@
-import { Emitter } from "./emitter";
-import { EntroximerError } from "./errors";
-import type { Call } from "./generated/Call";
-import type { Event } from "./generated/Event";
-import type { ClipInfo } from "./generated/ClipInfo";
-import type { GraphSpec } from "./generated/GraphSpec";
-import type { LayerInfo } from "./generated/LayerInfo";
-import type { LoadResult } from "./generated/LoadResult";
-import type { NodeInfo } from "./generated/NodeInfo";
-import type { PlayerInfo } from "./generated/PlayerInfo";
-import type { QueueAdded } from "./generated/QueueAdded";
-import type { QueuePage } from "./generated/QueuePage";
-import type { QueueState } from "./generated/QueueState";
-import type { SearchResult } from "./generated/SearchResult";
-import type { ServerMessage } from "./generated/ServerMessage";
-import type { SessionSettings } from "./generated/SessionSettings";
-import type { Stats } from "./generated/Stats";
-import type { Track } from "./generated/Track";
+import { Emitter } from "./emitter.js";
+import { EntroximerError } from "./errors.js";
+import type { Call } from "./generated/Call.js";
+import type { Event } from "./generated/Event.js";
+import type { ClipInfo } from "./generated/ClipInfo.js";
+import type { GraphSpec } from "./generated/GraphSpec.js";
+import type { LayerInfo } from "./generated/LayerInfo.js";
+import type { LoadResult } from "./generated/LoadResult.js";
+import type { NodeInfo } from "./generated/NodeInfo.js";
+import type { PlayerInfo } from "./generated/PlayerInfo.js";
+import type { QueueAdded } from "./generated/QueueAdded.js";
+import type { QueuePage } from "./generated/QueuePage.js";
+import type { QueueState } from "./generated/QueueState.js";
+import type { SearchResult } from "./generated/SearchResult.js";
+import type { ServerMessage } from "./generated/ServerMessage.js";
+import type { SessionSettings } from "./generated/SessionSettings.js";
+import type { Stats } from "./generated/Stats.js";
+import type { Track } from "./generated/Track.js";
 
 /** The protocol version this client speaks; see `node.info`. */
 export const PROTOCOL_VERSION = 1;
 
-const CLIENT_NAME = "entroximer-client/0.1.0";
+/** How the client names itself to the engine unless told otherwise; kept in step with `package.json`. */
+export const CLIENT_NAME = "entroximer-client/0.1.0";
 
 /** Every request the engine understands, by `op`. */
 export type Op = Call["op"];
