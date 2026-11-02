@@ -28,7 +28,13 @@ isSeekable: boolean,
 /**
  * The track's page, or the file's URL or path.
  */
-uri: string, artworkUrl: string | null, 
+uri: string, 
+/**
+ * A picture of the track: a web URL, or, for the cover embedded in a media file, a path on
+ * the engine (`/v1/artwork/...`) that needs the engine's `Authorization`. From the source,
+ * else the playlist's or the web page's picture, else the embedded cover.
+ */
+artworkUrl: string | null, 
 /**
  * The International Standard Recording Code, where the source knows it.
  */

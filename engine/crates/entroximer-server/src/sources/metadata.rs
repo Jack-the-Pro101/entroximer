@@ -26,6 +26,9 @@ pub struct TrackInfo {
     pub is_seekable: bool,
     /// The track's page, or the file's URL or path.
     pub uri: String,
+    /// A picture of the track: a web URL, or, for the cover embedded in a media file, a path on
+    /// the engine (`/v1/artwork/...`) that needs the engine's `Authorization`. From the source,
+    /// else the playlist's or the web page's picture, else the embedded cover.
     pub artwork_url: Option<String>,
     /// The International Standard Recording Code, where the source knows it.
     pub isrc: Option<String>,

@@ -16,7 +16,7 @@ import type { Stats } from "./generated/Stats";
 import type { Track } from "./generated/Track";
 
 /** The protocol version this client speaks; see `node.info`. */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 const CLIENT_NAME = "entroximer-client/0.1.0";
 
@@ -107,7 +107,10 @@ export class Connection extends Emitter<ConnectionEvents> {
   static readonly #SILENCE_LIMIT_MS = 75_000;
 
   readonly #url: string;
+  /** The engine's HTTP origin, for what it serves outside the WebSocket. */
+  readonly #httpOrigin: string;
   readonly #headers: Record<string, string>;
+  readonly #password: string | undefined;
   readonly #requestTimeoutMs: number;
   readonly #reconnectDelay: { min: number; max: number };
 
@@ -125,6 +128,8 @@ export class Connection extends Emitter<ConnectionEvents> {
   constructor(options: ConnectionOptions) {
     super();
     this.#url = websocketUrl(options.url);
+    this.#httpOrigin = httpOrigin(options.url);
+    this.#password = options.password;
     this.#headers = {
       "User-Id": options.userId,
       "Client-Name": options.clientName ?? CLIENT_NAME,
@@ -184,6 +189,20 @@ export class Connection extends Emitter<ConnectionEvents> {
   /** Reopens the connection, resuming the session; e.g. after the network changed. */
   reconnect(): void {
     this.#socket?.close(4000, "reconnecting");
+  }
+
+  /** The absolute URL of `path` on the engine's HTTP side, e.g. `/v1/artwork/...`. */
+  httpUrl(path: string): string {
+    return new URL(path, this.#httpOrigin).toString();
+  }
+
+  /** Fetches `path` from the engine over HTTP, with the engine's password if it has one. */
+  fetch(path: string, init: RequestInit = {}): Promise<Response> {
+    const headers = new Headers(init.headers);
+    if (this.#password !== undefined) {
+      headers.set("Authorization", this.#password);
+    }
+    return fetch(this.httpUrl(path), { ...init, headers });
   }
 
   /** Sends a request and resolves with its result. */
@@ -334,6 +353,13 @@ export class Connection extends Emitter<ConnectionEvents> {
     }
     this.#pending.clear();
   }
+}
+
+/** The HTTP origin of the engine at `url`, whether given as `ws(s)://` or `http(s)://`. */
+function httpOrigin(url: string): string {
+  const parsed = new URL(url);
+  parsed.protocol = parsed.protocol.replace(/^ws/, "http");
+  return parsed.origin;
 }
 
 /** `http(s)://` becomes `ws(s)://`, and an empty path becomes `/v1/ws`. */

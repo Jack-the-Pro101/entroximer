@@ -177,12 +177,10 @@ mod tests {
             track.info.uri,
             "https://www.youtube.com/watch?v=ayl3UXKpH1g"
         );
-        assert!(
-            track
-                .info
-                .artwork_url
-                .unwrap()
-                .starts_with("https://i.ytimg.com/vi/ayl3UXKpH1g/")
+        assert_eq!(
+            track.info.artwork_url.as_deref(),
+            Some("https://i.ytimg.com/vi/ayl3UXKpH1g/hqdefault.jpg"),
+            "the stable thumbnail, not the signed one the search listed"
         );
     }
 

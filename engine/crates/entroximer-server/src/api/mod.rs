@@ -1,4 +1,5 @@
-//! The engine's HTTP surface: health, info, the client WebSocket and YouTube session admin.
+//! The engine's HTTP surface: health, info, the client WebSocket, artwork the engine serves
+//! itself, and YouTube session admin.
 //!
 //! When the engine has a password, everything but `/health` requires the `Authorization` header
 //! to carry it.
@@ -10,7 +11,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{FromRequestParts, State};
+use axum::extract::{FromRequestParts, Path, State};
 use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -21,7 +22,9 @@ use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
 use crate::node::Node;
+use crate::node::tracks::load_error;
 use crate::serve::HEALTH_PATH;
+use crate::sources::artwork::{COVER_PATH, CoverError};
 use crate::youtube::{CheckOutcome, SessionStatus, check_session};
 use protocol::{ApiError, ErrorCode};
 
@@ -32,6 +35,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route(HEALTH_PATH, get(move || health(closing.clone())))
         .route("/v1/info", get(info))
         .route("/v1/ws", get(ws::upgrade))
+        .route(&format!("{COVER_PATH}{{key}}"), get(artwork))
         .route(
             "/v1/youtube/session",
             get(session_status)
@@ -82,6 +86,13 @@ impl HttpError {
         )
     }
 
+    fn not_found(message: impl Into<String>) -> Self {
+        Self(
+            StatusCode::NOT_FOUND,
+            ApiError::new(ErrorCode::NotFound, message),
+        )
+    }
+
     fn unavailable(message: impl Into<String>) -> Self {
         Self(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -115,6 +126,28 @@ async fn health(closing: CancellationToken) -> (StatusCode, &'static str) {
 
 async fn info(_: Authorized, State(node): State<Arc<Node>>) -> Json<protocol::NodeInfo> {
     Json(node.info().await)
+}
+
+/// The cover embedded in a media file, for the `artworkUrl`s that point here.
+async fn artwork(
+    _: Authorized,
+    State(node): State<Arc<Node>>,
+    Path(key): Path<String>,
+) -> Result<Response, HttpError> {
+    match node.ctx.artwork.cover(&key, &node.ctx).await {
+        Ok(cover) => Ok((
+            [
+                (header::CONTENT_TYPE, cover.content_type),
+                // the key names the file, so its cover changes rarely
+                (header::CACHE_CONTROL, "private, max-age=86400"),
+            ],
+            cover.data,
+        )
+            .into_response()),
+        Err(e @ CoverError::BadKey) => Err(HttpError::bad_request(e.to_string())),
+        Err(e @ CoverError::NotFound) => Err(HttpError::not_found(e.to_string())),
+        Err(CoverError::Source(e)) => Err(HttpError(StatusCode::BAD_GATEWAY, load_error(&e))),
+    }
 }
 
 async fn session_status(

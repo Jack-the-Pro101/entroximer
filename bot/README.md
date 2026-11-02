@@ -23,8 +23,8 @@ guild, permission to view, connect to and speak in voice channels.
 | `/join [channel]` | Joins your voice channel, or the one given |
 | `/play query` | Plays a URL (Spotify links too, if the engine has a Spotify app), playlist or YouTube search, or queues it if something is playing; joins your channel if needed. Suggests search results as you type |
 | `/next query` | Queues a track to play right after the current one |
-| `/search query [source]` | Searches YouTube, YouTube Music, SoundCloud or Spotify (if the engine has a Spotify app) and queues the results you pick |
-| `/queue [page]` | Shows the queue |
+| `/search query [source]` | Searches YouTube, YouTube Music, SoundCloud or Spotify (if the engine has a Spotify app), shows the results with their artwork, and queues the ones you pick |
+| `/queue [page]` | Shows the queue, each track with its artwork |
 | `/skip [to]` | Skips to the next track, or to a position in the queue |
 | `/remove position`, `/move from to`, `/shuffle`, `/clear` | Edit the queue |
 | `/repeat mode` | Repeats nothing, the current track, or the queue |

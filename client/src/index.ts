@@ -1,5 +1,6 @@
 export { Entroximer } from "./manager";
 export type {
+  ArtworkLocation,
   EntroximerOptions,
   GatewayDispatch,
   GatewayVoiceStateUpdate,

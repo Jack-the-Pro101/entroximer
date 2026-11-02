@@ -30,6 +30,18 @@ export interface GatewayDispatch {
   d?: unknown;
 }
 
+/** Where a track's artwork is. */
+export interface ArtworkLocation {
+  /** An absolute URL. */
+  url: string;
+  /**
+   * Whether anyone can fetch it, e.g. Discord for an embed. Covers the engine extracted from
+   * media files are on the engine and need its password instead: use `fetchArtwork`, and upload
+   * the image where it is shown.
+   */
+  public: boolean;
+}
+
 export interface SearchOptions {
   /** A search prefix from `info().providers`, e.g. `scsearch`; the engine's default search if absent. */
   prefix?: string;
@@ -139,6 +151,36 @@ export class Entroximer extends Emitter<ManagerEvents> {
    */
   buildPreset(name: string, params?: Record<string, number>): Promise<GraphSpec> {
     return this.connection.request("presets.build", params === undefined ? { name } : { name, params });
+  }
+
+  /** Where `track`'s artwork is, if it has any. */
+  artwork(track: Track): ArtworkLocation | null {
+    const url = track.info.artworkUrl;
+    if (url === null) {
+      return null;
+    }
+    // the engine's own artwork is given as a path on it
+    return url.startsWith("/") ? { url: this.connection.httpUrl(url), public: false } : { url, public: true };
+  }
+
+  /**
+   * `track`'s artwork as an image, from the web or from the engine; `null` if it has none or it
+   * cannot be fetched, since artwork is never worth failing over.
+   */
+  async fetchArtwork(track: Track, timeoutMs = 5_000): Promise<Blob | null> {
+    const location = this.artwork(track);
+    if (location === null) {
+      return null;
+    }
+    const signal = AbortSignal.timeout(timeoutMs);
+    try {
+      const response = location.public
+        ? await fetch(location.url, { signal })
+        : await this.connection.fetch(track.info.artworkUrl!, { signal });
+      return response.ok ? await response.blob() : null;
+    } catch {
+      return null;
+    }
   }
 
   info(): Promise<NodeInfo> {

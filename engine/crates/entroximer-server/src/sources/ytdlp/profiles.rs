@@ -111,13 +111,21 @@ fn youtube_music_search(terms: &str) -> String {
     url.into()
 }
 
-/// YouTube Music search results come without thumbnails; every video has this one.
+/// YouTube thumbnails by video ID. Every video has this one, and it stays the same whether the
+/// video was found by a search, listed in a playlist or loaded to play, where yt-dlp reports a
+/// different signed URL each time (YouTube Music results: none), so a queued track's artwork
+/// does not change when it is resolved.
 fn adjust_youtube(info: &mut TrackInfo, entry: &Entry) {
-    if info.artwork_url.is_none()
-        && let Some(id) = &entry.id
-    {
+    if let Some(id) = entry.id.as_deref().filter(|id| is_video_id(id)) {
         info.artwork_url = Some(format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"));
     }
+}
+
+fn is_video_id(id: &str) -> bool {
+    id.len() == 11
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// The original artwork can be several megabytes; 500×500 is plenty for an embed.

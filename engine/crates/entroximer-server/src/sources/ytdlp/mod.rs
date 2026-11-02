@@ -37,7 +37,7 @@ use tokio::sync::Semaphore;
 pub use failure::{Failure, Restriction, SESSION_ENDED_WARNING, classify};
 
 use super::provider::{MAX_SEARCH_RESULTS, Provider, ProviderDescriptor};
-use super::{FoundTrack, LoadOutcome, PlaylistInfo, ResolveError, ResolvedTrack, net};
+use super::{FoundTrack, LoadOutcome, PlaylistInfo, ResolveError, ResolvedTrack, artwork, net};
 use crate::config::MediaContext;
 use crate::youtube::{SessionCopy, SignInUnavailable};
 
@@ -99,7 +99,7 @@ impl YtDlpProvider {
         let (json, session) = self
             .extract_with_policy(uri, ctx, &["-J", "--no-playlist"])
             .await?;
-        self.resolved(json, session, uri, ctx)
+        self.resolved(json, session, uri, ctx).await
     }
 
     /// Any link reaches the generic extractor, so it must not lead to internal services.
@@ -159,15 +159,40 @@ impl YtDlpProvider {
         }
     }
 
-    /// A playlist's tracks with metadata only; they are resolved when played.
-    fn playlist(&self, json: &Value, url: &Url) -> Result<LoadOutcome, ResolveError> {
+    /// A playlist's tracks with metadata only; they are resolved when played. Without artwork
+    /// from yt-dlp (e.g. Bandcamp albums), the playlist's page provides it, and its tracks
+    /// without any of their own share it.
+    async fn playlist(
+        &self,
+        json: &Value,
+        url: &Url,
+        ctx: &MediaContext,
+    ) -> Result<LoadOutcome, ResolveError> {
+        let Some((mut playlist, mut tracks)) = self.listing(json, url)? else {
+            return Ok(LoadOutcome::Empty);
+        };
+        if playlist.artwork_url.is_none()
+            && let Some(page) = &playlist.uri
+        {
+            playlist.artwork_url = ctx.artwork.page_image(page, ctx).await;
+        }
+        artwork::inherit(&mut tracks, playlist.artwork_url.as_deref());
+        Ok(LoadOutcome::Playlist { playlist, tracks })
+    }
+
+    /// What yt-dlp lists of a playlist; `None` if it has no tracks.
+    fn listing(
+        &self,
+        json: &Value,
+        url: &Url,
+    ) -> Result<Option<(PlaylistInfo, Vec<FoundTrack>)>, ResolveError> {
         let list = Entry::deserialize(json).map_err(|e| ResolveError::Json("yt-dlp", e))?;
         let tracks: Vec<FoundTrack> = entries(json)
             .filter(|entry| !entry.is_collection())
             .filter_map(|entry| entry.found_track(self.site_for(&entry)))
             .collect();
         if tracks.is_empty() {
-            return Ok(LoadOutcome::Empty);
+            return Ok(None);
         }
         let playlist = PlaylistInfo {
             name: list.title.clone().unwrap_or_else(|| "Playlist".to_owned()),
@@ -177,11 +202,12 @@ impl YtDlpProvider {
             selected_track: selected_track(url, &tracks),
             total_tracks: list.playlist_count.and_then(|n| u32::try_from(n).ok()),
         };
-        Ok(LoadOutcome::Playlist { playlist, tracks })
+        Ok(Some((playlist, tracks)))
     }
 
-    /// A fully extracted track, ready to play.
-    fn resolved(
+    /// A fully extracted track, ready to play. Without artwork from yt-dlp, its page's preview
+    /// picture is used.
+    async fn resolved(
         &self,
         mut json: Value,
         session: Option<SessionCopy>,
@@ -192,9 +218,12 @@ impl YtDlpProvider {
         if entry.uri().is_none() {
             entry.webpage_url = Some(requested.to_owned());
         }
-        let track = entry
+        let mut track = entry
             .found_track(self.site_for(&entry))
             .ok_or_else(|| ResolveError::NoAudio(requested.to_owned()))?;
+        if track.info.artwork_url.is_none() {
+            track.info.artwork_url = ctx.artwork.page_image(&track.info.uri, ctx).await;
+        }
         let media = Media::deserialize(&json).map_err(|e| ResolveError::Json("yt-dlp", e))?;
         let format = media
             .best_audio()
@@ -266,7 +295,7 @@ impl Provider for YtDlpProvider {
             )
             .await?;
         let outcome = match json.get("_type").and_then(Value::as_str) {
-            Some("playlist") => self.playlist(&json, url)?,
+            Some("playlist") => self.playlist(&json, url, ctx).await?,
             // a link standing for another one, e.g. a short link
             Some("url" | "url_transparent") => {
                 let target = json
@@ -275,7 +304,7 @@ impl Provider for YtDlpProvider {
                     .ok_or_else(|| ResolveError::NoAudio(url.to_string()))?;
                 LoadOutcome::Track(self.resolve_uri(target, ctx).await?)
             }
-            _ => LoadOutcome::Track(self.resolved(json, session, url.as_str(), ctx)?),
+            _ => LoadOutcome::Track(self.resolved(json, session, url.as_str(), ctx).await?),
         };
         Ok(Some(outcome))
     }
@@ -884,12 +913,10 @@ mod tests {
         let url =
             Url::parse("https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI")
                 .unwrap();
-        let LoadOutcome::Playlist { playlist, tracks } = YtDlpProvider::new(&profiles::YOUTUBE)
-            .playlist(&json, &url)
+        let (playlist, tracks) = YtDlpProvider::new(&profiles::YOUTUBE)
+            .listing(&json, &url)
             .unwrap()
-        else {
-            panic!("not a playlist");
-        };
+            .expect("the fixture has tracks");
         assert_eq!(playlist.name, "Popular Music Videos");
         assert_eq!(playlist.author.as_deref(), Some("Music"));
         assert_eq!(playlist.total_tracks, Some(182));

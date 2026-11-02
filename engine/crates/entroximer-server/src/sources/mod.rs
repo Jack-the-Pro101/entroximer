@@ -4,6 +4,7 @@
 //! Loading is lazy: searches and playlists come back with metadata only, and a track is
 //! resolved into something playable when it is played or preloaded.
 
+pub mod artwork;
 mod direct;
 pub mod metadata;
 mod net;

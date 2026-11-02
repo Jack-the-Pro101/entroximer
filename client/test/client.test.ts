@@ -131,6 +131,24 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
     await player.destroy();
   });
 
+  test("finds artwork on the web and on the engine", async () => {
+    const manager = client();
+    await manager.connect();
+    const covered = await loadTrack(manager, engine.covered);
+    const location = manager.artwork(covered);
+    expect(location?.public).toBe(false);
+    expect(location?.url).toStartWith(engine.url.replace("ws:", "http:") + "/v1/artwork/");
+    const image = await manager.fetchArtwork(covered);
+    expect(image?.type).toBe("image/jpeg");
+    expect(image?.size).toBeGreaterThan(100);
+
+    const plain = await loadTrack(manager, engine.tone);
+    expect(manager.artwork(plain)).toBeNull();
+    expect(await manager.fetchArtwork(plain)).toBeNull();
+    const elsewhere = { ...plain, info: { ...plain.info, artworkUrl: "https://i.ytimg.com/vi/x/hqdefault.jpg" } };
+    expect(manager.artwork(elsewhere)).toEqual({ url: "https://i.ytimg.com/vi/x/hqdefault.jpg", public: true });
+  });
+
   test("load and search errors carry the engine's error code", async () => {
     const manager = client();
     await manager.connect();

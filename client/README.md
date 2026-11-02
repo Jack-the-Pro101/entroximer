@@ -100,7 +100,11 @@ load is reported with `trackError` and removed, and the queue goes on.
 or `empty`; `search(query, { prefix, limit })` searches one source, by a prefix from
 `info().providers` (`ytsearch`, `ytmsearch`, `scsearch`, and `spsearch` if the engine has a
 Spotify app; Spotify tracks play from YouTube); `decode` reads `encoded` tracks back;
-`buildPreset(name, params?)` returns a preset's graph without applying it. When the
+`buildPreset(name, params?)` returns a preset's graph without applying it. Tracks carry
+`info.artworkUrl`; `artwork(track)` says where it is and whether anyone can fetch it, and
+`fetchArtwork(track)` returns the image. Covers the engine extracted from media files are on the
+engine, so Discord cannot load them from their URL: upload the image with the message instead
+(the bot in `../bot` shows how). When the
 connection drops, it reconnects and resumes the session: the engine pauses the players
 meanwhile and continues them where they were. If it reconnects after the engine's resume
 timeout, or after the engine restarted, `playersLost` lists the players that are gone; the bot

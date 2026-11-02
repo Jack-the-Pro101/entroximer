@@ -11,7 +11,7 @@ import type { AutocompleteInteraction, ChatInputCommandInteraction, SharedSlashC
 import { EntroximerError, append, parseChain } from "entroximer-client";
 import type { PlaylistInfo, Player, QueueAdded, QueueItem, Repeat, Track } from "entroximer-client";
 
-import { nowPlayingEmbed, queueEmbed, searchEmbed } from "./embeds";
+import { nowPlayingMessage, queueMessage, searchMessage } from "./embeds";
 import type { Engine } from "./engine";
 import { describeTrack, escape, formatTime, parseTime, plainTrack, trackLength, truncate } from "./format";
 
@@ -155,7 +155,7 @@ export const commands: Command[] = [
           })),
         );
       const message = await interaction.editReply({
-        embeds: [searchEmbed(tracks, source)],
+        ...(await searchMessage(engine.manager, tracks, source)),
         components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu)],
       });
 
@@ -177,7 +177,12 @@ export const commands: Command[] = [
         ...(idle ? { index: 0 } : {}),
         userData: requester(interaction),
       });
-      await interaction.editReply({ content: addedMessage(added, undefined, idle), embeds: [], components: [] });
+      await interaction.editReply({
+        content: addedMessage(added, undefined, idle),
+        embeds: [],
+        components: [],
+        attachments: [],
+      });
     },
   ),
   command(
@@ -188,7 +193,9 @@ export const commands: Command[] = [
         .addIntegerOption((o) => o.setName("page").setDescription("Which page").setMinValue(1)),
     async (interaction, engine) => {
       const player = existingPlayer(interaction, engine);
-      await interaction.reply({ embeds: [queueEmbed(player, interaction.options.getInteger("page") ?? 1)] });
+      // artwork on the engine is uploaded with the reply, which may take a moment
+      await interaction.deferReply();
+      await interaction.editReply(await queueMessage(engine.manager, player, interaction.options.getInteger("page") ?? 1));
     },
   ),
   command(
@@ -389,7 +396,8 @@ export const commands: Command[] = [
       if (!player.track) {
         throw new UserError("Nothing is playing.");
       }
-      await interaction.reply({ embeds: [nowPlayingEmbed(player, player.track)] });
+      await interaction.deferReply();
+      await interaction.editReply(await nowPlayingMessage(engine.manager, player, player.track));
     },
   ),
   command(
@@ -440,7 +448,7 @@ export async function run(interaction: GuildInteraction, engine: Engine): Promis
     }
     const reply = { content: `❌ ${message}`, embeds: [], components: [], allowedMentions: { parse: [] } };
     if (interaction.deferred || interaction.replied) {
-      await interaction.editReply(reply);
+      await interaction.editReply({ ...reply, attachments: [] });
     } else {
       await interaction.reply({ ...reply, flags: MessageFlags.Ephemeral });
     }

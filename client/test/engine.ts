@@ -14,6 +14,8 @@ export interface TestEngine {
   url: string;
   /** A 30 s stereo tone in Opus/WebM. */
   tone: string;
+  /** A short MP3 with a cover embedded. */
+  covered: string;
   stop(): Promise<void>;
 }
 
@@ -27,6 +29,17 @@ export async function startEngine(options: { password?: string } = {}): Promise<
   ]);
   if (!ffmpeg.success) {
     throw new Error(`ffmpeg failed: ${ffmpeg.stderr.toString()}`);
+  }
+  const covered = join(dir, "covered.mp3");
+  const cover = Bun.spawnSync([
+    "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+    "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+    "-f", "lavfi", "-i", "color=c=red:s=300x300:d=1",
+    "-map", "0:a", "-map", "1:v", "-frames:v", "1",
+    "-c:a", "libmp3lame", "-c:v", "mjpeg", "-disposition:v", "attached_pic", covered,
+  ]);
+  if (!cover.success) {
+    throw new Error(`ffmpeg failed: ${cover.stderr.toString()}`);
   }
 
   const port = freePort();
@@ -68,6 +81,7 @@ export async function startEngine(options: { password?: string } = {}): Promise<
   return {
     url: `ws://127.0.0.1:${port}`,
     tone,
+    covered,
     async stop() {
       engine.kill();
       await engine.exited;

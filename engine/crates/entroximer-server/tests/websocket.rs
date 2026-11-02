@@ -46,6 +46,43 @@ fn fixture() -> &'static Path {
     })
 }
 
+/// A short MP3 with an 800 px cover embedded, as music libraries have them.
+fn covered_fixture() -> &'static Path {
+    static FIXTURE: OnceLock<PathBuf> = OnceLock::new();
+    FIXTURE.get_or_init(|| {
+        let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("covered.mp3");
+        if !path.exists() {
+            let status = Command::new("ffmpeg")
+                .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y"])
+                .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=3"])
+                .args(["-f", "lavfi", "-i", "color=c=red:s=800x800:d=1"])
+                .args(["-map", "0:a", "-map", "1:v", "-frames:v", "1"])
+                .args([
+                    "-c:a",
+                    "libmp3lame",
+                    "-c:v",
+                    "mjpeg",
+                    "-disposition:v",
+                    "attached_pic",
+                ])
+                .arg(&path)
+                .status()
+                .expect("ffmpeg must be installed to run these tests");
+            assert!(status.success());
+        }
+        path
+    })
+}
+
+/// The width a baseline or progressive JPEG declares.
+fn jpeg_width(jpeg: &[u8]) -> Option<u16> {
+    let frame = jpeg
+        .windows(2)
+        .position(|marker| marker == [0xFF, 0xC0] || marker == [0xFF, 0xC2])?;
+    let width = jpeg.get(frame + 7..frame + 9)?;
+    Some(u16::from_be_bytes([width[0], width[1]]))
+}
+
 #[derive(Parser)]
 struct Cli {
     #[command(flatten)]
@@ -603,4 +640,50 @@ async fn shutting_down_ends_players_and_closes_connections() {
         503,
         "orchestrators see the engine going away"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn embedded_covers_are_served_to_authorized_clients() {
+    let engine = Engine::start(Some(PASSWORD)).await;
+    let mut client = engine.connect(Some(PASSWORD), None).await.unwrap();
+    client.recv().await;
+
+    let (_, loaded) = client
+        .exchange("tracks.load", json!({ "query": covered_fixture() }))
+        .await;
+    let artwork = loaded["result"]["track"]["info"]["artworkUrl"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no artwork: {loaded}"))
+        .to_owned();
+    assert!(artwork.starts_with("/v1/artwork/"), "{artwork}");
+
+    let http = reqwest::Client::new();
+    let url = format!("http://{}{artwork}", engine.addr);
+    let cover = http
+        .get(&url)
+        .header("Authorization", PASSWORD)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cover.status(), 200);
+    assert_eq!(cover.headers()["content-type"], "image/jpeg");
+    let jpeg = cover.bytes().await.unwrap();
+    assert_eq!(jpeg_width(&jpeg), Some(600), "scaled down from 800 px");
+    assert_eq!(http.get(&url).send().await.unwrap().status(), 401);
+
+    let (_, plain) = client
+        .exchange("tracks.load", json!({ "query": fixture() }))
+        .await;
+    assert!(
+        plain["result"]["track"]["info"]["artworkUrl"].is_null(),
+        "a file without a cover has no artwork"
+    );
+    let bogus = format!("http://{}/v1/artwork/not-a-key", engine.addr);
+    let refused = http
+        .get(&bogus)
+        .header("Authorization", PASSWORD)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 400);
 }

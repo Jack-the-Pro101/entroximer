@@ -22,6 +22,7 @@ use self::api::{Image, Paging, SpotifyApi, Track};
 use super::provider::{MAX_SEARCH_RESULTS, Provider, ProviderDescriptor};
 use super::{
     FoundTrack, LoadOutcome, PlaylistInfo, ResolveError, ResolvedTrack, TrackInfo, TrackRef,
+    artwork,
 };
 use crate::api::protocol::Millis;
 use crate::config::{MediaContext, SpotifyConfig};
@@ -136,11 +137,13 @@ impl SpotifyProvider {
             };
         }
         tracks.truncate(limit);
+        let artwork = largest(&playlist.images).map(str::to_owned);
+        artwork::inherit(&mut tracks, artwork.as_deref());
         let info = PlaylistInfo {
             name: playlist.name,
             author: playlist.owner.and_then(|owner| owner.display_name),
             uri: spotify_url(playlist.external_urls.as_ref()),
-            artwork_url: largest(&playlist.images).map(str::to_owned),
+            artwork_url: artwork,
             selected_track: None,
             total_tracks: total,
         };

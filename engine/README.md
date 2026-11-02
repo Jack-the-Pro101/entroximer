@@ -125,6 +125,21 @@ engine's own machine and private networks (unless `ENTROXIMER_ALLOW_PRIVATE_URLS
 cannot use the engine to reach internal services. Newgrounds currently refuses automated
 requests; it works as far as Newgrounds lets it.
 
+### Artwork
+
+Every track's `artworkUrl` comes from the first of these that has a picture, whatever the source:
+
+1. The source: YouTube's thumbnail (always `https://i.ytimg.com/vi/<id>/hqdefault.jpg`, the same
+   in searches, playlists and playback, so queued tracks do not change when they load),
+   SoundCloud and Spotify artwork, or a thumbnail yt-dlp found.
+2. For a playlist's tracks, the playlist's picture, e.g. a Bandcamp album's cover.
+3. The page's own preview picture (`og:image`), as sites show it in link previews; fetched once
+   per page (5 s, the page's head only), never from private addresses unless they are allowed.
+4. For media files (direct links, local files), the cover embedded in the file. The engine
+   extracts it as a JPEG of at most 600 px and serves it at `/v1/artwork/<key>`, which needs the
+   `Authorization` header like the rest of the API. Such an `artworkUrl` is that path on the
+   engine; clients fetch the image and, for Discord, upload it with the message.
+
 ## Spotify
 
 Spotify's audio is DRM-protected, so like Lavalink's LavaSrc the engine only reads Spotify's
@@ -194,8 +209,9 @@ after five failures in a row it waits until the client changes something. Client
 queue from `queueChanged` events and fetch it again (`queue.get`) when a version is skipped.
 Queues live in memory: they survive client reconnects but not engine restarts.
 
-Plain HTTP serves `/health`, `GET /v1/info` and `GET|PUT|DELETE /v1/youtube/session` (the
-cookies.txt as the `PUT` body). The protocol's types are in
+Plain HTTP serves `/health`, `GET /v1/info`, `GET /v1/artwork/<key>` (embedded covers, see
+[Artwork](#artwork)) and `GET|PUT|DELETE /v1/youtube/session` (the cookies.txt as the `PUT`
+body). The protocol's types are in
 `crates/entroximer-server/src/api/protocol.rs`; `cargo test` exports them as TypeScript to
 `client/src/generated`.
 

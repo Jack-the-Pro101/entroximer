@@ -24,7 +24,7 @@ use crate::sources::{PlaylistInfo, ProviderDescriptor, TrackInfo};
 use crate::youtube::SessionState;
 
 /// Version of this protocol, reported in `node.info`.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// A Discord ID. Sent as a string, since JavaScript numbers cannot hold every ID exactly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, TS)]

@@ -1,6 +1,6 @@
 //! Media that ffmpeg plays directly: `http` for links to media files and internet radio, and
 //! `local` for files on the engine's host. Their metadata comes from the files' own tags, read
-//! with ffprobe.
+//! with ffprobe, and their artwork is the cover embedded in them, if any (see `artwork`).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -8,13 +8,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use entroximer_core::producer::ffmpeg::FfmpegProducer;
 use reqwest::Url;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, RANGE};
 use serde::Deserialize;
 
 use super::provider::{Provider, ProviderDescriptor};
-use super::{FoundTrack, LoadOutcome, ResolveError, ResolvedTrack, TrackInfo, TrackRef, net};
+use super::{
+    FoundTrack, LoadOutcome, ResolveError, ResolvedTrack, TrackInfo, TrackRef, artwork, net,
+};
 use crate::api::protocol::Millis;
 use crate::config::MediaContext;
 
@@ -23,6 +26,8 @@ const MEDIA_EXTENSIONS: &[&str] = &[
     "mp3", "flac", "ogg", "oga", "opus", "wav", "m4a", "aac", "webm", "mka", "mkv", "mp4", "m3u8",
 ];
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Covers are served at most this wide, which is plenty for embeds and keeps them small.
+const COVER_WIDTH: u32 = 600;
 
 pub(super) struct HttpProvider {
     descriptor: ProviderDescriptor,
@@ -225,6 +230,10 @@ async fn describe(
     }
     let length = probe.duration();
     let live = head.is_some_and(|head| head.live) || length.is_none();
+    let reference = TrackRef {
+        source: source.to_owned(),
+        uri: input.to_owned(),
+    };
     let info = TrackInfo {
         identifier: input.to_owned(),
         title: probe
@@ -238,7 +247,9 @@ async fn describe(
         is_stream: live,
         is_seekable: !live,
         uri: input.to_owned(),
-        artwork_url: None,
+        artwork_url: probe
+            .cover_stream()
+            .map(|_| artwork::cover_path(&reference)),
         isrc: probe.tag("isrc").or_else(|| probe.tag("tsrc")),
         source_name: source.to_owned(),
     };
@@ -247,15 +258,66 @@ async fn describe(
         ..FfmpegProducer::new(&ctx.config.ffmpeg, input)
     };
     Ok(ResolvedTrack {
-        track: FoundTrack {
-            reference: TrackRef {
-                source: source.to_owned(),
-                uri: input.to_owned(),
-            },
-            info,
-        },
+        track: FoundTrack { reference, info },
         producer: Arc::new(producer),
     })
+}
+
+/// The cover embedded in the media file `reference` points at, as a JPEG at most
+/// [`COVER_WIDTH`] wide; `None` if it has none. Only for files the engine would play: local
+/// ones when they are allowed, links to public addresses unless private ones are allowed, and
+/// only files with audio, so that pictures on their own are never served.
+pub(super) async fn embedded_cover(
+    reference: &TrackRef,
+    ctx: &MediaContext,
+) -> Result<Option<Bytes>, ResolveError> {
+    let input = &reference.uri;
+    match reference.source.as_str() {
+        "local" if ctx.config.sources.allow_local_files && Path::new(input).is_file() => {}
+        "http" => {
+            let url = Url::parse(input).map_err(|_| ResolveError::Unsupported(input.clone()))?;
+            if !ctx.config.sources.allow_private_urls {
+                net::ensure_public(&url).await?;
+            }
+        }
+        _ => return Ok(None),
+    }
+    let probe = Probe::run(input, ctx).await?;
+    let Some(stream) = probe.cover_stream().filter(|_| probe.has_audio()) else {
+        return Ok(None);
+    };
+    let scale = format!("scale='min({COVER_WIDTH},iw)':-2");
+    let extracting = tokio::process::Command::new(&ctx.config.ffmpeg)
+        .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"])
+        .arg(input)
+        .args([
+            "-map",
+            &format!("0:{stream}"),
+            "-frames:v",
+            "1",
+            "-vf",
+            &scale,
+        ])
+        .args(["-c:v", "mjpeg", "-q:v", "3", "-f", "image2pipe", "pipe:1"])
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(PROBE_TIMEOUT, extracting)
+        .await
+        .map_err(|_| ResolveError::Timeout {
+            program: "ffmpeg",
+            after: PROBE_TIMEOUT,
+        })?
+        .map_err(|source| ResolveError::Spawn("ffmpeg", source))?;
+    if !output.status.success() || output.stdout.is_empty() {
+        // a cover ffmpeg cannot decode is as good as none
+        tracing::debug!(
+            input,
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "cannot extract the embedded cover"
+        );
+        return Ok(None);
+    }
+    Ok(Some(Bytes::from(output.stdout)))
 }
 
 /// The file name without its extension, e.g. `My Song` for `https://host/music/My%20Song.mp3`.
@@ -322,9 +384,20 @@ struct ProbeFormat {
 
 #[derive(Debug, Default, Deserialize)]
 struct ProbeStream {
+    #[serde(default)]
+    index: usize,
     codec_type: Option<String>,
     #[serde(default)]
+    disposition: Disposition,
+    #[serde(default)]
     tags: HashMap<String, String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Disposition {
+    /// 1 for a picture attached to the file, such as an album cover.
+    #[serde(default)]
+    attached_pic: u8,
 }
 
 impl Probe {
@@ -366,6 +439,14 @@ impl Probe {
         self.streams
             .iter()
             .any(|s| s.codec_type.as_deref() == Some("audio"))
+    }
+
+    /// The index of the stream holding the embedded cover, if the file has one.
+    fn cover_stream(&self) -> Option<usize> {
+        self.streams
+            .iter()
+            .find(|s| s.codec_type.as_deref() == Some("video") && s.disposition.attached_pic == 1)
+            .map(|s| s.index)
     }
 
     fn duration(&self) -> Option<Millis> {
@@ -437,5 +518,19 @@ mod tests {
         assert_eq!(probe.tag("artist").as_deref(), Some("Stream artist"));
         assert_eq!(probe.duration(), Some(Millis(3000)));
         assert!(probe.has_audio());
+        assert_eq!(probe.cover_stream(), None);
+    }
+
+    #[test]
+    fn finds_embedded_covers_but_not_video() {
+        let probe: Probe = serde_json::from_value(serde_json::json!({
+            "streams": [
+                { "index": 0, "codec_type": "audio" },
+                { "index": 1, "codec_type": "video", "disposition": { "attached_pic": 0 } },
+                { "index": 2, "codec_type": "video", "disposition": { "attached_pic": 1 } },
+            ],
+        }))
+        .unwrap();
+        assert_eq!(probe.cover_stream(), Some(2));
     }
 }

@@ -17,6 +17,7 @@ use tokio::sync::Semaphore;
 use crate::cache::CacheDir;
 use crate::managed_ytdlp::{ManagedYtDlp, YtDlpBinary};
 use crate::sources::Sources;
+use crate::sources::artwork::Artwork;
 use crate::sources::spotify::DEFAULT_MIRROR_SEARCHES;
 use crate::youtube::{AuthPolicy, YouTube};
 
@@ -260,6 +261,8 @@ pub struct MediaContext {
     pub ytdlp_runs: YtDlpRuns,
     pub youtube: YouTube,
     pub sources: Sources,
+    /// Artwork the engine finds itself: pages' preview pictures and files' embedded covers.
+    pub artwork: Artwork,
     cache: CacheDir,
 }
 
@@ -296,6 +299,7 @@ impl MediaContext {
             ytdlp_runs,
             youtube,
             sources,
+            artwork: Artwork::default(),
             cache,
         })
     }

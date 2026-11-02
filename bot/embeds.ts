@@ -1,21 +1,68 @@
-// Embeds for what is playing, the queue and search results, with the tracks' artwork.
-import { EmbedBuilder } from "discord.js";
-import type { Player, Track } from "entroximer-client";
+// Embeds for what is playing, the queue and search results, each track with its artwork.
+import { AttachmentBuilder, EmbedBuilder } from "discord.js";
+import type { Entroximer, Player, Track } from "entroximer-client";
 
 import { describeTrack, escape, formatTime, truncate } from "./format";
 
 const COLOR = 0x2bb3a0;
-/** Queue items per page of `/queue`. */
-export const QUEUE_PAGE = 10;
+/** Queue items per page of `/queue`: a message holds ten embeds, one of them the header. */
+export const QUEUE_PAGE = 9;
 
-export function nowPlayingEmbed(player: Player, track: Track): EmbedBuilder {
-  const { title, uri, author, length, artworkUrl, isStream } = track.info;
+/** Embeds, and the artwork they upload, ready to send. */
+export interface EmbedMessage {
+  embeds: EmbedBuilder[];
+  files: AttachmentBuilder[];
+}
+
+/**
+ * How an embed shows `track`'s artwork: by its URL when Discord can fetch it, else with the image
+ * itself uploaded as `name` (covers the engine extracted from media files are on the engine,
+ * which Discord cannot reach).
+ */
+async function artwork(manager: Entroximer, track: Track, name: string): Promise<{ url: string | null; file?: AttachmentBuilder }> {
+  const location = manager.artwork(track);
+  if (location === null) {
+    return { url: null };
+  }
+  if (location.public) {
+    return { url: location.url };
+  }
+  const image = await manager.fetchArtwork(track);
+  if (image === null) {
+    return { url: null };
+  }
+  const file = new AttachmentBuilder(Buffer.from(await image.arrayBuffer()), { name });
+  return { url: `attachment://${name}`, file };
+}
+
+/** One embed per track, each with its artwork; `describe` writes its text. */
+async function trackCards(
+  manager: Entroximer,
+  tracks: readonly Track[],
+  describe: (track: Track, index: number) => string,
+): Promise<EmbedMessage> {
+  const cards = await Promise.all(
+    tracks.map(async (track, index) => {
+      const art = await artwork(manager, track, `artwork-${index}.jpg`);
+      const embed = new EmbedBuilder().setColor(COLOR).setDescription(truncate(describe(track, index), 4096));
+      return { embed: embed.setThumbnail(art.url), file: art.file };
+    }),
+  );
+  return {
+    embeds: cards.map((card) => card.embed),
+    files: cards.flatMap((card) => (card.file ? [card.file] : [])),
+  };
+}
+
+export async function nowPlayingMessage(manager: Entroximer, player: Player, track: Track): Promise<EmbedMessage> {
+  const { title, uri, author, length, isStream } = track.info;
   const position = player.position;
+  const art = await artwork(manager, track, "artwork.jpg");
   const embed = new EmbedBuilder()
     .setColor(COLOR)
     .setAuthor({ name: player.paused ? "Paused" : "Now playing" })
     .setTitle(truncate(title, 256))
-    .setThumbnail(artworkUrl);
+    .setThumbnail(art.url);
   if (/^https?:\/\//.test(uri)) {
     embed.setURL(uri);
   }
@@ -42,44 +89,48 @@ export function nowPlayingEmbed(player: Player, track: Track): EmbedBuilder {
       ? [`downloaded ${buffered.map(([start, end]) => `${formatTime(start)}–${formatTime(end)}`).join(", ")}`]
       : []),
   ];
-  return embed.setFooter({ text: details.join(" · ") });
+  embed.setFooter({ text: details.join(" · ") });
+  return { embeds: [embed], files: art.file ? [art.file] : [] };
 }
 
-/** Page `page` (from 1) of the queue; pages past the end show the last one. */
-export function queueEmbed(player: Player, page: number): EmbedBuilder {
+/** Page `page` (from 1) of the queue, a card with artwork per track; pages past the end show the last one. */
+export async function queueMessage(manager: Entroximer, player: Player, page: number): Promise<EmbedMessage> {
   const items = player.queue.items;
   const pages = Math.max(1, Math.ceil(items.length / QUEUE_PAGE));
   const shown = Math.min(Math.max(1, page), pages);
   const first = (shown - 1) * QUEUE_PAGE;
-  const lines = items
-    .slice(first, first + QUEUE_PAGE)
-    .map((item, index) => truncate(`${first + index + 1}. ${describeTrack(item.track)}`, 400));
+  const onPage = items.slice(first, first + QUEUE_PAGE);
 
-  const embed = new EmbedBuilder()
-    .setColor(COLOR)
-    .setTitle("Queue")
-    .setDescription(lines.length > 0 ? lines.join("\n") : "Nothing queued.");
+  const header = new EmbedBuilder().setColor(COLOR).setTitle("Queue");
+  const files: AttachmentBuilder[] = [];
   if (player.track) {
-    embed
-      .addFields({ name: "Now playing", value: truncate(describeTrack(player.track), 1024) })
-      .setThumbnail(player.track.info.artworkUrl);
+    const art = await artwork(manager, player.track, "now-playing.jpg");
+    header.addFields({ name: "Now playing", value: truncate(describeTrack(player.track), 1024) }).setThumbnail(art.url);
+    files.push(...(art.file ? [art.file] : []));
+  }
+  if (onPage.length === 0) {
+    header.setDescription("Nothing queued.");
   }
   const known = items.filter((item) => item.track.info.length !== null);
   const total = known.reduce((sum, item) => sum + (item.track.info.length ?? 0), 0);
   const duration = `${formatTime(total)}${known.length < items.length ? "+" : ""}`;
-  return embed.setFooter({
+  header.setFooter({
     text: `Page ${shown} of ${pages} · ${items.length} tracks · ${duration} · repeat ${player.queue.repeat}`,
   });
+
+  const cards = await trackCards(
+    manager,
+    onPage.map((item) => item.track),
+    (track, index) => `${first + index + 1}. ${describeTrack(track)}`,
+  );
+  return { embeds: [header, ...cards.embeds], files: [...files, ...cards.files] };
 }
 
-export function searchEmbed(tracks: readonly Track[], source: string): EmbedBuilder {
-  return new EmbedBuilder()
-    .setColor(COLOR)
-    .setTitle(`Results from ${source}`)
-    .setDescription(
-      tracks.map((track, index) => truncate(`${index + 1}. ${describeTrack(track)}`, 400)).join("\n"),
-    )
-    .setThumbnail(tracks[0]?.info.artworkUrl ?? null);
+/** Search results, a card with artwork per track (at most ten, as a message holds). */
+export async function searchMessage(manager: Entroximer, tracks: readonly Track[], source: string): Promise<EmbedMessage> {
+  const message = await trackCards(manager, tracks.slice(0, 10), (track, index) => `${index + 1}. ${describeTrack(track)}`);
+  message.embeds[0]?.setTitle(`Results from ${source}`);
+  return message;
 }
 
 /** `▬▬▬🔘▬▬▬▬▬▬` for a fraction from 0 to 1. */
