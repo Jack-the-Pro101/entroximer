@@ -49,14 +49,19 @@ change.
 | `setPreset(name, params?)` | Effects from one of the engine's presets, e.g. `setPreset("nightcore")` or `setPreset("bass_boost", { gain_db: 9 })` |
 | `setGraph(graph)` | Effects, e.g. `chain({ type: "lowpass", params: { cutoff: 800 } })` or `parseChain("lowpass(800) => reverb", info.nodes)`; `null` removes them |
 | `update(changes)` | Several changes in one request |
+| `setTextChannel(channelId)` | Where the bot posts about this player (`textChannelId`); `null` for nowhere |
 | `destroy()` | Stops playback, leaves the voice channel and removes the player |
 
 A player keeps the engine's view of `track` (and its queue `itemId`), `paused`, `volume`, `graph`
 and `state` (buffered ranges, connection, buffering), and estimates `position` between updates.
 It emits `trackStart`, `trackEnd`, `trackError`, `trackStuck` (each with the track's item id),
-`queueEnd`, `update`, `voiceClosed`, `error` and `destroyed`; its errors reach the client's
-`error` event too, with the guild ID. Leaving the voice channel in Discord destroys the player as
-well.
+`queueEnd`, `update`, `voiceClosed`, `textChannelChange`, `error` and `destroyed`; its errors
+reach the client's `error` event too, with the guild ID. Leaving the voice channel in Discord
+destroys the player as well.
+
+A player's `textChannelId` is for the bot: the client only keeps it, never the engine, and it
+lasts as long as the player, so the next player in the guild starts without one. It stays
+readable once the player is destroyed, e.g. to say in `playersLost` that playback stopped.
 
 Discord sends the bot's voice states from every gateway session to every session. Given `READY`,
 the client knows its own sessions and ignores the others' voice states: when another instance of

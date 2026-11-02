@@ -46,6 +46,8 @@ type PlayerEvents = {
   queueEnd: [];
   update: [state: PlayerState];
   voiceClosed: [info: VoiceClosedInfo];
+  /** `setTextChannel` moved the player's text channel. */
+  textChannelChange: [channelId: string | null, previous: string | null];
   /** A background request (e.g. passing on voice details) failed. */
   error: [error: EntroximerError];
   /** The player is gone; its object can no longer be used. */
@@ -95,6 +97,7 @@ export class Player extends Emitter<PlayerEvents> {
   #sentVoice: VoiceState | null = null;
   /** The other gateway session last reported for joining voice in this guild. */
   #conflictingSession: string | null = null;
+  #textChannelId: string | null = null;
 
   constructor(
     readonly guildId: string,
@@ -107,6 +110,25 @@ export class Player extends Emitter<PlayerEvents> {
 
   get destroyed(): boolean {
     return this.#destroyed;
+  }
+
+  /**
+   * The text channel the bot posts about this player in, e.g. what starts playing; `null` if
+   * none. The client only keeps it, for as long as the player lives (and readable after), and
+   * the engine never sees it.
+   */
+  get textChannelId(): string | null {
+    return this.#textChannelId;
+  }
+
+  /** Moves the player's text channel, or removes it with `null`; see `textChannelId`. */
+  setTextChannel(channelId: string | null): void {
+    this.#ensureUsable();
+    const previous = this.#textChannelId;
+    if (channelId !== previous) {
+      this.#textChannelId = channelId;
+      this.emit("textChannelChange", channelId, previous);
+    }
   }
 
   /**

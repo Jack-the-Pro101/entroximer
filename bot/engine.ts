@@ -1,16 +1,18 @@
 // The bot's connection to the engine, and the messages it posts about playback.
 import { Events } from "discord.js";
-import type { Client, SendableChannels } from "discord.js";
+import type { Client } from "discord.js";
 import { Entroximer } from "entroximer-client";
 import type { Event, GatewayDispatch } from "entroximer-client";
 
+import { Announcements } from "./announcements";
+import type { PostKind } from "./announcements";
 import { env } from "./env";
 import { describeTrack, formatTime } from "./format";
 
 export interface Engine {
   manager: Entroximer;
-  /** Where to post about a guild's playback: the channel of its latest command. */
-  announceIn(guildId: string, channel: SendableChannels | null): void;
+  /** Posts about playback in each player's text channel. */
+  announcements: Announcements;
 }
 
 /**
@@ -43,18 +45,12 @@ export async function connectEngine(client: Client<true>, gatewayReady: GatewayD
   }
   client.on(Events.Raw, (packet) => manager.handleRawEvent(packet));
 
-  const channels = new Map<string, SendableChannels>();
-  const announce = (guildId: string, content: string) => {
-    channels
-      .get(guildId)
-      ?.send({ content, allowedMentions: { parse: [] } })
-      .catch((error: unknown) => console.error(`cannot post in guild ${guildId}:`, error));
-  };
-
+  const announcements = new Announcements(client, manager);
   manager.on("event", (event) => {
-    const message = describeEvent(event);
-    if (message && "guildId" in event) {
-      announce(event.guildId, message);
+    const post = describeEvent(event);
+    const player = "guildId" in event ? manager.players.get(event.guildId) : undefined;
+    if (post && player) {
+      announcements.post(player, post.content, post.kind);
     }
   });
   manager.on("youtubeSession", (state) => {
@@ -72,41 +68,44 @@ export async function connectEngine(client: Client<true>, gatewayReady: GatewayD
   manager.on("ready", ({ resumed }) => console.log(`engine connected${resumed ? " (session resumed)" : ""}`));
   manager.on("playersLost", (players) => {
     for (const player of players) {
-      announce(player.guildId, "Lost the engine's player (it restarted, or reconnecting took too long); playback stopped.");
+      announcements.post(player, "Lost the engine's player (it restarted, or reconnecting took too long); playback stopped.", "problem");
     }
   });
   manager.on("error", (error, guildId) => {
     console.error(`engine error${guildId ? ` in guild ${guildId}` : ""}:`, error);
-    if (error.code === "voice_conflict" && guildId) {
-      announce(guildId, "⚠️ Another instance of this bot joined voice here, which takes over its voice connection. Stop the other one.");
+    const player = guildId === undefined ? undefined : manager.players.get(guildId);
+    if (error.code === "voice_conflict" && player) {
+      announcements.post(
+        player,
+        "⚠️ Another instance of this bot joined voice here, which takes over its voice connection. Stop the other one.",
+        "problem",
+      );
     }
   });
 
   const info = await manager.connect();
   console.log(`engine ${info.version} (yt-dlp ${info.ytdlp ?? "unknown"}, YouTube session ${info.youtubeSession})`);
-  return {
-    manager,
-    announceIn(guildId, channel) {
-      if (channel) {
-        channels.set(guildId, channel);
-      }
-    },
-  };
+  return { manager, announcements };
 }
 
-function describeEvent(event: Event): string | null {
+function describeEvent(event: Event): { content: string; kind: PostKind } | null {
   switch (event.event) {
     case "trackStart":
-      return `▶️ Now playing ${describeTrack(event.track)}`;
+      return { content: `▶️ Now playing ${describeTrack(event.track)}`, kind: "routine" };
     case "trackError":
-      return `⚠️ ${describeTrack(event.track)} failed: ${event.error.message}`;
+      return { content: `⚠️ ${describeTrack(event.track)} failed: ${event.error.message}`, kind: "problem" };
     case "trackStuck":
-      return `⏳ Still waiting for ${describeTrack(event.track)} after ${formatTime(event.waiting)}.`;
+      return {
+        content: `⏳ Still waiting for ${describeTrack(event.track)} after ${formatTime(event.waiting)}.`,
+        kind: "problem",
+      };
     case "queueEnd":
-      return "⏹️ The queue has ended.";
+      return { content: "⏹️ The queue has ended.", kind: "routine" };
     case "voiceClosed":
       // 4006: the voice session was replaced, e.g. by the bot joining from another session
-      return event.byRemote ? `🔌 Discord closed the voice connection (${event.code ?? "no code"}).` : null;
+      return event.byRemote
+        ? { content: `🔌 Discord closed the voice connection (${event.code ?? "no code"}).`, kind: "problem" }
+        : null;
     default:
       return null;
   }

@@ -34,11 +34,19 @@ guild, permission to view, connect to and speak in voice channels.
 | `/volume percent` | 0 to 1000; 100 leaves the audio unchanged |
 | `/effects [preset] [chain]` | Applies a preset (suggested as you type, e.g. `nightcore`, `bass_boost`, `karaoke`), a chain such as `lowpass(800) => reverb(10, 2)`, or a preset followed by a chain; with neither, removes effects |
 | `/nowplaying` | The track with its artwork, position, downloaded parts and what comes next |
+| `/channel [channel] [silent]` | Moves playback messages to a channel, or turns silent on or off: only problems are posted, not what starts playing. Both last until the bot leaves. With neither, says where messages go |
 | `/leave` | Stops and leaves the voice channel |
 | `/engine` | The engine's versions, sources, YouTube session state and load |
 
-The bot posts track starts, failures and the end of the queue in the channel of the latest
-command, and DMs its owner when the engine's YouTube session expires.
+The bot posts track starts, failures and the end of the queue in the player's text channel, and
+DMs its owner when the engine's YouTube session expires. A player's text channel is the channel
+of the command that made the bot join voice (or, if the bot cannot post there, the voice
+channel's chat), and only `/channel` moves it; other commands, wherever they are used, leave it
+alone. If the bot can no longer post there (the channel is deleted, or the bot loses access),
+it says so in the voice channel's chat and posts there instead, or stops posting. A new player
+starts over: neither its channel nor silent carries over from the last one.
+
+The bot also needs permission to view and send messages in the channels it posts in.
 
 ## Smoke test
 

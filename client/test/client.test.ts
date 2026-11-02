@@ -286,6 +286,34 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
     await player.destroy();
   });
 
+  test("keeps a text channel for the player's lifetime", async () => {
+    const manager = client();
+    await manager.connect();
+    const player = manager.player("9");
+    expect(player.textChannelId).toBeNull();
+    const changes: Array<[string | null, string | null]> = [];
+    player.on("textChannelChange", (channelId, previous) => changes.push([channelId, previous]));
+
+    player.setTextChannel("90");
+    player.setTextChannel("90");
+    player.setTextChannel("91");
+    player.setTextChannel(null);
+    player.setTextChannel("92");
+    expect(changes).toEqual([
+      ["90", null],
+      ["91", "90"],
+      [null, "91"],
+      ["92", null],
+    ]);
+
+    // still readable to post about its end, but it cannot move any more
+    await player.destroy();
+    expect(player.textChannelId).toBe("92");
+    expect(() => player.setTextChannel("93")).toThrow(EntroximerError);
+    expect(manager.player("9").textChannelId).toBeNull();
+    await manager.player("9").destroy();
+  });
+
   test("resumes its session after the connection drops", async () => {
     const manager = client();
     await manager.connect();

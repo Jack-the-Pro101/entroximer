@@ -13,6 +13,7 @@ import type { AutocompleteInteraction, ChatInputCommandInteraction, SharedSlashC
 import { EntroximerError, append, parseChain } from "entroximer-client";
 import type { PlaylistInfo, Player, QueueAdded, QueueItem, Repeat, Track } from "entroximer-client";
 
+import { whyCannotPostIn } from "./announcements";
 import { nowPlayingMessage, queueMessage, searchMessage } from "./embeds";
 import type { Engine } from "./engine";
 import { describeTrack, escape, formatTime, parseTime, plainTrack, trackLength, truncate } from "./format";
@@ -46,6 +47,17 @@ const SUGGESTION_DELAY_MS = 350;
 /** How long `/search` waits for a pick. */
 const PICK_TIMEOUT_MS = 60_000;
 
+/** Channels that hold messages; voice channels have a chat too. */
+const POSTABLE_CHANNEL_TYPES = [
+  ChannelType.GuildText,
+  ChannelType.GuildAnnouncement,
+  ChannelType.GuildVoice,
+  ChannelType.GuildStageVoice,
+  ChannelType.PublicThread,
+  ChannelType.PrivateThread,
+  ChannelType.AnnouncementThread,
+] as const;
+
 const SEARCH_SOURCES = [
   { name: "YouTube", value: "ytsearch" },
   { name: "YouTube Music", value: "ytmsearch" },
@@ -68,8 +80,10 @@ export const commands: Command[] = [
         ),
     async (interaction, engine) => {
       const channelId = interaction.options.getChannel("channel")?.id ?? voiceChannelOf(interaction);
-      engine.manager.player(interaction.guildId).connect(channelId);
-      await interaction.reply(`Joining <#${channelId}>.`);
+      const player = engine.manager.player(interaction.guildId);
+      engine.announcements.bindNew(player, interaction.channel, channelId);
+      player.connect(channelId);
+      await interaction.reply(`Joining <#${channelId}>.${postingNote(player, interaction)}`);
     },
   ),
   command(
@@ -403,6 +417,49 @@ export const commands: Command[] = [
     },
   ),
   command(
+    (b) =>
+      b
+        .setName("channel")
+        .setDescription("Choose where the bot posts about playback, or see where it does")
+        .addChannelOption((o) =>
+          o
+            .setName("channel")
+            .setDescription("Post about playback here, until the bot leaves")
+            .addChannelTypes(...POSTABLE_CHANNEL_TYPES),
+        )
+        .addBooleanOption((o) =>
+          o.setName("silent").setDescription("Only post problems, not what starts playing, until the bot leaves"),
+        ),
+    async (interaction, engine) => {
+      const player = existingPlayer(interaction, engine);
+      const channel = interaction.options.getChannel("channel");
+      const silent = interaction.options.getBoolean("silent");
+      const said: string[] = [];
+      if (channel) {
+        const why = whyCannotPostIn(channel);
+        if (why !== null) {
+          throw new UserError(`I can't post in <#${channel.id}>: ${why}.`);
+        }
+        player.setTextChannel(channel.id);
+        said.push(`Playback messages go to <#${channel.id}> now.`);
+      }
+      if (silent !== null) {
+        engine.announcements.setSilent(player, silent);
+        said.push(silent ? "Silent: only problems are posted until the bot leaves." : "No longer silent.");
+      }
+      if (said.length === 0) {
+        const where = player.textChannelId;
+        said.push(
+          where === null
+            ? "Not posting about playback anywhere; `/channel` with a channel chooses where."
+            : `Posting about playback in <#${where}>.`,
+          ...(engine.announcements.isSilent(player) ? ["Silent: only problems, not what starts playing."] : []),
+        );
+      }
+      await interaction.reply(said.join(" "));
+    },
+  ),
+  command(
     (b) => b.setName("leave").setDescription("Stop playback and leave the voice channel"),
     async (interaction, engine) => {
       await existingPlayer(interaction, engine).destroy();
@@ -437,7 +494,6 @@ export async function run(interaction: GuildInteraction, engine: Engine): Promis
   if (!found) {
     return;
   }
-  engine.announceIn(interaction.guildId, interaction.channel?.isSendable() ? interaction.channel : null);
   try {
     await found.execute(interaction, engine);
   } catch (error) {
@@ -597,9 +653,19 @@ function voiceChannelOf(interaction: GuildInteraction): string {
 function joinedPlayer(interaction: GuildInteraction, engine: Engine): Player {
   const player = engine.manager.player(interaction.guildId);
   if (player.channelId === null) {
-    player.connect(voiceChannelOf(interaction));
+    const channelId = voiceChannelOf(interaction);
+    engine.announcements.bindNew(player, interaction.channel, channelId);
+    player.connect(channelId);
   }
   return player;
+}
+
+/** For a reply in `interaction`'s channel: where playback messages go, if not there. */
+function postingNote(player: Player, interaction: GuildInteraction): string {
+  if (player.textChannelId === null) {
+    return " I can't post about playback here or in the voice channel's chat; `/channel` chooses where.";
+  }
+  return player.textChannelId === interaction.channelId ? "" : ` Playback messages go to <#${player.textChannelId}>.`;
 }
 
 function existingPlayer(interaction: GuildInteraction, engine: Engine): Player {
