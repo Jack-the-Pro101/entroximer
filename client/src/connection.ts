@@ -16,7 +16,7 @@ import type { Stats } from "./generated/Stats";
 import type { Track } from "./generated/Track";
 
 /** The protocol version this client speaks; see `node.info`. */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 1;
 
 const CLIENT_NAME = "entroximer-client/0.1.0";
 
