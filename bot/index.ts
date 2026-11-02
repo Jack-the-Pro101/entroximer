@@ -11,6 +11,8 @@ const client = new Client({
 });
 
 const gatewayReady = keepGatewayReady(client);
+// an `error` event nobody listens to would end the process; discord.js reconnects by itself
+client.on(Events.Error, (error) => console.error("Discord connection error:", error));
 
 client.once(Events.ClientReady, async (ready) => {
   console.log(`logged in as ${ready.user.tag}`);
