@@ -4,9 +4,12 @@
 //! frequency of the rendered audio tells which second of the media is playing. Requires ffmpeg
 //! with libopus (the engine needs ffmpeg at runtime anyway).
 
+use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use entroximer_core::demux::inspect;
 use entroximer_core::error::display_chain;
 use entroximer_core::player::{Player, PlayerConfig, Status};
 use entroximer_core::producer::file::FileProducer;
@@ -242,4 +245,42 @@ fn failing_source_is_retried_then_reported_with_its_own_error() {
         3,
         "first try plus two retries"
     );
+}
+
+#[test]
+fn inspecting_finds_the_length_and_tags_and_refuses_what_does_not_play() {
+    let facts = inspect(std::fs::File::open(fixture()).unwrap()).unwrap();
+    let expected = FIXTURE_SECONDS * TICKS_PER_SECOND;
+    assert!(
+        facts.length.abs_diff(expected) < 1920,
+        "{} ticks, expected about {expected}",
+        facts.length
+    );
+
+    let tagged = Path::new(env!("CARGO_TARGET_TMPDIR")).join("tagged.mp3");
+    let status = Command::new("ffmpeg")
+        .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y"])
+        .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=2"])
+        .args([
+            "-metadata",
+            "title=Doorbell",
+            "-metadata",
+            "artist=Front door",
+        ])
+        .args(["-c:a", "libmp3lame"])
+        .arg(&tagged)
+        .status()
+        .expect("ffmpeg must be installed to run these tests");
+    assert!(status.success());
+    let facts = inspect(std::fs::File::open(&tagged).unwrap()).unwrap();
+    assert_eq!(facts.title.as_deref(), Some("Doorbell"));
+    assert_eq!(facts.artist.as_deref(), Some("Front door"));
+    assert!(
+        facts.length.abs_diff(2 * TICKS_PER_SECOND) < 4800,
+        "{}",
+        facts.length
+    );
+
+    let text = std::io::Cursor::new(b"definitely not audio, only words".repeat(100));
+    assert!(inspect(text).is_err());
 }

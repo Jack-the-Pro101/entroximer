@@ -10,6 +10,7 @@ pub mod metadata;
 mod net;
 pub mod provider;
 pub mod spotify;
+pub mod upload;
 pub mod ytdlp;
 
 use std::io;
@@ -131,4 +132,6 @@ pub enum ResolveError {
     Spotify(#[from] SpotifyError),
     #[error("found no recording of `{0}` on YouTube")]
     NoMirror(String),
+    #[error("the upload `{0}` was deleted or has expired")]
+    UploadGone(String),
 }

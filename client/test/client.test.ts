@@ -18,7 +18,7 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
   const clients: Entroximer[] = [];
 
   beforeAll(async () => {
-    engine = await startEngine({ password: PASSWORD });
+    engine = await startEngine({ password: PASSWORD, uploads: true });
   });
 
   afterAll(async () => {
@@ -270,6 +270,30 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
     expect((await player.update({})).layers).toEqual([]);
     expect((await failure(player.layer("main").play(engine.tone))).code).toBe("bad_request");
     await player.destroy();
+  });
+
+  test("uploads files to play, within the engine's limits", async () => {
+    const manager = client();
+    const info = await manager.connect();
+    expect(info.uploads).toEqual({ maxBytes: 1 << 20, keep: 3_600_000 });
+
+    const upload = await manager.upload(Bun.file(engine.tone), { title: "Doorbell" });
+    expect(upload.track.info).toMatchObject({ title: "Doorbell", sourceName: "upload" });
+    // with the last Opus packet's padding
+    expect(upload.track.info.length! - 30_000).toBeWithin(0, 25);
+    expect(upload.track.info.uri).toBe(`upload:${upload.id}`);
+    const clip = await manager.player("6").layer("sfx").play(upload.track);
+    expect(clip.status).toBe("playing");
+
+    // refused before anything is sent
+    expect((await failure(manager.upload(new Uint8Array((1 << 20) + 1)))).code).toBe("too_large");
+    const unplayable = await failure(manager.upload(new TextEncoder().encode("only words")));
+    expect(unplayable.code).toBe("no_audio");
+
+    await manager.deleteUpload(upload.id);
+    expect((await failure(manager.load(`upload:${upload.id}`))).code).toBe("unavailable");
+    expect((await failure(manager.deleteUpload(upload.id))).code).toBe("not_found");
+    await manager.player("6").destroy();
   });
 
   test("assembles voice details from gateway events and passes them on", async () => {

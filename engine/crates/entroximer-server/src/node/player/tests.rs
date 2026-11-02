@@ -30,6 +30,21 @@ struct Cli {
     media: MediaConfig,
 }
 
+/// songbird's shared scheduler runs on the runtime that first asks for it. Each test has its own
+/// runtime, which ends with the test, so the scheduler is made first on one that never does.
+fn keep_songbird_scheduler() {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    let runtime = RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
+    });
+    let _entered = runtime.enter();
+    songbird::driver::get_default_scheduler();
+}
+
 struct Harness {
     node: Arc<Node>,
     player: Arc<GuildPlayer>,
@@ -50,6 +65,7 @@ impl Harness {
     }
 
     async fn build(preload_lead: Duration, stuck_after: Duration) -> Self {
+        keep_songbird_scheduler();
         let dir = tempfile::tempdir().unwrap();
         let path = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
         let cli = Cli::parse_from([

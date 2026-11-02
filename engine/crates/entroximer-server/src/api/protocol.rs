@@ -827,6 +827,35 @@ pub struct NodeInfo {
     pub nodes: Vec<NodeDescriptor>,
     /// Ready-made effect graphs, with the graph each builds at its default parameters.
     pub presets: Vec<PresetDescriptor>,
+    /// What `POST /v1/uploads` takes; `null` if uploads are off.
+    pub uploads: Option<UploadsInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UploadsInfo {
+    /// The largest file, in bytes.
+    #[ts(type = "number")]
+    pub max_bytes: u64,
+    /// How long an upload is kept after it was uploaded or last used.
+    pub keep: Millis,
+}
+
+/// Result of `POST /v1/uploads`.
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct Upload {
+    /// For `DELETE /v1/uploads/{id}`.
+    pub id: String,
+    /// Plays like any other track; its `uri` is `upload:<id>`, which also loads it.
+    pub track: Track,
+    #[ts(type = "number")]
+    pub bytes: u64,
+    /// When it is deleted, as Unix milliseconds, unless it is used before: each use keeps it for
+    /// `keep` (see `UploadsInfo`) longer.
+    pub expires_at: Millis,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
@@ -859,6 +888,10 @@ pub enum ErrorCode {
     LoadFailed,
     /// Playback failed after the track loaded.
     PlaybackFailed,
+    /// An upload is larger than the engine takes.
+    TooLarge,
+    /// The engine has no room for an upload until others expire or are deleted.
+    StorageFull,
     Internal,
 }
 

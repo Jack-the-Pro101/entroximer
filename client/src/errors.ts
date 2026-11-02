@@ -42,3 +42,16 @@ export function toEntroximerError(error: unknown): EntroximerError {
   }
   return new EntroximerError("internal", error instanceof Error ? error.message : String(error));
 }
+
+/** The error an engine's HTTP response carries, for one that failed. */
+export async function fromResponse(response: Response): Promise<EntroximerError> {
+  try {
+    const body = (await response.json()) as Partial<ApiError>;
+    if (typeof body.code === "string" && typeof body.message === "string") {
+      return EntroximerError.fromApi(body as ApiError);
+    }
+  } catch {
+    // not one of the engine's errors, e.g. from a proxy
+  }
+  return new EntroximerError("internal", `the engine answered HTTP ${response.status}`);
+}

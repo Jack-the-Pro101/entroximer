@@ -123,6 +123,7 @@ queue update.
 | `generic` | Any other page yt-dlp can extract | |
 | `spotify` | open.spotify.com tracks, albums, playlists and artists, `spotify:` URIs; only with a Spotify app (below) | `spsearch` |
 | `local` | Files on the engine's host; only with `ENTROXIMER_ALLOW_LOCAL_FILES` | |
+| `upload` | Files clients uploaded, as `upload:<id>`; only with `ENTROXIMER_UPLOADS` (see [Uploads](#uploads)) | |
 
 Everything but `http`, `local` and Spotify's metadata goes through yt-dlp. `http` and `generic` refuse links to the
 engine's own machine and private networks (unless `ENTROXIMER_ALLOW_PRIVATE_URLS`), so clients
@@ -237,6 +238,36 @@ between words do not make the music pump. Of several layers ducking one, the low
 {"op": "clip.play", "params": {"guildId": "1", "layer": "announcements", "clipId": "a1", "track": {"query": "https://cdn.discordapp.com/attachments/.../hello.ogg"}}}
 ```
 
+## Uploads
+
+Sounds that have a URL, such as Discord attachments, play from it. For those that do not, the
+engine can take uploads, if its operator turns them on with `ENTROXIMER_UPLOADS`: on a public
+engine they let anyone who may use it store files there. Off, the routes answer 404.
+
+`POST /v1/uploads` takes the file as its body, with an optional `?title=` (else the file's own
+tag), and answers `201` with `{id, track, bytes, expiresAt}`. The `track` plays like any other,
+in the queue or as a clip; its URI, `upload:<id>`, also loads it. `DELETE /v1/uploads/<id>`
+deletes one early. Both need the password, like every route but `/health`.
+
+- The file streams to `uploads/` in the engine's run directory, never into RAM, so uploads are
+  gone after a restart. A file larger than `ENTROXIMER_UPLOAD_MAX_MB` is refused with 413
+  (`too_large`), before it is read if its `Content-Length` says so.
+- It is read the way it will play, by the engine's own demuxer, with its first packets decoded:
+  one it cannot play is refused with 415 (`no_audio`), so an accepted upload is one that plays.
+  Its tags give the title, artist, album and ISRC. It plays straight from the file, with no
+  ffmpeg.
+- An upload is deleted once it has gone unused (loaded or played) for
+  `ENTROXIMER_UPLOAD_KEEP_MINS`; `expiresAt` says when, if it is not used before.
+- All uploads together take at most `ENTROXIMER_UPLOAD_TOTAL_MB`. A new one that does not fit
+  removes expired uploads, then those unused for longest; if it still does not fit, it is
+  refused with 507 (`storage_full`).
+- An upload that is playing is never removed. Deleting one makes it unplayable at once (loading
+  it then fails with `unavailable`), and its file goes when the playing ends.
+
+`node.info` tells clients whether uploads are on, the largest file and how long uploads are kept
+(`uploads`, `null` when off). The engine warns at startup when uploads are on without a password
+on an address others can reach.
+
 ## Queues
 
 Each player plays its queue by itself. Once the current track has less than
@@ -260,8 +291,8 @@ queue from `queueChanged` events and fetch it again (`queue.get`) when a version
 Queues live in memory: they survive client reconnects but not engine restarts.
 
 Plain HTTP serves `/health`, `GET /v1/info`, `GET /v1/artwork/<key>` (embedded covers, see
-[Artwork](#artwork)) and `GET|PUT|DELETE /v1/youtube/session` (the cookies.txt as the `PUT`
-body). The protocol's types are in
+[Artwork](#artwork)), `POST /v1/uploads` and `DELETE /v1/uploads/<id>` (see [Uploads](#uploads))
+and `GET|PUT|DELETE /v1/youtube/session` (the cookies.txt as the `PUT` body). The protocol's types are in
 `crates/entroximer-server/src/api/protocol.rs`; `cargo test` exports them as TypeScript to
 `client/src/generated`.
 
@@ -337,6 +368,10 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_PLAYLIST_LIMIT` | `500` | Most tracks loaded from one playlist |
 | `ENTROXIMER_ALLOW_LOCAL_FILES` | off | Let clients play files on the engine's host |
 | `ENTROXIMER_ALLOW_PRIVATE_URLS` | off | Let clients play links to private networks, e.g. a media server on the LAN |
+| `ENTROXIMER_UPLOADS` | off | Let clients upload audio files to play; see [Uploads](#uploads) |
+| `ENTROXIMER_UPLOAD_MAX_MB` | `50` | The largest upload |
+| `ENTROXIMER_UPLOAD_TOTAL_MB` | `512` | Disk all uploads may take together |
+| `ENTROXIMER_UPLOAD_KEEP_MINS` | `60` | How long an upload is kept after it was last used |
 | `ENTROXIMER_CACHE_DIR` | `$TMPDIR/entroximer` | Spilled packets and downloads; keep it on fast disk, not tmpfs |
 | `ENTROXIMER_NO_SPILL` | off | Keep the cache in RAM only |
 | `ENTROXIMER_MEMORY_BEHIND_SECS` | `15` | Seconds kept in RAM behind the playhead |

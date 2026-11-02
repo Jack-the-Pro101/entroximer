@@ -3,6 +3,7 @@ import type { NodeDescriptor } from "./NodeDescriptor";
 import type { PresetDescriptor } from "./PresetDescriptor";
 import type { ProviderDescriptor } from "./ProviderDescriptor";
 import type { SessionState } from "./SessionState";
+import type { UploadsInfo } from "./UploadsInfo";
 
 export type NodeInfo = { version: string, protocol: number, 
 /**
@@ -20,4 +21,8 @@ nodes: Array<NodeDescriptor>,
 /**
  * Ready-made effect graphs, with the graph each builds at its default parameters.
  */
-presets: Array<PresetDescriptor>, };
+presets: Array<PresetDescriptor>, 
+/**
+ * What `POST /v1/uploads` takes; `null` if uploads are off.
+ */
+uploads: UploadsInfo | null, };

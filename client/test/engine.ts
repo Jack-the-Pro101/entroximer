@@ -19,7 +19,7 @@ export interface TestEngine {
   stop(): Promise<void>;
 }
 
-export async function startEngine(options: { password?: string } = {}): Promise<TestEngine> {
+export async function startEngine(options: { password?: string; uploads?: boolean } = {}): Promise<TestEngine> {
   const dir = mkdtempSync(join(tmpdir(), "entroximer-client-test-"));
   const tone = join(dir, "tone.webm");
   const ffmpeg = Bun.spawnSync([
@@ -56,6 +56,8 @@ export async function startEngine(options: { password?: string } = {}): Promise<
       ENTROXIMER_ALLOW_LOCAL_FILES: "true",
       // longer than the tone, so that a queue's next track is loaded right away
       ENTROXIMER_PRELOAD_SECS: "60",
+      ENTROXIMER_UPLOADS: String(options.uploads ?? false),
+      ENTROXIMER_UPLOAD_MAX_MB: "1",
       RUST_LOG: "warn",
     },
     stdout: "ignore",

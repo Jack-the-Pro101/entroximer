@@ -36,6 +36,18 @@ impl Harness {
             .collect()
     }
 
+    /// Waits until every track playing has downloaded to its end, as short ones have long before
+    /// they end in real time. `play` counts only fills in which nothing buffers, so a clip that
+    /// buffers would let the music run ahead.
+    async fn downloaded(&self) {
+        self.until("the tracks download", |p| {
+            p.mixer()
+                .players()
+                .all(|player| player.media_end().is_some())
+        })
+        .await;
+    }
+
     fn music_position(&self) -> Ticks {
         self.player.deck().current().unwrap().player.position()
     }
@@ -53,6 +65,7 @@ async fn a_clip_plays_over_the_queue_and_leaves_it_alone() {
     assert_eq!(clip.status, ClipStatus::Playing);
     // its start came before the response
     assert_eq!(h.events().await, strings(["clip start c1"]));
+    h.downloaded().await;
     let info = h.player.info();
     assert_eq!(info.track.unwrap().info.title, "a");
     assert_eq!(h.clips("sfx"), [("c1".to_owned(), ClipStatus::Playing)]);

@@ -21,7 +21,7 @@ pub use session::Session;
 
 use crate::api::protocol::{
     ApiError, ErrorCode, Event, LoadResult, Millis, NodeInfo, PROTOCOL_VERSION, Snowflake, Stats,
-    Track, TrackSelector,
+    Track, TrackSelector, UploadsInfo,
 };
 use crate::config::{MediaContext, Secret};
 use crate::managed_ytdlp::YtDlpBinary;
@@ -259,6 +259,13 @@ impl Node {
             providers: self.ctx.sources.descriptors(),
             nodes: self.registry.descriptors().cloned().collect(),
             presets: self.presets.descriptors().cloned().collect(),
+            uploads: self.ctx.uploads.as_ref().map(|store| {
+                let limits = store.limits();
+                UploadsInfo {
+                    max_bytes: limits.max_bytes,
+                    keep: Millis::from(limits.keep),
+                }
+            }),
         }
     }
 

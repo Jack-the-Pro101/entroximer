@@ -13,6 +13,7 @@ use entroximer_server::config::{MediaConfig, MediaContext, Secret};
 use entroximer_server::node::{Node, NodeSettings};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::{self, Message};
@@ -89,6 +90,21 @@ struct Cli {
     media: MediaConfig,
 }
 
+/// songbird's shared scheduler runs on the runtime that first asks for it. Each test has its own
+/// runtime, which ends with the test, so the scheduler is made first on one that never does.
+fn keep_songbird_scheduler() {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    let runtime = RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
+    });
+    let _entered = runtime.enter();
+    songbird::driver::get_default_scheduler();
+}
+
 struct Engine {
     addr: SocketAddr,
     node: Arc<Node>,
@@ -97,16 +113,24 @@ struct Engine {
 
 impl Engine {
     async fn start(password: Option<&str>) -> Self {
+        Self::start_with(password, &[]).await
+    }
+
+    /// An engine with more flags.
+    async fn start_with(password: Option<&str>, flags: &[&str]) -> Self {
+        keep_songbird_scheduler();
         let dirs = tempfile::tempdir().unwrap();
         let path = |name: &str| dirs.path().join(name).to_string_lossy().into_owned();
-        let args = [
+        let (data, cache) = (path("data"), path("cache"));
+        let mut args = vec![
             "entroximer",
             "--data-dir",
-            &path("data"),
+            &data,
             "--cache-dir",
-            &path("cache"),
+            &cache,
             "--allow-local-files",
         ];
+        args.extend(flags);
         let ctx = Arc::new(MediaContext::new(Cli::parse_from(args).media).unwrap());
         let node = Node::new(
             ctx,
@@ -892,4 +916,185 @@ async fn layers_and_clips_over_the_protocol() {
     assert_eq!(ended, ["c1", "c2", "c4"], "every clip ends once");
     let (_, player) = client.exchange("player.get", guild(json!({}))).await;
     assert_eq!(player["result"]["layers"], json!([]));
+}
+
+/// Two seconds of a stereo tone as a WAV file, about 375 KiB.
+fn wav() -> Vec<u8> {
+    let spec = hound::WavSpec {
+        channels: 2,
+        sample_rate: 48_000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut out = std::io::Cursor::new(Vec::new());
+    let mut writer = hound::WavWriter::new(&mut out, spec).unwrap();
+    for i in 0..2 * 48_000 {
+        let sample = ((i as f32 * 440.0 / 48_000.0 * std::f32::consts::TAU).sin() * 8000.0) as i16;
+        writer.write_sample(sample).unwrap();
+        writer.write_sample(sample).unwrap();
+    }
+    writer.finalize().unwrap();
+    out.into_inner()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uploads_are_off_unless_enabled() {
+    let engine = Engine::start(None).await;
+    let refused = reqwest::Client::new()
+        .post(format!("http://{}/v1/uploads", engine.addr))
+        .body(wav())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 404);
+    let error: Value = serde_json::from_slice(&refused.bytes().await.unwrap()).unwrap();
+    assert_eq!(error["code"], "not_found");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("ENTROXIMER_UPLOADS"),
+        "{error}"
+    );
+
+    let mut client = engine.connect(None, None).await.unwrap();
+    client.recv().await;
+    let (_, info) = client.exchange("node.info", Value::Null).await;
+    assert!(info["result"]["uploads"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uploads_play_as_tracks_within_the_limits() {
+    // room for two uploads of the tone, and no more
+    let flags = [
+        "--uploads",
+        "--upload-max-mb",
+        "1",
+        "--upload-total-mb",
+        "1",
+    ];
+    let engine = Engine::start_with(Some(PASSWORD), &flags).await;
+    let mut client = engine.connect(Some(PASSWORD), None).await.unwrap();
+    client.recv().await;
+    let http = reqwest::Client::new();
+    let url = format!("http://{}/v1/uploads", engine.addr);
+    let upload = |body: Vec<u8>, title: Option<&str>| {
+        let mut request = http.post(&url).header("Authorization", PASSWORD).body(body);
+        if let Some(title) = title {
+            request = request.query(&[("title", title)]);
+        }
+        async move {
+            let response = request.send().await.unwrap();
+            let status = response.status().as_u16();
+            (
+                status,
+                serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(),
+            )
+        }
+    };
+
+    let (_, info) = client.exchange("node.info", Value::Null).await;
+    assert_eq!(
+        info["result"]["uploads"],
+        json!({ "maxBytes": 1 << 20, "keep": 3_600_000 })
+    );
+    let unauthorized = http.post(&url).body(wav()).send().await.unwrap();
+    assert_eq!(unauthorized.status(), 401);
+    // refused before the body is read, so only the headers are sent
+    let mut stream = TcpStream::connect(engine.addr).await.unwrap();
+    let headers = format!(
+        "POST /v1/uploads HTTP/1.1\r\nHost: engine\r\nAuthorization: {PASSWORD}\r\nContent-Length: {}\r\n\r\n",
+        (1 << 20) + 1
+    );
+    stream.write_all(headers.as_bytes()).await.unwrap();
+    let mut response = vec![0; 1024];
+    let read = stream.read(&mut response).await.unwrap();
+    let response = String::from_utf8_lossy(&response[..read]);
+    assert!(response.starts_with("HTTP/1.1 413"), "{response}");
+    assert!(response.contains("too_large"), "{response}");
+    let (status, error) = upload(b"only words".repeat(100), None).await;
+    assert_eq!(
+        (status, &error["code"]),
+        (415, &json!("no_audio")),
+        "{error}"
+    );
+
+    let (status, doorbell) = upload(wav(), Some("Doorbell")).await;
+    assert_eq!(status, 201, "{doorbell}");
+    let id = doorbell["id"].as_str().unwrap().to_owned();
+    let info = &doorbell["track"]["info"];
+    assert_eq!(
+        (&info["title"], &info["sourceName"], &info["length"]),
+        (&json!("Doorbell"), &json!("upload"), &json!(2000))
+    );
+    assert_eq!(info["uri"], format!("upload:{id}"));
+    assert!(doorbell["expiresAt"].as_u64().unwrap() > 3_600_000);
+
+    // it plays like any other track, and while it plays it is kept
+    let guild = |mut params: Value| {
+        params["guildId"] = json!("5");
+        params
+    };
+    client
+        .exchange(
+            "layer.update",
+            guild(json!({ "layer": "sfx", "mode": "mix" })),
+        )
+        .await;
+    let (events, response) = client
+        .exchange(
+            "clip.play",
+            guild(json!({ "layer": "sfx", "track": { "encoded": doorbell["track"]["encoded"] }, "loop": true })),
+        )
+        .await;
+    assert_eq!(kinds(&events), ["clipStart"], "{response}");
+    let (_, second) = upload(wav(), None).await;
+    let (_, third) = upload(wav(), None).await;
+    assert_eq!(third["track"]["info"]["title"], "Uploaded audio");
+    let load = |query: String| json!({ "query": query });
+    let (_, evicted) = client
+        .exchange(
+            "tracks.load",
+            load(format!("upload:{}", second["id"].as_str().unwrap())),
+        )
+        .await;
+    assert_eq!(
+        evicted["error"]["code"], "unavailable",
+        "the unused upload made room, not the playing one: {evicted}"
+    );
+    let (_, loaded) = client
+        .exchange("tracks.load", load(format!("upload:{id}")))
+        .await;
+    assert_eq!(loaded["result"]["track"]["info"]["title"], "Doorbell");
+
+    // with every upload playing, there is no room
+    let (events, _) = client
+        .exchange(
+            "clip.play",
+            guild(json!({ "layer": "sfx", "track": { "encoded": third["track"]["encoded"] }, "loop": true })),
+        )
+        .await;
+    assert_eq!(kinds(&events), ["clipStart"]);
+    let (status, error) = upload(wav(), None).await;
+    assert_eq!((status, &error["code"]), (507, &json!("storage_full")));
+
+    // deleting stops it being playable
+    let delete = |id: &str| {
+        http.delete(format!("{url}/{id}"))
+            .header("Authorization", PASSWORD)
+            .send()
+    };
+    assert_eq!(delete(&id).await.unwrap().status(), 204);
+    assert_eq!(delete(&id).await.unwrap().status(), 404);
+    let (_, gone) = client
+        .exchange("tracks.load", load(format!("upload:{id}")))
+        .await;
+    assert_eq!(gone["error"]["code"], "unavailable", "{gone}");
+    let (_, gone) = client
+        .exchange(
+            "clip.play",
+            guild(json!({ "layer": "sfx", "track": { "encoded": doorbell["track"]["encoded"] } })),
+        )
+        .await;
+    assert_eq!(gone["error"]["code"], "unavailable", "{gone}");
 }

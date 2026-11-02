@@ -1,10 +1,11 @@
 //! The engine's HTTP surface: health, info, the client WebSocket, artwork the engine serves
-//! itself, and YouTube session admin.
+//! itself, uploads, and YouTube session admin.
 //!
 //! When the engine has a password, everything but `/health` requires the `Authorization` header
 //! to carry it.
 
 pub mod protocol;
+mod uploads;
 mod ws;
 
 use std::sync::Arc;
@@ -15,7 +16,7 @@ use axum::extract::{FromRequestParts, Path, State};
 use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{delete, get, post};
 use entroximer_core::error::display_chain;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -36,6 +37,8 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/v1/info", get(info))
         .route("/v1/ws", get(ws::upgrade))
         .route(&format!("{COVER_PATH}{{key}}"), get(artwork))
+        .route("/v1/uploads", post(uploads::create))
+        .route("/v1/uploads/{id}", delete(uploads::delete))
         .route(
             "/v1/youtube/session",
             get(session_status)

@@ -3,4 +3,4 @@
 /**
  * Stable, machine-readable error kinds.
  */
-export type ErrorCode = "unauthorized" | "bad_request" | "not_found" | "no_results" | "no_audio" | "unavailable" | "age_restricted" | "members_only" | "private" | "bot_check" | "sign_in_required" | "rate_limited" | "load_failed" | "playback_failed" | "internal";
+export type ErrorCode = "unauthorized" | "bad_request" | "not_found" | "no_results" | "no_audio" | "unavailable" | "age_restricted" | "members_only" | "private" | "bot_check" | "sign_in_required" | "rate_limited" | "load_failed" | "playback_failed" | "too_large" | "storage_full" | "internal";

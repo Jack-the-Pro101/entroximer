@@ -5,6 +5,7 @@ export type {
   GatewayDispatch,
   GatewayVoiceStateUpdate,
   SearchOptions,
+  UploadOptions,
 } from "./manager";
 export { Player } from "./player";
 export type { JoinOptions, PlayOptions, VoiceClosedInfo } from "./player";
@@ -71,5 +72,7 @@ export type * from "./generated/Track";
 export type * from "./generated/TrackEndReason";
 export type * from "./generated/TrackInfo";
 export type * from "./generated/TrackSelector";
+export type * from "./generated/Upload";
+export type * from "./generated/UploadsInfo";
 export type * from "./generated/VoiceState";
 export type * from "./generated/serde_json/JsonValue";

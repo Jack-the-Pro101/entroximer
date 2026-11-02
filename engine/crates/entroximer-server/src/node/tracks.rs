@@ -16,6 +16,7 @@ use crate::api::protocol::{ApiError, ErrorCode, LoadResult, SearchResult, Track}
 use crate::config::MediaContext;
 use crate::expiring::Expiring;
 use crate::sources::spotify::SpotifyError;
+use crate::sources::upload;
 use crate::sources::ytdlp::{Failure, Restriction};
 use crate::sources::{FoundTrack, LoadOutcome, ResolveError, ResolvedTrack, TrackInfo, TrackRef};
 
@@ -139,8 +140,7 @@ impl TrackCache {
         Ok(match outcome {
             LoadOutcome::Track(resolved) => {
                 let loaded = Loaded::from(resolved);
-                self.resolved
-                    .insert(loaded.track.encoded.clone(), loaded.clone());
+                self.keep(&loaded.track.encoded, &loaded);
                 LoadResult::Track {
                     track: loaded.track,
                 }
@@ -199,9 +199,8 @@ impl TrackCache {
                 .await
                 .map_err(|e| load_error(&e))?,
         );
-        self.resolved.insert(encoded.to_owned(), loaded.clone());
-        self.resolved
-            .insert(loaded.track.encoded.clone(), loaded.clone());
+        self.keep(encoded, &loaded);
+        self.keep(&loaded.track.encoded, &loaded);
         Ok(loaded)
     }
 
@@ -214,9 +213,16 @@ impl TrackCache {
                 .await
                 .map_err(|e| load_error(&e))?,
         );
-        self.resolved
-            .insert(loaded.track.encoded.clone(), loaded.clone());
+        self.keep(&loaded.track.encoded, &loaded);
         Ok(loaded)
+    }
+
+    /// Keeps a resolved track for playing soon, unless it is an upload: a kept upload would keep
+    /// its file from expiring or being deleted, and finding one again costs nothing.
+    fn keep(&self, encoded: &str, loaded: &Loaded) {
+        if loaded.track.info.source_name != upload::SOURCE {
+            self.resolved.insert(encoded.to_owned(), loaded.clone());
+        }
     }
 }
 
@@ -250,7 +256,9 @@ pub fn load_error(e: &ResolveError) -> ApiError {
         | ResolveError::UnknownSearch(_)
         | ResolveError::UnknownSource(_)
         | ResolveError::PrivateAddress(_) => ErrorCode::BadRequest,
-        ResolveError::HttpStatus { .. } | ResolveError::Lookup { .. } => ErrorCode::Unavailable,
+        ResolveError::HttpStatus { .. }
+        | ResolveError::Lookup { .. }
+        | ResolveError::UploadGone(_) => ErrorCode::Unavailable,
         ResolveError::YtDlpUnavailable(_)
         | ResolveError::Spawn(..)
         | ResolveError::Json(..)

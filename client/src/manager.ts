@@ -1,7 +1,7 @@
 import { Connection, PROTOCOL_VERSION } from "./connection";
 import type { ConnectionOptions, DisconnectInfo, ReadyInfo } from "./connection";
 import { Emitter } from "./emitter";
-import { EntroximerError, toEntroximerError } from "./errors";
+import { EntroximerError, fromResponse, toEntroximerError } from "./errors";
 import type { Event } from "./generated/Event";
 import type { GraphSpec } from "./generated/GraphSpec";
 import type { LoadResult } from "./generated/LoadResult";
@@ -10,6 +10,7 @@ import type { SearchResult } from "./generated/SearchResult";
 import type { SessionState } from "./generated/SessionState";
 import type { Stats } from "./generated/Stats";
 import type { Track } from "./generated/Track";
+import type { Upload } from "./generated/Upload";
 import { Player } from "./player";
 import type { JoinOptions, PlayerHost } from "./player";
 
@@ -47,6 +48,11 @@ export interface SearchOptions {
   prefix?: string;
   /** Up to 50; 10 if absent. */
   limit?: number;
+}
+
+export interface UploadOptions {
+  /** Its title; else the file's own, from its tags. */
+  title?: string;
 }
 
 export interface EntroximerOptions extends ConnectionOptions {
@@ -185,6 +191,48 @@ export class Entroximer extends Emitter<ManagerEvents> {
     }
   }
 
+  /**
+   * Uploads an audio file to play, if the engine's operator allows uploads (`info().uploads`), for
+   * sounds that have no URL: anything with one, such as a Discord attachment, plays with `load()`
+   * as it is. The returned track plays like any other until the upload expires, which it does
+   * once unused for `uploads.keep`; the engine also removes the uploads unused for longest when it
+   * needs room for new ones, but never one that is playing.
+   *
+   * Fails with `too_large` above `uploads.maxBytes` (before sending anything), `no_audio` for a
+   * file the engine cannot play, and `storage_full` while every upload the engine keeps is
+   * playing.
+   */
+  async upload(data: Blob | ArrayBuffer | Uint8Array<ArrayBuffer>, options: UploadOptions = {}): Promise<Upload> {
+    const { uploads } = await this.info();
+    if (uploads === null) {
+      throw new EntroximerError("not_found", "uploads are off on this engine");
+    }
+    const bytes = data instanceof Blob ? data.size : data.byteLength;
+    if (bytes > uploads.maxBytes) {
+      throw new EntroximerError(
+        "too_large",
+        `the file is ${bytes} bytes, more than the engine takes (${uploads.maxBytes})`,
+      );
+    }
+    const query = options.title === undefined ? "" : `?${new URLSearchParams({ title: options.title })}`;
+    const response = await this.#http(`/v1/uploads${query}`, { method: "POST", body: data });
+    if (!response.ok) {
+      throw await fromResponse(response);
+    }
+    return (await response.json()) as Upload;
+  }
+
+  /**
+   * Deletes an upload before it expires. If it is playing, it plays on, but cannot be played
+   * again.
+   */
+  async deleteUpload(id: string): Promise<void> {
+    const response = await this.#http(`/v1/uploads/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!response.ok) {
+      throw await fromResponse(response);
+    }
+  }
+
   info(): Promise<NodeInfo> {
     return this.connection.request("node.info");
   }
@@ -233,6 +281,18 @@ export class Entroximer extends Emitter<ManagerEvents> {
     } else if (dispatch.t === "VOICE_SERVER_UPDATE") {
       const d = dispatch.d as { guild_id: string; token: string; endpoint: string | null };
       this.#players.get(d.guild_id)?._handleVoiceServer(d.token, d.endpoint);
+    }
+  }
+
+  /** An HTTP request to the engine; a failure to get an answer is `connection_lost`. */
+  async #http(path: string, init: RequestInit): Promise<Response> {
+    try {
+      return await this.connection.fetch(path, init);
+    } catch (error) {
+      throw new EntroximerError(
+        "connection_lost",
+        `no answer from the engine: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 

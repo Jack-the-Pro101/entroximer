@@ -1,8 +1,8 @@
 //! Providers and the registry that routes user input to them.
 //!
 //! - A URL goes to the first provider that accepts it and does not decline it: the site
-//!   providers by host (and Spotify, which also takes `spotify:` URIs), then `http` for links to
-//!   media files, then yt-dlp's generic extractor.
+//!   providers by host (and Spotify, which also takes `spotify:` URIs), `upload:` URIs if uploads
+//!   are on, then `http` for links to media files, then yt-dlp's generic extractor.
 //! - `prefix:terms` with a known search prefix (`ytsearch:`, `ytmsearch:`, `scsearch:`,
 //!   `spsearch:`) searches with the provider that owns the prefix.
 //! - A path on the engine's host plays the file, if local files are allowed.
@@ -18,9 +18,11 @@ use ts_rs::TS;
 
 use super::direct::{HttpProvider, LocalProvider};
 use super::spotify::SpotifyProvider;
+use super::upload::UploadProvider;
 use super::ytdlp::YtDlpProvider;
 use super::{FoundTrack, LoadOutcome, ResolveError, ResolvedTrack};
 use crate::config::{MediaContext, SourcesConfig, SpotifyConfig};
+use crate::uploads::UploadStore;
 
 /// Results of searches made through `tracks.load`.
 pub const DEFAULT_SEARCH_LIMIT: usize = 10;
@@ -94,7 +96,11 @@ pub struct Sources {
 }
 
 impl Sources {
-    pub fn new(config: &SourcesConfig, spotify: &SpotifyConfig) -> Self {
+    pub fn new(
+        config: &SourcesConfig,
+        spotify: &SpotifyConfig,
+        uploads: Option<Arc<UploadStore>>,
+    ) -> Self {
         let mut providers: Vec<Arc<dyn Provider>> = YtDlpProvider::sites()
             .into_iter()
             .map(|site| Arc::new(site) as Arc<dyn Provider>)
@@ -102,6 +108,9 @@ impl Sources {
         let spotify = SpotifyProvider::new(spotify).map(Arc::new);
         if let Some(spotify) = &spotify {
             providers.push(Arc::clone(spotify) as Arc<dyn Provider>);
+        }
+        if let Some(uploads) = uploads {
+            providers.push(Arc::new(UploadProvider::new(uploads)));
         }
         providers.push(Arc::new(HttpProvider::new()));
         providers.push(Arc::new(YtDlpProvider::generic()));

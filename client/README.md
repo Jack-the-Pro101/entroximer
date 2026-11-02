@@ -132,6 +132,22 @@ starts. `play` sends a `clipId` it makes up if none is given, so listeners can t
 events apart even when they come before `play` resolves: a clip that starts right away does so
 before.
 
+Sounds with a URL, such as Discord attachments, play from it. For ones without, an engine whose
+operator allows it (`info().uploads`, `null` if not) takes uploads:
+
+```ts
+const upload = await manager.upload(Bun.file("doorbell.ogg"), { title: "Doorbell" });
+await player.layer("sfx").play(upload.track);
+// later, or let it expire: it is kept for `info().uploads.keep` after it was last used
+await manager.deleteUpload(upload.id);
+```
+
+`upload` takes a `Blob`, `ArrayBuffer` or `Uint8Array` and fails with `too_large` above
+`uploads.maxBytes` (before sending anything), `no_audio` for a file the engine cannot play, and
+`storage_full` while every upload the engine keeps is playing; otherwise the engine makes room by
+removing the uploads unused for longest. Its `track` plays like any other, as a clip or in the
+queue, until the upload is deleted or expires; then loading it fails with `unavailable`.
+
 ## Queues
 
 Each player has a `queue`, which the engine plays by itself: it loads the next track well

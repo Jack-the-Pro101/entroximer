@@ -8,6 +8,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use clap::builder::BoolishValueParser;
 use clap::{Args, ValueEnum};
 use entroximer_core::player::PlayerConfig;
@@ -19,6 +20,7 @@ use crate::managed_ytdlp::{ManagedYtDlp, YtDlpBinary};
 use crate::sources::Sources;
 use crate::sources::artwork::Artwork;
 use crate::sources::spotify::DEFAULT_MIRROR_SEARCHES;
+use crate::uploads::{UploadLimits, UploadStore};
 use crate::youtube::{AuthPolicy, YouTube};
 
 const MIB: u64 = 1 << 20;
@@ -36,6 +38,9 @@ pub struct MediaConfig {
 
     #[command(flatten)]
     pub spotify: SpotifyConfig,
+
+    #[command(flatten)]
+    pub uploads: UploadsConfig,
 
     /// Persistent state such as the managed yt-dlp. Defaults to `$XDG_DATA_HOME/entroximer`.
     #[arg(long, env = "ENTROXIMER_DATA_DIR")]
@@ -191,6 +196,50 @@ pub struct SpotifyConfig {
 }
 
 #[derive(Clone, Debug, Args)]
+pub struct UploadsConfig {
+    /// Let clients upload audio files to play (`POST /v1/uploads`), e.g. sounds that have no
+    /// URL. Anyone who may use the engine can then store files on it, within the limits below.
+    #[arg(long = "uploads", env = "ENTROXIMER_UPLOADS", value_parser = BoolishValueParser::new())]
+    pub enabled: bool,
+
+    /// The largest upload, in MiB.
+    #[arg(
+        long = "upload-max-mb",
+        env = "ENTROXIMER_UPLOAD_MAX_MB",
+        default_value_t = 50
+    )]
+    pub max_mb: u64,
+
+    /// Disk all uploads may take together, in MiB. When a new one needs room, expired uploads
+    /// go first, then those unused for longest; ones playing are kept.
+    #[arg(
+        long = "upload-total-mb",
+        env = "ENTROXIMER_UPLOAD_TOTAL_MB",
+        default_value_t = 512
+    )]
+    pub total_mb: u64,
+
+    /// Minutes an upload is kept after it was uploaded or last used.
+    #[arg(
+        long = "upload-keep-mins",
+        env = "ENTROXIMER_UPLOAD_KEEP_MINS",
+        default_value_t = 60
+    )]
+    pub keep_mins: u64,
+}
+
+impl UploadsConfig {
+    pub fn limits(&self) -> UploadLimits {
+        let total_bytes = self.total_mb * MIB;
+        UploadLimits {
+            max_bytes: (self.max_mb * MIB).min(total_bytes),
+            total_bytes,
+            keep: Duration::from_secs(self.keep_mins * 60),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Args)]
 pub struct YouTubeConfig {
     /// When the YouTube session is sent: only for videos that need it (age-restricted, bot
     /// checks, members-only), which keeps the account out of most traffic, always, or never.
@@ -263,6 +312,8 @@ pub struct MediaContext {
     pub sources: Sources,
     /// Artwork the engine finds itself: pages' preview pictures and files' embedded covers.
     pub artwork: Artwork,
+    /// Files clients uploaded, if uploads are on.
+    pub uploads: Option<Arc<UploadStore>>,
     cache: CacheDir,
 }
 
@@ -292,7 +343,15 @@ impl MediaContext {
             config.youtube.auth,
             config.youtube.check_video.clone(),
         );
-        let sources = Sources::new(&config.sources, &config.spotify);
+        let uploads = if config.uploads.enabled {
+            let dir = cache.path().join("uploads");
+            let store = UploadStore::new(dir.clone(), config.uploads.limits())
+                .with_context(|| format!("cannot create {}", dir.display()))?;
+            Some(Arc::new(store))
+        } else {
+            None
+        };
+        let sources = Sources::new(&config.sources, &config.spotify, uploads.clone());
         Ok(Self {
             config,
             ytdlp,
@@ -300,6 +359,7 @@ impl MediaContext {
             youtube,
             sources,
             artwork: Artwork::default(),
+            uploads,
             cache,
         })
     }

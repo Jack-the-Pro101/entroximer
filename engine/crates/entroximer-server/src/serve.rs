@@ -78,6 +78,22 @@ pub async fn run(args: ServeArgs, ctx: Arc<MediaContext>) -> anyhow::Result<()> 
         let managed = Arc::clone(managed);
         tokio::spawn(async move { managed.maintain(interval).await });
     }
+    if let Some(uploads) = &ctx.uploads {
+        let limits = uploads.limits();
+        tracing::info!(
+            max_mb = limits.max_bytes >> 20,
+            total_mb = limits.total_bytes >> 20,
+            keep_mins = limits.keep.as_secs() / 60,
+            "uploads are on"
+        );
+        if password.is_none() && !addr.ip().is_loopback() {
+            tracing::warn!(
+                %addr,
+                "uploads are on without a password: anyone who can reach this address can store files on the engine"
+            );
+        }
+        tokio::spawn(Arc::clone(uploads).maintain());
+    }
     start_youtube_session(&ctx);
     tokio::spawn({
         let ctx = Arc::clone(&ctx);

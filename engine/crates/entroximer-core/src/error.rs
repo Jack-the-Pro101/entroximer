@@ -8,6 +8,8 @@ use symphonia::core::audio::Channels;
 use symphonia::core::codecs::audio::{AudioCodecId, AudioCodecParameters};
 use symphonia::core::errors::Error as SymphoniaError;
 
+use crate::decode::DecodeError;
+
 /// Why a producer failed to deliver its media.
 #[derive(Debug, thiserror::Error)]
 pub enum MediaError {
@@ -24,6 +26,8 @@ pub enum MediaError {
     CodecMismatch(#[from] CodecMismatch),
     #[error("failed to read media")]
     Demux(#[source] SymphoniaError),
+    #[error("cannot decode the audio")]
+    Decode(#[source] DecodeError),
     #[error("demuxer panicked")]
     Panicked,
 }
