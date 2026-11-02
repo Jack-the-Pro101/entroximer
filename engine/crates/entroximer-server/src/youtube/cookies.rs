@@ -129,7 +129,7 @@ impl CookieJar {
     }
 
     /// What changed from `base` to `self`.
-    pub fn changes_since(&self, base: &CookieJar) -> Vec<Change> {
+    pub fn changes_since(&self, base: &Self) -> Vec<Change> {
         let mut changes: Vec<Change> = self
             .cookies
             .iter()
@@ -290,7 +290,7 @@ pub(crate) mod tests {
         assert!(jar.has_youtube_login());
         assert_eq!(jar.session_expiry(), Some(1_820_000_000));
 
-        let mut signed_out = jar.clone();
+        let mut signed_out = jar;
         signed_out.apply(&[Change::Remove {
             domain: ".youtube.com".into(),
             path: "/".into(),
@@ -316,7 +316,7 @@ pub(crate) mod tests {
         assert_eq!(changes.len(), 2);
 
         // the canonical jar may have changed meanwhile; only the rotation is applied
-        let mut canonical = base.clone();
+        let mut canonical = base;
         canonical.cookies[4].value = "changed elsewhere".into();
         canonical.apply(&changes);
         assert_eq!(canonical.cookies[2].value, "rotated");

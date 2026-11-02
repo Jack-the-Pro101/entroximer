@@ -61,7 +61,7 @@ impl FromRequestParts<Arc<Node>> for Authorized {
         let given = parts
             .headers
             .get(header::AUTHORIZATION)
-            .map(|v| v.as_bytes())
+            .map(axum::http::HeaderValue::as_bytes)
             .unwrap_or_default();
         if constant_time_eq(given, password.expose().as_bytes()) {
             Ok(Self)

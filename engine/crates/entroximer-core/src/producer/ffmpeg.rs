@@ -6,6 +6,7 @@
 //! never re-encoded. Live inputs (radio streams, live HLS) cannot seek and always start at the
 //! live edge.
 
+use std::fmt::Write as _;
 use std::io;
 
 use futures_util::future::BoxFuture;
@@ -39,11 +40,13 @@ impl FfmpegProducer {
         let mut spec =
             ProcessSpec::new(&self.ffmpeg).args(["-nostdin", "-hide_banner", "-loglevel", "error"]);
         if !self.headers.is_empty() {
-            let headers: String = self
+            let headers = self
                 .headers
                 .iter()
-                .map(|(k, v)| format!("{k}: {v}\r\n"))
-                .collect();
+                .fold(String::new(), |mut headers, (k, v)| {
+                    let _ = write!(headers, "{k}: {v}\r\n");
+                    headers
+                });
             spec = spec.arg("-headers").arg(headers);
         }
         if let Some(start) = start.filter(|&t| t > 0 && !self.live) {

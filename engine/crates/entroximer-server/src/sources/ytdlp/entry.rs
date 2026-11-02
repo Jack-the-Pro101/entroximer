@@ -65,7 +65,7 @@ impl Entry {
 
     /// The page people would open; flat SoundCloud entries' `url` is an API link.
     pub(crate) fn uri(&self) -> Option<&str> {
-        nonempty(&self.webpage_url).or(nonempty(&self.url))
+        nonempty(&self.webpage_url).or_else(|| nonempty(&self.url))
     }
 
     pub(crate) fn author(&self) -> Option<String> {
@@ -107,12 +107,12 @@ impl Entry {
         let mut info = TrackInfo {
             identifier: self.id.clone().unwrap_or_else(|| uri.clone()),
             title: nonempty(&self.track)
-                .or(nonempty(&self.title))
+                .or_else(|| nonempty(&self.title))
                 .unwrap_or("Unknown title")
                 .to_owned(),
             author: self.author(),
             author_url: nonempty(&self.uploader_url)
-                .or(nonempty(&self.channel_url))
+                .or_else(|| nonempty(&self.channel_url))
                 .map(str::to_owned),
             album: nonempty(&self.album).map(str::to_owned),
             length: self

@@ -270,7 +270,9 @@ impl Node {
     }
 
     fn sessions(&self) -> MutexGuard<'_, HashMap<String, Arc<Session>>> {
-        self.sessions.lock().unwrap_or_else(|e| e.into_inner())
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn broadcast(&self, event: &Event) {

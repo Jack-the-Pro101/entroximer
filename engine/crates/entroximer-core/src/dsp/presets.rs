@@ -30,7 +30,7 @@ pub struct PresetDescriptor {
 
 /// Which preset to build, and how.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PresetSelection {
     pub name: String,
     /// Parameters by name; absent ones take their defaults.

@@ -25,6 +25,8 @@ use entroximer_core::error::MediaError;
 use futures_util::{Stream, StreamExt};
 use tokio::io::AsyncWriteExt;
 
+/// An upload that sends nothing for this long is given up.
+const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often expired uploads are removed when no new upload needs room.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -77,11 +79,17 @@ impl UploadFile {
     }
 
     fn last_used(&self) -> Instant {
-        *self.last_used.lock().unwrap_or_else(|p| p.into_inner())
+        *self
+            .last_used
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn touch(&self) {
-        *self.last_used.lock().unwrap_or_else(|p| p.into_inner()) = Instant::now();
+        *self
+            .last_used
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Instant::now();
     }
 
     fn is_expired(&self, now: Instant, keep: Duration) -> bool {
@@ -182,8 +190,20 @@ impl UploadStore {
             .map_err(UploadError::Io)?;
         let mut body = std::pin::pin!(body);
         let mut written = 0;
-        while let Some(chunk) = body.next().await {
-            let chunk = chunk.map_err(|e| UploadError::Body(io::Error::other(e)))?;
+        loop {
+            // a client that stops sending would otherwise hold its room for as long as the
+            // connection lasts
+            let next = tokio::time::timeout(BODY_IDLE_TIMEOUT, body.next()).await;
+            let chunk = match next {
+                Ok(Some(chunk)) => chunk.map_err(|e| UploadError::Body(io::Error::other(e)))?,
+                Ok(None) => break,
+                Err(_) => {
+                    return Err(UploadError::Body(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("nothing arrived for {} s", BODY_IDLE_TIMEOUT.as_secs()),
+                    )));
+                }
+            };
             written += chunk.len() as u64;
             if written > max_bytes {
                 return Err(too_large);
@@ -335,7 +355,9 @@ impl UploadStore {
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|p| p.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -490,6 +512,21 @@ mod tests {
         assert_eq!(files(&store), [file.id.as_str()], "no partial file is left");
         let state = store.lock();
         assert_eq!((state.stored, state.reserved), (WAV_BYTES, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_upload_that_stops_sending_is_given_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path(), 4 << 20, Duration::from_secs(60));
+        let first = futures_util::stream::iter([Ok::<_, io::Error>(Bytes::from(wav()))]);
+        let stalled = first.chain(futures_util::stream::pending());
+        let refused = store.receive(stalled, None, None).await;
+        assert!(
+            matches!(&refused, Err(UploadError::Body(e)) if e.kind() == io::ErrorKind::TimedOut),
+            "{refused:?}"
+        );
+        assert!(files(&store).is_empty());
+        assert_eq!(store.lock().reserved, 0, "its room is given back");
     }
 
     #[tokio::test]

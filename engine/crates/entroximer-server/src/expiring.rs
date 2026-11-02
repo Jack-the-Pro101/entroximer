@@ -56,7 +56,9 @@ impl<K: Eq + Hash + Clone, V: Clone> Expiring<K, V> {
     }
 
     fn entries(&self) -> MutexGuard<'_, HashMap<K, (V, Instant)>> {
-        self.entries.lock().unwrap_or_else(|e| e.into_inner())
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 

@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
+use tokio::sync::oneshot::error::TryRecvError;
 
 use super::Node;
 use super::player::{ClipTurn, GuildPlayer};
@@ -183,6 +184,9 @@ impl Session {
     /// join their layer in the order they were sent, though they load at once.
     pub fn clip_turn(&self, guild_id: Snowflake, layer: &str) -> ClipTurn {
         let mut turns = lock(&self.clip_turns);
+        // only turns still to finish matter, so that layers named once, or in refused
+        // requests, are not kept for the session's lifetime
+        turns.retain(|_, done| matches!(done.try_recv(), Err(TryRecvError::Empty)));
         let earlier = turns.remove(&(guild_id, layer.to_owned()));
         let (turn, done) = ClipTurn::after(earlier);
         turns.insert((guild_id, layer.to_owned()), done);
@@ -237,7 +241,9 @@ impl std::fmt::Debug for Session {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|e| e.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

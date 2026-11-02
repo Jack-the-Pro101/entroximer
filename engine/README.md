@@ -95,8 +95,8 @@ receives the events it could not get meanwhile (periodic ones excepted) and each
 state; otherwise the players are destroyed. Playback also holds its position while the voice
 connection to Discord reconnects.
 
-The engine bounds what one client can make it hold: messages up to 4 MiB, queues up to 10 000
-items, graphs up to 16 nodes and 64 edges, 4 layers besides the music per player with 8 clips
+The engine bounds what one client can make it hold: messages up to 4 MiB, 256 requests running
+at once per connection (it reads further ones as those finish), queues up to 10 000 items, graphs up to 16 nodes and 64 edges, 4 layers besides the music per player with 8 clips
 playing at once and 32 waiting on each, fades up to 10 s, and resume timeouts up to a day. A
 request that asks for more is refused with `bad_request`.
 

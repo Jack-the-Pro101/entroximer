@@ -105,8 +105,8 @@ impl Decoder {
                     &pkt.data,
                 );
                 // symphonia's decoders apply the trims themselves
-                packet.trim_start = SymphDuration::new(pkt.trim_start as u64);
-                packet.trim_end = SymphDuration::new(pkt.trim_end as u64);
+                packet.trim_start = SymphDuration::new(u64::from(pkt.trim_start));
+                packet.trim_end = SymphDuration::new(u64::from(pkt.trim_end));
                 let buf = dec.decode_ref(&packet).map_err(DecodeError::Symphonia)?;
                 let channels = buf.spec().channels().count().max(1);
                 let n = buf.samples_interleaved();

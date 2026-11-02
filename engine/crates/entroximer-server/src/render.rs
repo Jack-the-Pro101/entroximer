@@ -231,7 +231,7 @@ fn render_to_wav(
 }
 
 /// A point in the media, written as seconds (`90`, `90.5`) or `[hh:]mm:ss[.fff]`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Timestamp(pub Duration);
 
 #[derive(Debug, thiserror::Error)]
@@ -258,7 +258,7 @@ impl FromStr for Timestamp {
 }
 
 /// `AT=TO`: once `AT` of audio has been written, seek to `TO`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SeekAt {
     at: Duration,
     to: Duration,

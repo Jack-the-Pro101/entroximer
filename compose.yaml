@@ -22,6 +22,9 @@ services:
       # ENTROXIMER_SPOTIFY_CLIENT_SECRET: ${ENTROXIMER_SPOTIFY_CLIENT_SECRET:-}
       # YouTube session for age-restricted videos; or run `entroximer youtube cookies import -`
       # ENTROXIMER_YOUTUBE_COOKIES_FILE: /run/secrets/youtube-cookies
+      # A bot's own sounds, played by their path: mount the same directory at the same path into
+      # the bot's container too (see the volume below)
+      # ENTROXIMER_LOCAL_FILES_DIR: /sounds
     # secrets:
     #   - youtube-cookies
     volumes:
@@ -31,6 +34,7 @@ services:
       # engine's storage; to place it elsewhere use a bind mount, e.g. `/mnt/ssd/cache:/var/cache/entroximer:Z`
       # (`:Z` relabels it for SELinux hosts such as Fedora).
       - engine-cache:/var/cache/entroximer
+      # - ./sounds:/sounds:ro,Z
     healthcheck:
       test: ["CMD", "entroximer", "healthcheck"]
       interval: 30s

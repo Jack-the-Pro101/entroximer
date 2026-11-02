@@ -195,7 +195,7 @@ impl NodeRegistry {
     }
 
     pub fn get(&self, kind: &str) -> Option<&dyn NodeFactory> {
-        self.factories.get(kind).map(|f| f.as_ref())
+        self.factories.get(kind).map(std::convert::AsRef::as_ref)
     }
 
     /// Every registered node type, ordered by name.

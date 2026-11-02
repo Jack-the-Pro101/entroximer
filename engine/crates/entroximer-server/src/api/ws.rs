@@ -17,7 +17,7 @@ use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use super::protocol::{
@@ -41,6 +41,10 @@ const PING_INTERVAL: Duration = Duration::from_secs(20);
 const SILENCE_LIMIT: Duration = Duration::from_secs(60);
 /// How long answers to requests still running may take to go out once the client is gone.
 const WRITER_GRACE: Duration = Duration::from_secs(10);
+/// Requests of one connection that run at once. Beyond this the connection's next requests are
+/// read as earlier ones finish, so that a client firing off thousands has the engine hold no
+/// more than this many.
+const MAX_IN_FLIGHT: usize = 256;
 
 pub(super) async fn upgrade(
     _: Authorized,
@@ -81,6 +85,7 @@ async fn connection(
     let connection = session.attach(out.clone(), resumed);
     let (sink, mut incoming) = socket.split();
     let writer = tokio::spawn(write(Arc::clone(&node), sink, outgoing));
+    let in_flight = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
 
     loop {
         let next = tokio::select! {
@@ -105,15 +110,25 @@ async fn connection(
                     Ok(Call::PlayClip(clip)) => Some(session.clip_turn(clip.guild_id, &clip.layer)),
                     _ => None,
                 };
+                let permit = tokio::select! {
+                    permit = Arc::clone(&in_flight).acquire_owned() => {
+                        permit.expect("the semaphore is never closed")
+                    }
+                    () = node.closed() => break,
+                };
                 // each request runs on its own, so a slow load never holds up a pause
-                tokio::spawn(handle(
+                let handling = handle(
                     Arc::clone(&node),
                     Arc::clone(&session),
                     out.clone(),
                     id,
                     call,
                     turn,
-                ));
+                );
+                tokio::spawn(async move {
+                    handling.await;
+                    drop(permit);
+                });
             }
             Message::Binary(_) => {
                 tracing::debug!(session = %session.id, "ignoring a binary message");

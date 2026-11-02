@@ -52,7 +52,7 @@ fn parse_step(registry: &NodeRegistry, index: usize, step: &str) -> Result<NodeS
         return Err(syntax());
     }
     let values: Vec<f32> = args
-        .map(|args| args.trim())
+        .map(str::trim)
         .filter(|args| !args.is_empty())
         .map(|args| {
             args.split(',')

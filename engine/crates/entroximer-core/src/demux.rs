@@ -104,7 +104,9 @@ async fn run(
         let source_failure = Arc::clone(&source_failure);
         move |e| {
             let forwarded = io::Error::new(e.kind(), e.to_string());
-            *source_failure.lock().unwrap_or_else(|p| p.into_inner()) = Some(e);
+            *source_failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(e);
             forwarded
         }
     });
@@ -126,7 +128,7 @@ async fn run(
         Finish::Failed(demux_error) => {
             let source_error = source_failure
                 .lock()
-                .unwrap_or_else(|p| p.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
             Finish::Failed(source_error.map_or(demux_error, MediaError::Source))
         }
@@ -263,8 +265,8 @@ impl AudioDemuxer {
 
     fn to_ticks(&self, ts: i64) -> Ticks {
         let base = self.time_base;
-        (ts as i128 * base.numer.get() as i128 * TICKS_PER_SECOND as i128
-            / base.denom.get() as i128) as Ticks
+        (i128::from(ts) * i128::from(base.numer.get()) * i128::from(TICKS_PER_SECOND)
+            / i128::from(base.denom.get())) as Ticks
     }
 
     /// The audio track's next packet, or `None` at the end of the media.

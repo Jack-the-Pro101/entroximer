@@ -66,7 +66,7 @@ pub(super) enum Signal {
 pub struct GuildPlayer {
     guild_id: Snowflake,
     user_id: Snowflake,
-    me: Weak<GuildPlayer>,
+    me: Weak<Self>,
     node: Weak<Node>,
     session: Weak<Session>,
     mixer: Arc<Mutex<Mixer>>,
@@ -421,7 +421,7 @@ impl GuildPlayer {
     pub fn cache_stats(&self) -> TimelineStats {
         self.mixer()
             .players()
-            .map(|player| player.cache_stats())
+            .map(entroximer_core::player::Player::cache_stats)
             .fold(TimelineStats::default(), |sum, s| TimelineStats {
                 ranges: sum.ranges + s.ranges,
                 packets: sum.packets + s.packets,
@@ -551,7 +551,7 @@ impl GuildPlayer {
         let mut output_playing = self
             .output_playing
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let playing = self.is_playing();
         if *output_playing == Some(playing) {
             return;
@@ -582,11 +582,15 @@ impl GuildPlayer {
     }
 
     fn mixer(&self) -> MutexGuard<'_, Mixer> {
-        self.mixer.lock().unwrap_or_else(|e| e.into_inner())
+        self.mixer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 

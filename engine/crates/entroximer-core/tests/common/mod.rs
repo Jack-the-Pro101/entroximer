@@ -84,7 +84,9 @@ pub fn tone(hz: u32, amplitude: f64, seconds: u32) -> PathBuf {
     static MAKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let path = dir.join(format!("stereo-tone-{hz}-{amplitude}-{seconds}.webm"));
-    let _one_at_a_time = MAKING.lock().unwrap_or_else(|e| e.into_inner());
+    let _one_at_a_time = MAKING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if !path.exists() {
         // under another name first, so that no test reads it half written
         let partial = dir.join(format!(

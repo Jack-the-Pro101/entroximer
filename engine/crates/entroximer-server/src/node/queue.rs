@@ -12,7 +12,7 @@ use ts_rs::TS;
 use crate::api::protocol::{Millis, Track};
 
 /// A track in the queue, or playing. Its id stays the same while it moves around.
-#[derive(Clone, Debug, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct QueueItem {

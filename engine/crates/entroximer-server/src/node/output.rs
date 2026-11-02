@@ -22,6 +22,7 @@ pub(super) struct MixerSource {
     mixer: Arc<Mutex<Mixer>>,
     signals: UnboundedSender<Signal>,
     samples: Vec<f32>,
+    /// `samples` as bytes, of which the first `read` were read.
     bytes: Vec<u8>,
     read: usize,
     /// Renders that panicked; the first is logged.
@@ -34,8 +35,9 @@ impl MixerSource {
             mixer,
             signals,
             samples: vec![0.0; FRAMES_PER_FILL * CHANNELS],
-            bytes: Vec::with_capacity(FRAMES_PER_FILL * CHANNELS * size_of::<f32>()),
-            read: 0,
+            bytes: vec![0; FRAMES_PER_FILL * CHANNELS * size_of::<f32>()],
+            // nothing to read until the first fill
+            read: FRAMES_PER_FILL * CHANNELS * size_of::<f32>(),
             panics: 0,
         }
     }
@@ -43,7 +45,10 @@ impl MixerSource {
     fn fill(&mut self) {
         // songbird mixes several guilds on one thread: a panic here must not take them all down
         let rendered = catch_unwind(AssertUnwindSafe(|| {
-            let mut mixer = self.mixer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut mixer = self
+                .mixer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             mixer.render(&mut self.samples);
             mixer.drain_events()
         }));
@@ -59,9 +64,10 @@ impl MixerSource {
             // the receiver only goes away with the player, which also stops this input
             let _ = self.signals.send(Signal::Deck(event));
         }
-        self.bytes.clear();
-        self.bytes
-            .extend(self.samples.iter().flat_map(|s| s.to_le_bytes()));
+        let (bytes, _) = self.bytes.as_chunks_mut();
+        for (bytes, sample) in bytes.iter_mut().zip(&self.samples) {
+            *bytes = sample.to_le_bytes();
+        }
         self.read = 0;
     }
 }

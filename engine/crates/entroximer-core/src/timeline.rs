@@ -82,7 +82,7 @@ const BLOCK_BYTES: usize = 64 << 10;
 /// What precedes each packet's payload in a spilled block: pts, duration, trims and length.
 const PACKET_HEADER: usize = 28;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Packet {
     pub pts: Ticks,
     pub dur: Ticks,
@@ -315,6 +315,17 @@ struct Inner {
     last_sweep: Ticks,
     media_end: Option<Ticks>,
     failure: Option<MediaError>,
+    /// Sealed blocks with room reserved on disk, to be written without the lock held.
+    unwritten: Vec<Unwritten>,
+}
+
+/// A sealed block on its way to disk. It stays in RAM until it is written and attached.
+struct Unwritten {
+    start: Ticks,
+    end: Ticks,
+    loc: DiskLoc,
+    file: Arc<File>,
+    data: Vec<u8>,
 }
 
 enum Located {
@@ -362,13 +373,16 @@ impl Timeline {
                 last_sweep: 0,
                 media_end: None,
                 failure: None,
+                unwritten: Vec::new(),
             }),
             changed: Condvar::new(),
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Registers a producer that will deliver packets starting at (or shortly before)
@@ -426,19 +440,24 @@ impl Timeline {
             g = self
                 .changed
                 .wait_timeout(g, Duration::from_millis(250))
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .0;
         }
         let result = g.insert(producer, pkt);
         g.enforce_caps();
+        let unwritten = std::mem::take(&mut g.unwritten);
         drop(g);
         self.changed.notify_all();
+        self.write(unwritten);
         result
     }
 
     pub fn finish(&self, producer: ProducerId, outcome: Finish) {
         let mut g = self.lock();
         let Some(cancelled) = g.producers.get(&producer).map(|p| p.cancelled) else {
+            let unwritten = std::mem::take(&mut g.unwritten);
+            drop(g);
+            self.write(unwritten);
             return;
         };
         // a cancelled producer's stream ends early; that is not the end of the media
@@ -470,8 +489,31 @@ impl Timeline {
             g.failure = Some(error);
         }
         g.enforce_caps();
+        // with what a cancel sealed: cancels come from wherever producers are dropped, which may
+        // be the audio thread, and this from the producer's own task
+        let unwritten = std::mem::take(&mut g.unwritten);
         drop(g);
         self.changed.notify_all();
+        self.write(unwritten);
+    }
+
+    /// Writes sealed blocks to the room reserved for them, without holding the lock: a write
+    /// can wait on the disk (e.g. while the kernel throttles dirty pages), and the lock is what
+    /// rendering takes. Each block is attached to its place on disk once written.
+    fn write(&self, unwritten: Vec<Unwritten>) {
+        for block in unwritten {
+            let written = block.file.write_all_at(&block.data, block.loc.offset);
+            let mut g = self.lock();
+            match written {
+                Ok(()) => g.attach(block),
+                Err(e) => {
+                    if !g.spill_failed {
+                        tracing::warn!("disabling disk spill: {e}");
+                    }
+                    g.spill_failed = true;
+                }
+            }
+        }
     }
 
     /// Stops accepting packets from `producer`; its range becomes `Truncated`.
@@ -760,7 +802,7 @@ impl Inner {
             .producers
             .get_mut(&producer)
             .expect("checked by caller");
-        p.first.get_or_insert((Instant::now(), pkt.pts));
+        p.first.get_or_insert_with(|| (Instant::now(), pkt.pts));
         p.frontier = p.frontier.max(pkt.end());
         let tol = tolerance(pkt.dur);
 
@@ -854,8 +896,9 @@ impl Inner {
         }
     }
 
-    /// Completes the open block at the end of range `idx`, if any: it is spilled, and keeps its
-    /// packets in RAM only inside the RAM window and the RAM cap.
+    /// Completes the open block at the end of range `idx`, if any. When spilling, room is
+    /// reserved for it on disk and it is queued for [`Timeline::write`]; it stays in RAM until
+    /// then.
     fn seal_tail(&mut self, idx: usize, producer: ProducerId) {
         let spill = self.spill_active();
         let Some(block) = self.ranges[idx].blocks.back_mut().filter(|b| !b.sealed) else {
@@ -866,35 +909,28 @@ impl Inner {
             return;
         }
         let (start, end) = (block.start, block.end);
-        let encoded = encode_block(block.mem.as_deref().expect("open blocks are held in RAM"));
-        let Some(loc) = self.write_disk(producer, &encoded, start, end) else {
-            return; // spilling failed, and the block stays in RAM
-        };
-        let keep =
-            self.in_memory_window(start, end) && self.memory_bytes <= self.cfg.memory_max_bytes;
-        let block = self.ranges[idx]
-            .blocks
-            .back_mut()
-            .expect("the block was just sealed");
-        block.disk = Some(loc);
-        if keep {
-            // one allocation for the whole block instead of one per packet
-            block.mem = Some(decode_block(Bytes::from(encoded)).expect("just encoded"));
-        } else {
-            block.mem = None;
-            self.memory_bytes -= block.bytes;
+        let data = encode_block(block.mem.as_deref().expect("open blocks are held in RAM"));
+        if let Some((loc, file)) = self.reserve_disk(producer, data.len() as u64, start, end) {
+            self.unwritten.push(Unwritten {
+                start,
+                end,
+                loc,
+                file,
+                data,
+            });
         }
+        // otherwise spilling failed, and the block stays in RAM
     }
 
-    fn write_disk(
+    /// Reserves `len` bytes in `producer`'s spill segment, starting a new one when it is full.
+    fn reserve_disk(
         &mut self,
         producer: ProducerId,
-        data: &[u8],
+        len: u64,
         start: Ticks,
         end: Ticks,
-    ) -> Option<DiskLoc> {
+    ) -> Option<(DiskLoc, Arc<File>)> {
         let spill = self.cfg.spill.as_ref().expect("spill is active");
-        let len = data.len() as u64;
         let current = self
             .producers
             .get(&producer)
@@ -903,6 +939,7 @@ impl Inner {
             .filter(|&i| self.segments[i].len + len <= spill.segment_bytes);
         let si = match current {
             Some(i) => i,
+            // creating a file is rare and quick, unlike writing to one
             None => match tempfile::tempfile_in(&spill.dir) {
                 Ok(file) => {
                     let id = self.next_segment;
@@ -927,11 +964,6 @@ impl Inner {
             },
         };
         let seg = &mut self.segments[si];
-        if let Err(e) = seg.file.write_all_at(data, seg.len) {
-            tracing::warn!("disabling disk spill: {e}");
-            self.spill_failed = true;
-            return None;
-        }
         let loc = DiskLoc {
             segment: seg.id,
             offset: seg.len,
@@ -941,7 +973,42 @@ impl Inner {
         seg.start = seg.start.min(start);
         seg.end = seg.end.max(end);
         self.disk_bytes += len;
-        Some(loc)
+        Some((loc, Arc::clone(&seg.file)))
+    }
+
+    /// Points a written block at its place on disk, keeping its packets in RAM only inside the
+    /// RAM window and the RAM cap.
+    fn attach(&mut self, written: Unwritten) {
+        let Unwritten {
+            start,
+            end,
+            loc,
+            data,
+            ..
+        } = written;
+        let is_it = |b: &Block| b.start == start && b.end == end && b.sealed && b.disk.is_none();
+        let Probe::Buffered { range, block } = self.probe(start) else {
+            return; // evicted meanwhile
+        };
+        if !is_it(&self.ranges[range].blocks[block]) {
+            return;
+        }
+        if !self.segments.iter().any(|s| s.id == loc.segment) {
+            // its segment was evicted meanwhile, which takes the segment's blocks with it
+            self.retain_blocks(|b| !is_it(b));
+            return;
+        }
+        let keep =
+            self.in_memory_window(start, end) && self.memory_bytes <= self.cfg.memory_max_bytes;
+        let block = &mut self.ranges[range].blocks[block];
+        block.disk = Some(loc);
+        if keep {
+            // one allocation for the whole block instead of one per packet
+            block.mem = Some(decode_block(Bytes::from(data)).expect("just encoded"));
+        } else {
+            block.mem = None;
+            self.memory_bytes -= block.bytes;
+        }
     }
 
     /// Releases RAM copies of blocks that are safely on disk and outside the RAM window, and the
@@ -1310,6 +1377,28 @@ mod tests {
         tl.finish(a, Finish::Eof);
         let b = tl.register_producer(Some(10 * PKT));
         assert!(matches!(tl.push(b, pkt(10)), PushResult::Stop));
+    }
+
+    #[test]
+    fn a_block_a_cancel_seals_is_written_when_its_producer_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let tl = Timeline::new(spill_into(&dir, 1 << 30, 1 << 20));
+        tl.set_playhead(60 * TICKS_PER_SECOND);
+        let p = tl.register_producer(None);
+        fill(&tl, p, 0..3);
+        // cancels come from wherever producers are dropped, so they only reserve the room
+        tl.cancel(p);
+        let reserved = tl.stats();
+        assert!(reserved.disk_bytes > 0);
+        assert_eq!(reserved.memory_bytes, 3 * 400, "held in RAM until written");
+
+        tl.finish(p, Finish::Stopped);
+        assert_eq!(
+            tl.stats().memory_bytes,
+            0,
+            "written, and far behind the playhead"
+        );
+        assert_eq!(ready(&tl, 0), pkt(0));
     }
 
     #[test]

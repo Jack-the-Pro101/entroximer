@@ -542,7 +542,8 @@ impl Format {
         match self.protocol.as_deref()? {
             "https" | "http" => Some(Transport::Stdout),
             "sabr" => Some(Transport::GrowingFile),
-            "m3u8" | "m3u8_native" => Some(Transport::Hls),
+            // ffmpeg reads the playlist from its URL
+            "m3u8" | "m3u8_native" if self.url.is_some() => Some(Transport::Hls),
             _ => None,
         }
     }

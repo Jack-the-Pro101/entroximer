@@ -303,7 +303,7 @@ impl PitchShift {
 
     pub(super) fn new(semitones: f32) -> Self {
         let mut shift = Self {
-            ratio: 2f32.powf(semitones / 12.0),
+            ratio: (semitones / 12.0).exp2(),
             sample_rate: DEFAULT_SAMPLE_RATE,
             window: 0.0,
             phase: 0.0,
@@ -432,7 +432,7 @@ mod tests {
         let octave_up = output_frequency(&mut PitchShift::new(12.0));
         assert!((octave_up - 880.0).abs() < 25.0, "{octave_up} Hz");
         let fifth_down = output_frequency(&mut PitchShift::new(-7.0));
-        let expected = 440.0 * 2f32.powf(-7.0 / 12.0);
+        let expected = 440.0 * (-7.0f32 / 12.0).exp2();
         assert!((fifth_down - expected).abs() < 15.0, "{fifth_down} Hz");
     }
 }

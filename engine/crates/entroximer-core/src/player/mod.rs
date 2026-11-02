@@ -119,7 +119,8 @@ pub struct Player {
     rt: Handle,
     source: Arc<dyn Producer>,
     caps: ProducerCaps,
-    timeline: Arc<Timeline>,
+    /// Taken only when the player is dropped.
+    timeline: Option<Arc<Timeline>>,
     cfg: PlayerConfig,
     /// Live producers; dropping one cancels it.
     producers: Vec<DemuxTask>,
@@ -148,8 +149,18 @@ impl std::fmt::Debug for Player {
             .field("caps", &self.caps)
             .field("producers", &self.producers)
             .field("pipeline", &self.pipeline.as_ref().map(|p| &p.decoder))
-            .field("timeline", &self.timeline)
+            .field("timeline", self.timeline())
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Player {
+    /// Players are let go of on the audio thread, or with their mixer locked: freeing the media
+    /// a timeline holds, often thousands of packets, is left to the runtime.
+    fn drop(&mut self) {
+        if let Some(timeline) = self.timeline.take() {
+            drop(self.rt.spawn(async move { drop(timeline) }));
+        }
     }
 }
 
@@ -167,7 +178,7 @@ impl Player {
             rt,
             source,
             caps,
-            timeline,
+            timeline: Some(timeline),
             cfg,
             producers: Vec::new(),
             pipeline: None,
@@ -197,7 +208,7 @@ impl Player {
     /// Fills `out` (interleaved stereo) with as many frames as are ready. Never blocks.
     pub fn render(&mut self, out: &mut [f32]) -> Result<Rendered, PlaybackError> {
         let wanted = out.len() / CHANNELS;
-        self.timeline.set_playhead(self.position());
+        self.timeline().set_playhead(self.position());
         let status = self.fill(wanted)?;
 
         let frames = wanted.min(self.pcm.len() / CHANNELS);
@@ -226,7 +237,7 @@ impl Player {
             pipeline.reset()?;
         }
         self.reposition(target.max(0));
-        match self.timeline.pending_at(self.cursor) {
+        match self.timeline().pending_at(self.cursor) {
             Some(pending) => self.cover(pending, self.cursor),
             None => Ok(()),
         }
@@ -249,24 +260,24 @@ impl Player {
 
     /// Buffered `(start, end)` intervals.
     pub fn buffered(&self) -> Vec<(Ticks, Ticks)> {
-        self.timeline.buffered()
+        self.timeline().buffered()
     }
 
     /// How much media is downloaded from the position on, without a gap.
     pub fn buffered_ahead(&self) -> Ticks {
         let position = self.position();
-        self.timeline
+        self.timeline()
             .range_at(position)
             .map_or(0, |(_, end, _)| end - position)
     }
 
     /// Length of the media, once a producer has reached its end.
     pub fn media_end(&self) -> Option<Ticks> {
-        self.timeline.media_end()
+        self.timeline().media_end()
     }
 
     pub fn cache_stats(&self) -> TimelineStats {
-        self.timeline.stats()
+        self.timeline().stats()
     }
 
     /// When the current stretch of buffering began, if rendering is buffering.
@@ -276,7 +287,7 @@ impl Player {
 
     /// Blocks until the timeline changes or `timeout` passes; for callers that render offline.
     pub fn wait_for_media(&self, timeout: Duration) {
-        self.timeline.wait(timeout);
+        self.timeline().wait(timeout);
     }
 
     /// Clears decoded audio and points the cursor at `target`, minus preroll.
@@ -290,17 +301,17 @@ impl Player {
             .map_or(DEFAULT_PREROLL, |p| p.preroll);
         // don't preroll into a gap before the buffered range holding the target
         let earliest = self
-            .timeline
+            .timeline()
             .range_at(target)
             .map_or(0, |(start, ..)| start);
         self.cursor = (target - preroll).max(earliest);
-        self.timeline.set_playhead(target);
+        self.timeline().set_playhead(target);
     }
 
     fn fill(&mut self, wanted: usize) -> Result<Status, PlaybackError> {
         while self.pcm.len() < wanted * CHANNELS {
             match self
-                .timeline
+                .timeline()
                 .lookup(self.cursor)
                 .map_err(PlaybackError::Cache)?
             {
@@ -325,7 +336,7 @@ impl Player {
             Some(ref mut pipeline) => pipeline,
             None => {
                 let params = self
-                    .timeline
+                    .timeline()
                     .codec()
                     .expect("producers pin the codec before pushing packets");
                 self.pipeline.insert(Pipeline::new(&params)?)
@@ -386,7 +397,7 @@ impl Player {
     fn cover(&mut self, pending: Pending, t: Ticks) -> Result<(), PlaybackError> {
         self.producers.retain(|p| !p.is_finished());
         let rate = match pending {
-            Pending::Frontier { producer, .. } => self.timeline.producer_rate(producer),
+            Pending::Frontier { producer, .. } => self.timeline().producer_rate(producer),
             Pending::Opening { .. } | Pending::Gap => None,
         };
         let plan = coverage::plan(pending, t, self.caps, rate, &self.cfg.coverage);
@@ -394,7 +405,7 @@ impl Player {
             return Ok(());
         };
 
-        if let Some(error) = self.timeline.take_failure() {
+        if let Some(error) = self.timeline().take_failure() {
             self.producer_failures += 1;
             if self.producer_failures > self.cfg.max_producer_retries {
                 return Err(PlaybackError::Media(error));
@@ -429,6 +440,12 @@ impl Player {
         Ok(())
     }
 
+    fn timeline(&self) -> &Arc<Timeline> {
+        self.timeline
+            .as_ref()
+            .expect("taken only when the player is dropped")
+    }
+
     fn apply(&mut self, plan: Coverage) {
         if let Coverage::Open { at, exclusive } = plan {
             if exclusive {
@@ -436,7 +453,7 @@ impl Player {
             }
             self.producers.push(DemuxTask::spawn(
                 &self.rt,
-                self.timeline.clone(),
+                Arc::clone(self.timeline()),
                 self.source.as_ref(),
                 at,
             ));
@@ -448,13 +465,13 @@ impl Player {
         if !self.caps.time_seek {
             return Ok(());
         }
-        let Some((_, end, RangeState::Truncated)) = self.timeline.range_at(self.cursor) else {
+        let Some((_, end, RangeState::Truncated)) = self.timeline().range_at(self.cursor) else {
             return Ok(());
         };
         if end - self.cursor > ticks(self.cfg.coverage.prefetch) {
             return Ok(());
         }
-        match self.timeline.pending_at(end) {
+        match self.timeline().pending_at(end) {
             Some(pending @ Pending::Gap) => self.cover(pending, end),
             _ => Ok(()),
         }
@@ -462,6 +479,7 @@ impl Player {
 }
 
 /// Which scratch buffer holds the 48 kHz output of the last decode.
+#[derive(Clone, Copy, Debug)]
 enum Output {
     Decoded,
     Resampled,
