@@ -3,6 +3,16 @@
 #   podman build -t entroximer-engine .
 #   docker build -f Containerfile -t entroximer-engine .
 #
+# The image is for the building machine's CPU unless `--platform` says otherwise. An image for
+# another CPU still runs there, emulated, but about ten times slower: too slow to play audio
+# smoothly. For an ARM server, build on an x86 machine with
+#
+#   podman build --platform linux/arm64 -t entroximer-engine .
+#
+# The engine is cross-compiled natively; only the final stage's package installs run emulated,
+# which needs qemu-user-static on the building machine (`dnf install qemu-user-static-aarch64`).
+# Then copy it over, e.g. `podman image scp localhost/entroximer-engine user@server::`.
+#
 # yt-dlp is not part of the image: the engine installs it into the data volume on first start
 # and keeps it updated (ENTROXIMER_YTDLP_* settings), so YouTube fixes never need a rebuild.
 # Update on demand with `podman exec <container> entroximer ytdlp update`.
@@ -12,18 +22,46 @@ ARG DEBIAN_RELEASE=trixie
 # yt-dlp needs a JavaScript runtime to solve YouTube's player challenges
 ARG DENO_VERSION=2.9.8
 
-FROM docker.io/library/rust:${RUST_VERSION}-slim-${DEBIAN_RELEASE} AS build
-# libopus is linked statically, so the runtime image does not need it
-RUN apt-get update \
- && apt-get install -y --no-install-recommends pkg-config libopus-dev \
- && rm -rf /var/lib/apt/lists/*
+# Runs on the building machine's CPU and cross-compiles for the image's when they differ: Rust
+# compiled under emulation would take hours
+FROM --platform=$BUILDPLATFORM docker.io/library/rust:${RUST_VERSION}-slim-${DEBIAN_RELEASE} AS build
+ARG TARGETARCH
+# /cross.env tells cargo and the C compiler of `ring` which CPU to build for. libopus is linked
+# statically from a prefix holding only its archive, so the runtime image does not need it
+# (found through pkg-config instead, a cross build would link it dynamically)
+RUN set -eu \
+ && case "$TARGETARCH" in \
+      amd64) cpu=x86_64 ;; \
+      arm64) cpu=aarch64 ;; \
+      *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+ && target=$cpu-unknown-linux-gnu \
+ && install -d /opt/opus/lib \
+ && ln -s "/usr/lib/$cpu-linux-gnu/libopus.a" /opt/opus/lib/libopus.a \
+ && { echo "export CARGO_BUILD_TARGET=$target"; \
+      echo "export LIBOPUS_NO_PKG=1 LIBOPUS_LIB_DIR=/opt/opus"; \
+    } > /cross.env \
+ && packages="libopus-dev:$TARGETARCH" \
+ && if [ "$(uname -m)" != "$cpu" ]; then \
+      dpkg --add-architecture "$TARGETARCH"; \
+      packages="$packages gcc-$(echo $cpu | tr _ -)-linux-gnu libc6-dev-$TARGETARCH-cross"; \
+      { echo "export CARGO_TARGET_$(echo $target | tr a-z- A-Z_)_LINKER=$cpu-linux-gnu-gcc"; \
+        echo "export CC_$(echo $target | tr - _)=$cpu-linux-gnu-gcc"; \
+        echo "export AR_$(echo $target | tr - _)=$cpu-linux-gnu-ar"; \
+      } >> /cross.env; \
+    fi \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends $packages \
+ && rm -rf /var/lib/apt/lists/* \
+ && rustup target add "$target"
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p entroximer-server \
- && install -D -m 0755 target/release/entroximer /out/entroximer
+    . /cross.env \
+ && cargo build --release --locked -p entroximer-server \
+ && install -D -m 0755 "target/$CARGO_BUILD_TARGET/release/entroximer" /out/entroximer
 
 FROM docker.io/denoland/deno:bin-${DENO_VERSION} AS deno
 
