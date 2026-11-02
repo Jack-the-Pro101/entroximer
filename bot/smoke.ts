@@ -1,6 +1,7 @@
 // An end-to-end check in a real voice channel, without slash commands: joins, plays a track,
-// seeks, pauses, applies effects, plays a queue (a gapless transition, a SoundCloud search
-// result, skipping, repeating), and leaves, checking each step against what the engine reports.
+// seeks, pauses, applies effects, plays clips over the music on layers of their own (ducking it
+// for one), plays a queue (a gapless transition, a crossfade, a SoundCloud search result,
+// skipping, repeating), and leaves, checking each step against what the engine reports.
 // Needs a running engine; its debug log shows when it prepares each next track.
 //   bun run smoke <voice channel id> <track URL or search>
 import { Client, Events, GatewayIntentBits } from "discord.js";
@@ -165,6 +166,41 @@ await step("effects", async () => {
   return "lowpass and reverb for 4 s, then 40% volume for 3 s";
 });
 
+await step("layers: a clip plays over the music, and on while the music is paused", async () => {
+  if (!track) throw new Error("nothing loaded");
+  const sfx = player.layer("smoke-sfx");
+  await sfx.configure({ mode: "mix", volume: 60 });
+  const started = new Promise<void>((resolve) => sfx.once("clipStart", () => resolve()));
+  const ended = new Promise<TrackEndReason>((resolve) => sfx.once("clipEnd", (_, reason) => resolve(reason)));
+  // a stretch of the same track, from 1:00 to 1:06
+  const clip = await sfx.play(track, { startAt: 60_000, endAt: 66_000, fadeIn: 300 });
+  await started;
+  await Bun.sleep(2_000);
+  await player.pause();
+  const held = (await state()).position;
+  const reason = await ended;
+  const after = (await state()).position;
+  await player.resume();
+  await sfx.remove();
+  if (reason !== "finished") throw new Error(`the clip ended with ${reason}`);
+  if (Math.abs(after - held) > 100) throw new Error(`the paused music moved from ${held} to ${after} ms`);
+  return `${clip.status} at once; it finished while the music held at ${formatTime(held)}`;
+});
+
+await step("layers: an announcement lowers the music while it plays", async () => {
+  if (!track) throw new Error("nothing loaded");
+  const announcements = player.layer("smoke-announcements");
+  await announcements.setDuck({ layers: ["main"], volume: 20 });
+  const ended = new Promise<TrackEndReason>((resolve) =>
+    announcements.once("clipEnd", (_, reason) => resolve(reason)),
+  );
+  await announcements.play(track, { startAt: 30_000, endAt: 36_000 });
+  const reason = await ended;
+  await announcements.remove();
+  if (reason !== "finished") throw new Error(`the announcement ended with ${reason}`);
+  return "6 s of the track at 0:30 over the music, lowered to 20%";
+});
+
 await step("queue: the next track loads ahead and follows without a gap", async () => {
   if (!track) throw new Error("nothing loaded");
   const added = await player.queue.add(track);
@@ -181,6 +217,28 @@ await step("queue: the next track loads ahead and follows without a gap", async 
   if (player.queue.length !== 0) throw new Error(`${player.queue.length} items left in the queue`);
   await waitFor("the next track to play", (s) => s.position >= 2_000, 15_000);
   return `switched with ${start.at - end.at} ms between the events; the queued item plays`;
+});
+
+await step("queue: a crossfade starts the next track before the current one ends", async () => {
+  if (!track) throw new Error("nothing loaded");
+  await player.queue.setCrossfade(6_000);
+  const added = await player.queue.add(track);
+  const itemId = added.items[0]?.id;
+  // the current track ends in 40 s, so the next one starts over it in 34 s
+  const { position } = await state();
+  const requested = Date.now();
+  const ended = nextEnd();
+  const started = nextStart();
+  await player.setEndTime(position + 40_000);
+  const end = await ended;
+  const start = await started;
+  await player.queue.setCrossfade(0);
+  if (end.reason !== "finished") throw new Error(`the first track ended with ${end.reason}`);
+  if (start.itemId !== itemId) throw new Error(`started item ${start.itemId}, not the queued ${itemId}`);
+  const early = 40_000 - (start.at - requested);
+  if (Math.abs(early - 6_000) > 1_500) throw new Error(`the next track started ${early} ms before the end`);
+  await waitFor("the next track to play", (s) => s.position >= 8_000, 15_000);
+  return `the next track started ${early} ms before the end of the first`;
 });
 
 await step("queue: a SoundCloud search result, skipped to and seeked", async () => {

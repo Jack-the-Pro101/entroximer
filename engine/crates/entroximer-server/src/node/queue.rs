@@ -9,7 +9,7 @@ use std::collections::{HashSet, VecDeque};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::api::protocol::Track;
+use crate::api::protocol::{Millis, Track};
 
 /// A track in the queue, or playing. Its id stays the same while it moves around.
 #[derive(Clone, Debug, PartialEq, Serialize, TS)]
@@ -78,6 +78,8 @@ pub enum QueueChange {
 pub struct Queue {
     items: VecDeque<QueueItem>,
     repeat: Repeat,
+    /// How long the end of each track overlaps the start of the next.
+    crossfade: Millis,
     version: u64,
 }
 
@@ -96,6 +98,15 @@ impl Queue {
 
     pub fn repeat(&self) -> Repeat {
         self.repeat
+    }
+
+    pub fn crossfade(&self) -> Millis {
+        self.crossfade
+    }
+
+    /// Only clients change it, so it is not a change clients need to hear about.
+    pub fn set_crossfade(&mut self, crossfade: Millis) {
+        self.crossfade = crossfade;
     }
 
     pub fn head(&self) -> Option<&QueueItem> {

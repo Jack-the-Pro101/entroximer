@@ -67,20 +67,23 @@ order: the events a request causes always arrive before its response.
 | `tracks.search` | Searches one source by its prefix (`ytsearch`, `ytmsearch`, `scsearch`, `spsearch`), up to 50 results |
 | `tracks.decode` | Reads tracks back from their `encoded` form |
 | `presets.build` | The effect graph a preset builds (`name`, optional `params`), without applying it |
-| `player.update` | Creates or changes a guild's player: `track` (plays now; `null` stops), `position`, `endTime`, `paused`, `volume`, `graph` or `preset` (effects), `voice`. A refused update changes nothing |
+| `player.update` | Creates or changes a guild's player: `track` (plays now; `null` stops), `position`, `endTime`, `paused`, `volume`, `graph` or `preset` (effects), `voice`. These are the music's; a refused update changes nothing |
 | `player.get` / `player.destroy` | Reads a player, or stops it and leaves the voice channel |
 | `queue.get` | A page of a player's queue |
 | `queue.add` | Adds tracks (encoded, or queries to load) at an index; with nothing playing, the first item starts |
 | `queue.remove` / `queue.move` / `queue.clear` / `queue.shuffle` | Edit the queue |
 | `queue.skip` | Plays the next item (or `toItem`), instantly if it is prepared |
-| `queue.configure` | Sets `repeat`: `off`, `track` or `queue` |
+| `queue.configure` | Sets `repeat` (`off`, `track` or `queue`) and `crossfade` (ms, up to 12 000) |
+| `layer.update` / `layer.remove` | Creates or changes a layer besides the music (`volume`, `graph` or `preset`, `paused`, `mode`, `maxClips`, `duck`), or removes it; see [Layers and clips](#layers-and-clips) |
+| `clip.play` / `clip.stop` | Plays a sound on a layer, outside the queue (`volume`, `position`, `endTime`, `fadeIn`, `fadeOut`, `loop`), or stops one or all of a layer's |
 | `session.configure` | Sets how long players wait, paused, for a disconnected client to resume |
 | `node.info` / `node.stats` | Versions, sources and their searches, effect node types and presets, the YouTube session state; load and cache usage |
 
 Events: `trackStart`, `trackEnd` (with a reason), `trackError` and `trackStuck`, each with the
 track's queue `itemId`; `queueChanged` (one change, numbered by `version`) and `queueEnd`;
 `playerUpdate` (position, buffered ranges, buffering, connection; every few seconds and on
-changes), `voiceClosed`, `stats` and `youtubeSession`. Errors carry stable codes such as
+changes), `voiceClosed`, `stats` and `youtubeSession`; `clipStart`, `clipEnd`, `clipError` and
+`clipStuck`, each with the clip's `layer` and `clipId`. Errors carry stable codes such as
 `age_restricted`, `sign_in_required`, `unavailable` or `no_results`.
 
 When a client's connection drops, its players pause where they are. The engine pings every
@@ -93,8 +96,9 @@ state; otherwise the players are destroyed. Playback also holds its position whi
 connection to Discord reconnects.
 
 The engine bounds what one client can make it hold: messages up to 4 MiB, queues up to 10 000
-items, graphs up to 16 nodes and 64 edges, and resume timeouts up to a day. A request that
-asks for more is refused with `bad_request`.
+items, graphs up to 16 nodes and 64 edges, 4 layers besides the music per player with 8 clips
+playing at once and 32 waiting on each, fades up to 10 s, and resume timeouts up to a day. A
+request that asks for more is refused with `bad_request`.
 
 When the engine shuts down (`SIGTERM`, `SIGINT`), `/health` answers 503, new connections are
 refused, every player ends (clients get `trackEnd` with reason `cleanup`) and leaves its voice
@@ -196,6 +200,43 @@ shelf, a `mud` cut and a `limiter`. `player.update` with `preset` applies one, a
 `graph` then shows its nodes, ready to be changed or extended and set again as `graph`;
 `presets.build` returns the graph without applying it.
 
+## Layers and clips
+
+A player's output is a mix of *layers*. The music, which the queue plays, is one; clients add up
+to four more (`layer.update`, named `a-z`, `0-9`, `_` and `-`), each with its own volume, effects
+and pause, mixed *after* the music's effects: a sound on its own layer does not go through the
+music's nightcore preset or its volume. Pausing the music (`player.update`) leaves the other
+layers playing; a client that disconnects pauses them all, as it does the music. The sum goes
+through a limiter that keeps it within full scale, so a loud clip over loud music does not clip.
+
+Layers play *clips*: sounds outside the queue, from any source a track comes from (Discord
+attachment links play through `http`), with an id the client may choose (`clipId`) and their
+own events. `clip.play` loads the clip first, without holding up the player; clips sent for the
+same layer still join it in the order they were sent. A layer's `mode` decides what a new clip
+does while others play:
+
+| `mode` | A new clip |
+|---|---|
+| `queue` (default) | Waits its turn, e.g. announcements; only the next one downloads ahead |
+| `mix` | Plays over the others, up to `maxClips` (8); beyond that the oldest ends as `replaced`, e.g. a soundboard |
+| `replace` | Ends the others (`replaced`) and those waiting |
+
+Every clip that `clip.play` accepted ends exactly once with `clipEnd` (`finished`, `stopped`,
+`replaced`, `failed` or `cleanup`); one that waited and was stopped never starts. A clip that
+cannot be played fails on its own, with one retry, so that the ones after it play: it gets
+`clipError`, or `clipStuck` after waiting for its media as long as tracks are reported stuck.
+
+A layer with `duck` lowers others while one of its clips is heard (playing, not waiting for
+media): `{"layers": ["main"], "volume": 25}` brings the music down to a quarter for an
+announcement over `attack` (50 ms), holds it there through pauses of up to `hold` (250 ms), and
+brings it back over `release` (500 ms). It follows the clips, not their loudness, so pauses
+between words do not make the music pump. Of several layers ducking one, the lowest volume wins.
+
+```json
+{"op": "layer.update", "params": {"guildId": "1", "layer": "announcements", "duck": {"layers": ["main"], "volume": 25}}}
+{"op": "clip.play", "params": {"guildId": "1", "layer": "announcements", "clipId": "a1", "track": {"query": "https://cdn.discordapp.com/attachments/.../hello.ogg"}}}
+```
+
 ## Queues
 
 Each player plays its queue by itself. Once the current track has less than
@@ -203,6 +244,15 @@ Each player plays its queue by itself. Once the current track has less than
 it follows without a gap, whatever the client does meanwhile; if the queue changes so that
 another item comes next, that one is prepared instead. Items leave the queue when they start.
 Repeating a `track` plays it again; repeating the `queue` sends finished tracks to its end.
+
+With a `crossfade`, the next track starts that long before the current one ends, fading in as
+the current one fades out (at equal power, so the overlap does not dip), and the next track is
+prepared that much earlier. The switch is reported when the fade starts, in the same order as
+without one: `trackEnd` (`finished`), then `trackStart`. At most half of a track fades; streams,
+and next tracks not downloaded far enough in time, follow without one. With a playback `rate`
+the fade lasts as long and takes more of the track. Skipping, stopping and playing another track
+cut at once, fading out only over a few milliseconds so that they do not click, as volume
+changes do.
 
 An item that fails to load is reported with `trackError` and removed, and the queue goes on;
 after five failures in a row it waits until the client changes something. Clients mirror the

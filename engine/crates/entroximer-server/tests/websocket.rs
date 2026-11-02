@@ -414,7 +414,7 @@ async fn queues_over_the_protocol() {
     assert_eq!(added["index"], 0);
     assert_eq!(
         added["queue"],
-        json!({ "version": 1, "length": 3, "repeat": "off" })
+        json!({ "version": 1, "length": 3, "repeat": "off", "crossfade": 0 })
     );
     let ids: Vec<Value> = added["items"]
         .as_array()
@@ -466,6 +466,30 @@ async fn queues_over_the_protocol() {
     assert_eq!(kinds(&events), ["queue repeat"]);
     assert_eq!(response["result"]["repeat"], "track");
 
+    // a crossfade is the client's own setting, so no event tells it
+    let (events, response) = client
+        .exchange("queue.configure", guild(json!({ "crossfade": 3000 })))
+        .await;
+    assert!(events.is_empty(), "{events:?}");
+    assert_eq!(response["result"]["crossfade"], 3000);
+    assert_eq!(response["result"]["repeat"], "track");
+    let (_, response) = client
+        .exchange(
+            "queue.configure",
+            guild(json!({ "repeat": "off", "crossfade": 20000 })),
+        )
+        .await;
+    assert_eq!(response["error"]["code"], "bad_request");
+    let (_, response) = client.exchange("queue.configure", guild(json!({}))).await;
+    assert_eq!(
+        (
+            &response["result"]["repeat"],
+            &response["result"]["crossfade"]
+        ),
+        (&json!("track"), &json!(3000)),
+        "the refused change changed nothing"
+    );
+
     let (events, response) = client
         .exchange("queue.remove", guild(json!({ "ids": [ids[1], "nope"] })))
         .await;
@@ -511,7 +535,7 @@ async fn queues_over_the_protocol() {
     assert!(player["itemId"].is_null());
     assert_eq!(
         player["queue"],
-        json!({ "version": 6, "length": 0, "repeat": "track" })
+        json!({ "version": 6, "length": 0, "repeat": "track", "crossfade": 3000 })
     );
 }
 
@@ -686,4 +710,186 @@ async fn embedded_covers_are_served_to_authorized_clients() {
         .await
         .unwrap();
     assert_eq!(refused.status(), 400);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn layers_and_clips_over_the_protocol() {
+    let engine = Engine::start(None).await;
+    let mut client = engine.connect(None, None).await.unwrap();
+    client.recv().await;
+    let guild = |mut params: Value| {
+        params["guildId"] = json!("3");
+        params
+    };
+    let clip = |layer: &str, id: &str| json!({ "guildId": "3", "layer": layer, "clipId": id, "track": { "query": fixture() } });
+
+    // a refused update changes nothing
+    for (params, why) in [
+        (
+            json!({ "layer": "main", "volume": 50 }),
+            "the music's layer",
+        ),
+        (json!({ "layer": "Bad Name" }), "a bad name"),
+        (json!({ "layer": "fx", "volume": 1001 }), "too loud"),
+        (json!({ "layer": "fx", "maxClips": 9 }), "too many at once"),
+        (
+            json!({ "layer": "fx", "duck": { "layers": ["nope"], "volume": 25 } }),
+            "ducking a layer that does not exist",
+        ),
+        (
+            json!({ "layer": "fx", "duck": { "layers": ["fx"], "volume": 25 } }),
+            "ducking itself",
+        ),
+        (
+            json!({ "layer": "fx", "duck": { "layers": ["main"], "volume": 101 } }),
+            "ducking to more than full volume",
+        ),
+        (
+            json!({ "layer": "fx", "graph": { "nodes": [] }, "preset": { "name": "nightcore" } }),
+            "a graph and a preset",
+        ),
+    ] {
+        let (_, response) = client.exchange("layer.update", guild(params)).await;
+        let code = &response["error"]["code"];
+        assert!(
+            code == "bad_request" || code == "not_found",
+            "{why}: {response}"
+        );
+    }
+    let (_, player) = client.exchange("player.get", guild(json!({}))).await;
+    assert_eq!(player["result"]["layers"], json!([]), "no layer was made");
+
+    // a layer ducking the music, and a clip on it, which starts before the response
+    let (_, layer) = client
+        .exchange(
+            "layer.update",
+            guild(json!({ "layer": "voice", "volume": 80, "duck": { "layers": ["main"], "volume": 25 } })),
+        )
+        .await;
+    let layer = &layer["result"];
+    assert_eq!(
+        (&layer["mode"], &layer["volume"], &layer["duck"]),
+        (
+            &json!("queue"),
+            &json!(80),
+            &json!({ "layers": ["main"], "volume": 25, "attack": 50, "release": 500, "hold": 250 })
+        )
+    );
+    let (events, response) = client.exchange("clip.play", clip("voice", "c1")).await;
+    assert_eq!(kinds(&events), ["clipStart"]);
+    assert_eq!(
+        (&events[0]["layer"], &events[0]["clipId"]),
+        (&json!("voice"), &json!("c1"))
+    );
+    assert_eq!(response["result"]["status"], "playing");
+    let (_, player) = client.exchange("player.get", guild(json!({}))).await;
+    assert!(
+        player["result"]["track"].is_null(),
+        "the music knows nothing of it"
+    );
+
+    // clips sent at once join their layer in the order they were sent
+    let ids = [
+        client.call("clip.play", clip("voice", "c2")).await,
+        client.call("clip.play", clip("voice", "c3")).await,
+        client.call("clip.play", clip("voice", "c4")).await,
+    ];
+    let mut answered = Vec::new();
+    while answered.len() < ids.len() {
+        let message = client.recv_significant().await;
+        assert_eq!(message["type"], "response", "{message}");
+        assert_eq!(message["result"]["status"], "waiting", "{message}");
+        answered.push(message["id"].as_u64().unwrap());
+    }
+    let clips = |player: &Value| -> Vec<(String, String)> {
+        player["result"]["layers"][0]["clips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["clipId"].as_str().unwrap().to_owned(),
+                    c["status"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let (_, player) = client.exchange("player.get", guild(json!({}))).await;
+    let in_order = ["c1", "c2", "c3", "c4"];
+    assert_eq!(
+        clips(&player)
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        in_order
+    );
+    assert_eq!(clips(&player)[0].1, "playing");
+
+    // clips the layer cannot take are refused
+    let (_, response) = client.exchange("clip.play", clip("voice", "c2")).await;
+    assert_eq!(
+        response["error"]["code"], "bad_request",
+        "the same id twice"
+    );
+    let mut looping = clip("voice", "c5");
+    looping["loop"] = json!(true);
+    let (_, response) = client.exchange("clip.play", looping).await;
+    assert_eq!(
+        response["error"]["code"], "bad_request",
+        "a loop on a queue layer"
+    );
+    let (_, response) = client.exchange("clip.play", clip("main", "c5")).await;
+    assert_eq!(
+        response["error"]["code"], "bad_request",
+        "clips on the music's layer"
+    );
+    let (_, response) = client
+        .exchange(
+            "layer.update",
+            guild(json!({ "layer": "voice", "mode": "mix" })),
+        )
+        .await;
+    assert_eq!(
+        response["error"]["code"], "bad_request",
+        "a new mode while clips play"
+    );
+
+    // stopping one that waits, then removing the layer with the rest
+    let (events, response) = client
+        .exchange(
+            "clip.stop",
+            guild(json!({ "layer": "voice", "clipId": "c3" })),
+        )
+        .await;
+    assert_eq!(kinds(&events), ["clipEnd"]);
+    assert_eq!(
+        (&events[0]["clipId"], &events[0]["reason"]),
+        (&json!("c3"), &json!("stopped"))
+    );
+    assert_eq!(response["result"]["clips"].as_array().unwrap().len(), 3);
+    let (_, response) = client
+        .exchange(
+            "clip.stop",
+            guild(json!({ "layer": "voice", "clipId": "c3" })),
+        )
+        .await;
+    assert_eq!(response["error"]["code"], "not_found");
+    let (events, response) = client
+        .exchange("layer.remove", guild(json!({ "layer": "voice" })))
+        .await;
+    assert!(response["result"].is_null(), "{response}");
+    let mut ended: Vec<_> = events
+        .iter()
+        .map(|e| {
+            assert_eq!(
+                (&e["event"], &e["reason"]),
+                (&json!("clipEnd"), &json!("stopped"))
+            );
+            e["clipId"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    ended.sort();
+    assert_eq!(ended, ["c1", "c2", "c4"], "every clip ends once");
+    let (_, player) = client.exchange("player.get", guild(json!({}))).await;
+    assert_eq!(player["result"]["layers"], json!([]));
 }

@@ -7,7 +7,8 @@ import type { TrackSelector } from "./TrackSelector";
 import type { VoiceState } from "./VoiceState";
 
 /**
- * Changes to a player; absent fields are left alone.
+ * Changes to a player; absent fields are left alone. Its `paused`, `volume`, `graph` and
+ * `preset` are the music's: its other layers, changed with `layer.update`, have their own.
  */
 export type PlayerUpdate = { guildId: Snowflake, 
 /**
@@ -27,7 +28,11 @@ position?: Millis,
 /**
  * Stops the current track at this position; `null` plays it to the end.
  */
-endTime?: Millis | null, paused?: boolean, 
+endTime?: Millis | null, 
+/**
+ * Pauses the music; the other layers play on.
+ */
+paused?: boolean, 
 /**
  * Percent: 100 leaves the audio unchanged, up to 1000.
  */

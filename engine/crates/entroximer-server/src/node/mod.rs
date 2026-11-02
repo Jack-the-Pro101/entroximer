@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use entroximer_core::dsp::{NodeRegistry, PresetRegistry};
 use futures_util::future::join_all;
-use tokio::sync::{OnceCell, broadcast};
+use tokio::sync::{OnceCell, Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -48,6 +48,9 @@ pub struct Node {
     pub registry: NodeRegistry,
     pub presets: PresetRegistry,
     pub tracks: TrackCache,
+    /// Clips loading at once, engine-wide: a burst of them must not start a burst of
+    /// downloads.
+    pub clip_loads: Semaphore,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     system_ytdlp_version: OnceCell<Option<String>>,
     started: Instant,
@@ -61,6 +64,7 @@ impl Node {
     const STATS_INTERVAL: Duration = Duration::from_secs(60);
     /// How long shutting down waits for the last messages to reach clients.
     const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+    const CLIP_LOADS: usize = 8;
 
     pub fn new(ctx: Arc<MediaContext>, settings: NodeSettings) -> Arc<Self> {
         let node = Arc::new(Self {
@@ -69,6 +73,7 @@ impl Node {
             registry: NodeRegistry::with_builtins(),
             presets: PresetRegistry::with_builtins(),
             tracks: TrackCache::default(),
+            clip_loads: Semaphore::new(Self::CLIP_LOADS),
             sessions: Mutex::new(HashMap::new()),
             system_ytdlp_version: OnceCell::new(),
             started: Instant::now(),

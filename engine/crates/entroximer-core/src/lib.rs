@@ -6,14 +6,17 @@
 //! - [`dsp`]: post-processing node graphs.
 //! - [`player`]: ties it together into seekable PCM for one track.
 //! - [`deck`]: a continuous output playing tracks back to back, gaplessly, with effects.
+//! - [`mixer`]: a guild's whole output, decks in layers summed.
 
 pub mod deck;
 pub mod decode;
 pub mod demux;
 pub mod dsp;
 pub mod error;
+pub mod mixer;
 pub mod player;
 pub mod producer;
 pub mod resample;
 pub mod timeline;
 pub mod transport;
+mod voice;

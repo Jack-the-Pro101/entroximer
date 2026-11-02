@@ -252,6 +252,14 @@ impl Player {
         self.timeline.buffered()
     }
 
+    /// How much media is downloaded from the position on, without a gap.
+    pub fn buffered_ahead(&self) -> Ticks {
+        let position = self.position();
+        self.timeline
+            .range_at(position)
+            .map_or(0, |(_, end, _)| end - position)
+    }
+
     /// Length of the media, once a producer has reached its end.
     pub fn media_end(&self) -> Option<Ticks> {
         self.timeline.media_end()

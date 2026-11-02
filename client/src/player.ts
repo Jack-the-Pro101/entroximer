@@ -10,6 +10,7 @@ import type { Track } from "./generated/Track";
 import type { TrackEndReason } from "./generated/TrackEndReason";
 import type { VoiceState } from "./generated/VoiceState";
 import type { JsonValue } from "./generated/serde_json/JsonValue";
+import { Layer } from "./layer";
 import { Queue } from "./queue";
 import { selector } from "./tracks";
 import type { Playable } from "./tracks";
@@ -44,6 +45,11 @@ type PlayerEvents = {
   trackStuck: [track: Track, waitingMs: number, itemId: string];
   /** Playback stopped because nothing is left to play. */
   queueEnd: [];
+  /** A clip event of one of the player's layers, which emits it too (see `Layer`). */
+  clipStart: [layer: string, track: Track, clipId: string];
+  clipEnd: [layer: string, track: Track, reason: TrackEndReason, clipId: string];
+  clipError: [layer: string, track: Track, error: EntroximerError, clipId: string];
+  clipStuck: [layer: string, track: Track, waitingMs: number, clipId: string];
   update: [state: PlayerState];
   voiceClosed: [info: VoiceClosedInfo];
   /** `setTextChannel` moved the player's text channel. */
@@ -98,6 +104,7 @@ export class Player extends Emitter<PlayerEvents> {
   /** The other gateway session last reported for joining voice in this guild. */
   #conflictingSession: string | null = null;
   #textChannelId: string | null = null;
+  readonly #layers = new Map<string, Layer>();
 
   constructor(
     readonly guildId: string,
@@ -110,6 +117,28 @@ export class Player extends Emitter<PlayerEvents> {
 
   get destroyed(): boolean {
     return this.#destroyed;
+  }
+
+  /**
+   * One of the player's layers besides the music (`main`, which this object itself controls):
+   * sounds outside the queue, such as announcements or sound effects, with their own effects,
+   * volume and pause. The engine makes the layer with its first change or clip.
+   */
+  layer(name: string): Layer {
+    let layer = this.#layers.get(name);
+    if (layer === undefined) {
+      layer = new Layer(this.guildId, name, {
+        request: this.#host.request,
+        ensureUsable: () => this.#ensureUsable(),
+      });
+      this.#layers.set(name, layer);
+    }
+    return layer;
+  }
+
+  /** The layers the engine reported or this client used, by name. */
+  get layers(): ReadonlyMap<string, Layer> {
+    return this.#layers;
   }
 
   /**
@@ -292,6 +321,28 @@ export class Player extends Emitter<PlayerEvents> {
         this.#setState(event.state);
         this.emit("update", event.state);
         break;
+      case "clipStart":
+        this.layer(event.layer)._handleEvent(event);
+        this.emit("clipStart", event.layer, event.track, event.clipId);
+        break;
+      case "clipEnd":
+        this.layer(event.layer)._handleEvent(event);
+        this.emit("clipEnd", event.layer, event.track, event.reason, event.clipId);
+        break;
+      case "clipError":
+        this.layer(event.layer)._handleEvent(event);
+        this.emit(
+          "clipError",
+          event.layer,
+          event.track,
+          EntroximerError.fromApi(event.error),
+          event.clipId,
+        );
+        break;
+      case "clipStuck":
+        this.layer(event.layer)._handleEvent(event);
+        this.emit("clipStuck", event.layer, event.track, event.waiting, event.clipId);
+        break;
       case "voiceClosed":
         // the engine forgets details it gave up on; send them again if Discord does
         this.#sentVoice = null;
@@ -356,6 +407,14 @@ export class Player extends Emitter<PlayerEvents> {
     this.volume = info.volume;
     this.graph = info.graph;
     this.#setState(info.state);
+    for (const layer of info.layers) {
+      this.layer(layer.name)._apply(layer);
+    }
+    for (const [name, layer] of this.#layers) {
+      if (!info.layers.some((reported) => reported.name === name)) {
+        layer._apply(null);
+      }
+    }
   }
 
   #setState(state: PlayerState): void {

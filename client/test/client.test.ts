@@ -188,6 +188,14 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
     expect(queue.repeat).toBe("queue");
     expect(queue.version).toBe(4);
 
+    // a crossfade is no change to the queue's items, so no version counts it
+    await queue.setCrossfade(3000);
+    expect(queue.crossfade).toBe(3000);
+    expect((await failure(queue.setCrossfade(20_000))).code).toBe("bad_request");
+    await player.refresh();
+    expect(queue.crossfade).toBe(3000);
+    expect(queue.version).toBe(4);
+
     // a change that skips a version shows that some were missed: the queue is fetched again
     const synced = nextCall<[]>();
     queue.once("sync", synced.listener);
@@ -215,6 +223,52 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
     await player.skip();
     await ended.called;
     expect(player.track).toBeNull();
+    await player.destroy();
+  });
+
+  test("plays clips on layers of their own, mirrored from responses and events", async () => {
+    const manager = client();
+    await manager.connect();
+    const player = manager.player("11");
+    const voice = player.layer("voice");
+    await voice.configure({ volume: 80, duck: { layers: ["main"], volume: 25 } });
+    expect(voice.volume).toBe(80);
+    expect(voice.duck).toEqual({ layers: ["main"], volume: 25, attack: 50, release: 500, hold: 250 });
+
+    // a clip that starts right away says so before `play` resolves
+    const order: string[] = [];
+    voice.once("clipStart", (_, clipId) => order.push(`start ${clipId}`));
+    const heard = nextCall<[string, Track, string]>();
+    player.once("clipStart", heard.listener);
+    const first = await voice.play(engine.tone, { clipId: "hello" });
+    order.push("played");
+    expect(order).toEqual(["start hello", "played"]);
+    expect((await heard.called)[0]).toBe("voice");
+    expect(first.status).toBe("playing");
+    const second = await voice.play(engine.tone);
+    expect(second.status).toBe("waiting");
+    expect(voice.clips.map((clip) => [clip.clipId, clip.status])).toEqual([
+      ["hello", "playing"],
+      [second.clipId, "waiting"],
+    ]);
+    expect(player.track).toBeNull();
+
+    // a refused change changes nothing, and refreshing restores the layer from the engine
+    expect((await failure(voice.configure({ mode: "mix" }))).code).toBe("bad_request");
+    expect(voice.mode).toBe("queue");
+    voice.volume = 1;
+    await player.refresh();
+    expect(voice.volume).toBe(80);
+    expect(voice.clips).toHaveLength(2);
+
+    const ended: string[] = [];
+    voice.on("clipEnd", (_, reason, clipId) => ended.push(`${clipId} ${reason}`));
+    await voice.stop();
+    expect(voice.clips).toEqual([]);
+    expect(ended.sort()).toEqual([`${second.clipId} stopped`, "hello stopped"].sort());
+    await voice.remove();
+    expect((await player.update({})).layers).toEqual([]);
+    expect((await failure(player.layer("main").play(engine.tone))).code).toBe("bad_request");
     await player.destroy();
   });
 

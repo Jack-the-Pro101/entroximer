@@ -13,9 +13,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot;
 
 use super::Node;
-use super::player::GuildPlayer;
+use super::player::{ClipTurn, GuildPlayer};
 use crate::api::protocol::{Event, ServerMessage, SessionSettings, Snowflake};
 
 /// Events kept for a disconnected client; older ones are dropped and counted.
@@ -30,6 +31,8 @@ pub struct Session {
     link: Mutex<Link>,
     resume_timeout: Mutex<Duration>,
     connections: AtomicU64,
+    /// For each guild's layer, what tells the next `clip.play` for it that the last one is in.
+    clip_turns: Mutex<HashMap<(Snowflake, String), oneshot::Receiver<()>>>,
 }
 
 enum Link {
@@ -58,6 +61,7 @@ impl Session {
             }),
             resume_timeout: Mutex::new(resume_timeout),
             connections: AtomicU64::new(1),
+            clip_turns: Mutex::new(HashMap::new()),
         }
     }
 
@@ -173,6 +177,16 @@ impl Session {
 
     pub(super) fn resume_timeout(&self) -> Duration {
         *lock(&self.resume_timeout)
+    }
+
+    /// The next turn of a `clip.play` for `layer`, to be taken as its request arrives: clips
+    /// join their layer in the order they were sent, though they load at once.
+    pub fn clip_turn(&self, guild_id: Snowflake, layer: &str) -> ClipTurn {
+        let mut turns = lock(&self.clip_turns);
+        let earlier = turns.remove(&(guild_id, layer.to_owned()));
+        let (turn, done) = ClipTurn::after(earlier);
+        turns.insert((guild_id, layer.to_owned()), done);
+        turn
     }
 
     pub fn player(&self, guild_id: Snowflake) -> Option<Arc<GuildPlayer>> {

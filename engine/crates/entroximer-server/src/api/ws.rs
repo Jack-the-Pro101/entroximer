@@ -24,7 +24,7 @@ use super::protocol::{
     ApiError, Call, ErrorCode, Outcome, Request, Response as Reply, ServerMessage, Snowflake,
 };
 use super::{Authorized, HttpError};
-use crate::node::player::GuildPlayer;
+use crate::node::player::{ClipTurn, GuildPlayer};
 use crate::node::{Node, Session, tracks};
 
 /// Queue items `queue.get` returns unless asked otherwise, and at most.
@@ -97,12 +97,22 @@ async fn connection(
         };
         match message {
             Message::Text(text) => {
+                let Some((id, call)) = parse(&session, &text) else {
+                    continue;
+                };
+                // a clip takes its turn on its layer as its request arrives, before it loads
+                let turn = match &call {
+                    Ok(Call::PlayClip(clip)) => Some(session.clip_turn(clip.guild_id, &clip.layer)),
+                    _ => None,
+                };
                 // each request runs on its own, so a slow load never holds up a pause
                 tokio::spawn(handle(
                     Arc::clone(&node),
                     Arc::clone(&session),
                     out.clone(),
-                    text.to_string(),
+                    id,
+                    call,
+                    turn,
                 ));
             }
             Message::Binary(_) => {
@@ -177,35 +187,46 @@ async fn write(
     let _ = sink.send(Message::Close(Some(close))).await;
 }
 
+/// A request's id and what it asks for; `None` if it has no id to answer.
+fn parse(session: &Session, text: &str) -> Option<(u64, Result<Call, ApiError>)> {
+    let request: Request = match serde_json::from_str(text) {
+        Ok(request) => request,
+        Err(e) => {
+            tracing::warn!(session = %session.id, "unreadable request (it needs a numeric id): {e}");
+            return None;
+        }
+    };
+    let call = serde_json::from_value::<Call>(request.call)
+        .map_err(|e| ApiError::new(ErrorCode::BadRequest, e.to_string()));
+    Some((request.id, call))
+}
+
 async fn handle(
     node: Arc<Node>,
     session: Arc<Session>,
     out: mpsc::UnboundedSender<ServerMessage>,
-    text: String,
+    id: u64,
+    call: Result<Call, ApiError>,
+    turn: Option<ClipTurn>,
 ) {
-    let request: Request = match serde_json::from_str(&text) {
-        Ok(request) => request,
-        Err(e) => {
-            tracing::warn!(session = %session.id, "unreadable request (it needs a numeric id): {e}");
-            return;
-        }
-    };
-    let outcome = match serde_json::from_value::<Call>(request.call) {
-        Ok(call) => dispatch(&node, &session, call).await,
-        Err(e) => Err(ApiError::new(ErrorCode::BadRequest, e.to_string())),
+    let outcome = match call {
+        Ok(call) => dispatch(&node, &session, call, turn).await,
+        Err(error) => Err(error),
     };
     let outcome = match outcome {
         Ok(result) => Outcome::Ok { result },
         Err(error) => Outcome::Err { error },
     };
     // a closed connection has nobody to answer
-    let _ = out.send(ServerMessage::Response(Reply {
-        id: request.id,
-        outcome,
-    }));
+    let _ = out.send(ServerMessage::Response(Reply { id, outcome }));
 }
 
-async fn dispatch(node: &Arc<Node>, session: &Arc<Session>, call: Call) -> Result<Value, ApiError> {
+async fn dispatch(
+    node: &Arc<Node>,
+    session: &Arc<Session>,
+    call: Call,
+    turn: Option<ClipTurn>,
+) -> Result<Value, ApiError> {
     match call {
         Call::LoadTrack(params) => to_value(node.tracks.load(&node.ctx, &params.query).await?),
         Call::SearchTracks(params) => to_value(
@@ -278,12 +299,27 @@ async fn dispatch(node: &Arc<Node>, session: &Arc<Session>, call: Call) -> Resul
                 .skip(params.to_item.as_deref())
                 .await?,
         ),
-        Call::ConfigureQueue(params) => {
-            let player = player(session, params.guild_id)?;
-            match params.repeat {
-                Some(repeat) => to_value(player.set_repeat(repeat).await?),
-                None => to_value(player.queue_state()),
-            }
+        Call::ConfigureQueue(params) => to_value(
+            player(session, params.guild_id)?
+                .configure_queue(params.repeat, params.crossfade)
+                .await?,
+        ),
+        Call::UpdateLayer(update) => {
+            let player = session.player_or_create(node, update.guild_id);
+            to_value(player.layer_update(node, *update).await?)
+        }
+        Call::RemoveLayer(params) => {
+            player(session, params.guild_id)?
+                .layer_remove(&params.layer)
+                .await?;
+            Ok(Value::Null)
+        }
+        Call::PlayClip(clip) => {
+            let player = session.player_or_create(node, clip.guild_id);
+            to_value(player.clip_play(node, *clip, turn).await?)
+        }
+        Call::StopClips(params) => {
+            to_value(player(session, params.guild_id)?.clip_stop(params).await?)
         }
         Call::ConfigureSession(settings) => to_value(session.configure(settings)),
         Call::NodeInfo => to_value(node.info().await),

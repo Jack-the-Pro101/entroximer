@@ -101,6 +101,13 @@ function describeEvent(event: Event): { content: string; kind: PostKind } | null
       };
     case "queueEnd":
       return { content: "⏹️ The queue has ended.", kind: "routine" };
+    case "clipError":
+      return { content: `⚠️ The sound ${describeTrack(event.track)} failed: ${event.error.message}`, kind: "problem" };
+    case "clipStuck":
+      return {
+        content: `⏳ Gave up on the sound ${describeTrack(event.track)} after ${formatTime(event.waiting)} without audio.`,
+        kind: "problem",
+      };
     case "voiceClosed":
       // 4006: the voice session was replaced, e.g. by the bot joining from another session
       return event.byRemote

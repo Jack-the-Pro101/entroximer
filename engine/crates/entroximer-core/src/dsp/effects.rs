@@ -3,6 +3,7 @@
 use fundsp::MAX_BUFFER_SIZE;
 use fundsp::audiounit::AudioUnit;
 use fundsp::buffer::BufferVec;
+use fundsp::prelude::limiter_stereo;
 
 use super::CHANNELS;
 use super::rate::RateStage;
@@ -21,6 +22,24 @@ impl Effects {
         Self {
             rate,
             network: network.map(Network::new),
+        }
+    }
+
+    /// Keeps the peaks of a mix within full scale, as the `limiter` node does at its defaults;
+    /// delays it by its 5 ms of look-ahead.
+    pub fn limiter() -> Self {
+        let mut unit: Box<dyn AudioUnit> = Box::new(limiter_stereo(0.005, 0.25));
+        unit.set_sample_rate(48_000.0);
+        unit.reset();
+        Self::new(None, Some(unit))
+    }
+
+    /// Processes interleaved stereo in place; for effects without a rate, which needs more
+    /// input than it outputs.
+    pub fn process(&mut self, audio: &mut [f32]) {
+        debug_assert!(self.rate.is_none(), "effects with a rate need a source");
+        if let Some(network) = &mut self.network {
+            network.process(audio);
         }
     }
 

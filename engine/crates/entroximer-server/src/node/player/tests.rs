@@ -1,4 +1,4 @@
-//! The queue against a deck rendered by hand through [`DeckSource`], as songbird's mixer renders
+//! The queue against a mixer rendered by hand through [`MixerSource`], as songbird's mixer renders
 //! it once voice connects, but faster than real time. Tracks are two-second tones in local files,
 //! named after their titles.
 
@@ -13,7 +13,7 @@ use super::*;
 use crate::api::protocol::{ServerMessage, TrackSelector};
 use crate::config::{MediaConfig, MediaContext};
 use crate::node::NodeSettings;
-use crate::node::output::DeckSource;
+use crate::node::output::MixerSource;
 use crate::node::tracks;
 use crate::sources::{FoundTrack, TrackInfo, TrackRef};
 
@@ -33,7 +33,7 @@ struct Cli {
 struct Harness {
     node: Arc<Node>,
     player: Arc<GuildPlayer>,
-    output: DeckSource,
+    output: MixerSource,
     buffer: Vec<u8>,
     messages: mpsc::UnboundedReceiver<ServerMessage>,
     /// Item ids by the names events are described with.
@@ -46,6 +46,10 @@ struct Harness {
 
 impl Harness {
     async fn new(preload_lead: Duration) -> Self {
+        Self::build(preload_lead, Duration::from_secs(60)).await
+    }
+
+    async fn build(preload_lead: Duration, stuck_after: Duration) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let path = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
         let cli = Cli::parse_from([
@@ -62,7 +66,7 @@ impl Harness {
             NodeSettings {
                 password: None,
                 player_update_interval: Duration::from_secs(3600),
-                stuck_after: Duration::from_secs(60),
+                stuck_after,
                 resume_timeout: Duration::from_secs(60),
                 preload_lead,
             },
@@ -71,7 +75,7 @@ impl Harness {
         let (out, messages) = mpsc::unbounded_channel();
         session.attach(out, false);
         let player = session.player_or_create(&node, Snowflake(2));
-        let output = DeckSource::new(Arc::clone(&player.deck), player.signals.clone());
+        let output = MixerSource::new(Arc::clone(&player.mixer), player.signals.clone());
         Self {
             node,
             player,
@@ -154,11 +158,12 @@ impl Harness {
         let mut batches = Vec::new();
         while fills > 0 {
             self.output.read_exact(&mut self.buffer).unwrap();
+            // of the music or a clip
             let buffering = self
                 .player
-                .deck()
-                .current()
-                .is_some_and(|t| t.player.buffering_since().is_some());
+                .mixer()
+                .players()
+                .any(|player| player.buffering_since().is_some());
             if buffering {
                 tokio::time::sleep(Duration::from_millis(2)).await;
             } else {
@@ -176,6 +181,17 @@ impl Harness {
             }
         }
         batches
+    }
+
+    /// Waits until the prepared next track has downloaded to its end, as it has long before a
+    /// crossfade in real time.
+    async fn next_downloaded(&self) {
+        self.until("the next track downloads", |p| {
+            p.deck()
+                .next()
+                .is_some_and(|next| next.player.media_end().is_some())
+        })
+        .await;
     }
 
     async fn until(&self, what: &str, done: impl Fn(&GuildPlayer) -> bool) {
@@ -260,6 +276,14 @@ impl Harness {
                     .trim_end()
                     .to_owned()
             }
+            "clipStart" => format!("clip start {}", text(&event["clipId"])),
+            "clipEnd" => format!(
+                "clip end {} {}",
+                text(&event["clipId"]),
+                text(&event["reason"])
+            ),
+            "clipError" => format!("clip error {}", text(&event["clipId"])),
+            "clipStuck" => format!("clip stuck {}", text(&event["clipId"])),
             "playerUpdate" | "stats" => return None,
             other => other.to_owned(),
         })
@@ -332,10 +356,100 @@ async fn the_queue_plays_through_without_gaps() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_crossfade_switches_tracks_where_it_starts() {
+    let mut h = Harness::new(Duration::from_secs(1)).await;
+    let queue = h
+        .player
+        .configure_queue(None, Some(Millis(500)))
+        .await
+        .unwrap();
+    assert_eq!(queue.crossfade, Millis(500));
+    let tracks = h.tones(&["a", "b"]).await;
+    h.add(tracks, None).await;
+    assert_eq!(
+        h.events_until("start").await,
+        strings(["added a b", "advanced a", "start a"])
+    );
+
+    // the crossfade starts that much earlier, and so does preparing the next track
+    h.play(Duration::from_millis(400)).await;
+    assert_eq!(h.prepared(), None, "1.6 s remain");
+    h.play(Duration::from_millis(200)).await;
+    assert_eq!(h.prepared().as_deref(), Some("b"), "1.4 s remain");
+    h.next_downloaded().await;
+    let batches = h.play(Duration::from_millis(880)).await;
+    assert!(batches.is_empty(), "{batches:?}");
+    // half a second before a ends, b starts over it: reported as a switch without a crossfade
+    let batches = h.play(Duration::from_millis(60)).await;
+    assert_eq!(
+        batches,
+        [strings(["end a finished", "advanced b", "start b"])]
+    );
+    let batches = h.play(WHOLE_TONE).await;
+    assert_eq!(batches, [strings(["end b finished", "queueEnd"])]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeating_with_a_crossfade_reports_what_repeating_without_one_does() {
+    let mut h = Harness::new(Duration::from_secs(1)).await;
+    h.player
+        .configure_queue(Some(Repeat::Track), Some(Millis(500)))
+        .await
+        .unwrap();
+    let tracks = h.tones(&["a", "b"]).await;
+    h.add(tracks, None).await;
+    h.events_until("start").await;
+    h.play(Duration::from_millis(600)).await;
+    h.next_downloaded().await;
+    let batches = h.play(Duration::from_millis(1000)).await;
+    assert_eq!(batches, [strings(["end a finished", "start a"])]);
+    assert_eq!(h.queue(), ["b"]);
+
+    h.player
+        .configure_queue(Some(Repeat::Queue), None)
+        .await
+        .unwrap();
+    let batches = h.play(Duration::from_millis(500)).await;
+    assert_eq!(batches, [strings(["repeat queue"])]);
+    assert_eq!(h.prepared().as_deref(), Some("b"));
+    h.next_downloaded().await;
+    let batches = h.play(Duration::from_millis(1000)).await;
+    assert_eq!(
+        batches,
+        [strings([
+            "end a finished",
+            "added a",
+            "advanced b",
+            "start b"
+        ])]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn crossfades_over_twelve_seconds_are_refused() {
+    let h = Harness::new(Duration::from_secs(1)).await;
+    let refused = h
+        .player
+        .configure_queue(Some(Repeat::Queue), Some(Millis(12_001)))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::BadRequest);
+    let queue = h.player.queue_state();
+    assert_eq!(
+        (queue.repeat, queue.crossfade),
+        (Repeat::Off, Millis(0)),
+        "a refused change changes nothing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn repeating_a_track_and_turning_it_off() {
     let mut h = Harness::new(Duration::from_secs(1)).await;
     let tracks = h.tones(&["a", "b"]).await;
-    h.player.set_repeat(Repeat::Track).await.unwrap();
+    h.player
+        .configure_queue(Some(Repeat::Track), None)
+        .await
+        .unwrap();
     h.add(tracks, None).await;
     assert_eq!(
         h.events_until("start").await,
@@ -348,7 +462,10 @@ async fn repeating_a_track_and_turning_it_off() {
 
     h.play(Duration::from_millis(1200)).await;
     assert_eq!(h.prepared().as_deref(), Some("a"));
-    h.player.set_repeat(Repeat::Off).await.unwrap();
+    h.player
+        .configure_queue(Some(Repeat::Off), None)
+        .await
+        .unwrap();
     h.tick();
     h.until("b is prepared instead", |_| {
         h.prepared().as_deref() == Some("b")
@@ -368,7 +485,10 @@ async fn repeating_a_track_and_turning_it_off() {
 async fn repeating_the_queue_sends_finished_tracks_to_its_end() {
     let mut h = Harness::new(Duration::from_secs(1)).await;
     let tracks = h.tones(&["a", "b"]).await;
-    h.player.set_repeat(Repeat::Queue).await.unwrap();
+    h.player
+        .configure_queue(Some(Repeat::Queue), None)
+        .await
+        .unwrap();
     h.add(tracks, None).await;
     h.events_until("start").await;
 
@@ -502,7 +622,10 @@ async fn items_that_fail_to_load_are_removed_until_too_many_fail() {
     assert_eq!(h.queue(), ["b"]);
 
     // any change by the client lets it try again
-    h.player.set_repeat(Repeat::Queue).await.unwrap();
+    h.player
+        .configure_queue(Some(Repeat::Queue), None)
+        .await
+        .unwrap();
     assert_eq!(
         h.events_until("start").await,
         strings(["repeat queue", "advanced b", "start b"])
@@ -556,3 +679,5 @@ async fn the_prepared_item_follows_the_head_of_the_queue() {
         ])
     );
 }
+
+mod layers;

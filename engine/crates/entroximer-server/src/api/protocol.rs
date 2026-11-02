@@ -156,6 +156,22 @@ pub enum Call {
     /// Result: [`QueueState`].
     #[serde(rename = "queue.configure")]
     ConfigureQueue(ConfigureQueue),
+    /// Creates a layer of the player (and the player) if needed, and changes it; a refused
+    /// update changes nothing. The music is the player's own layer, which `player.update`
+    /// changes. Result: [`LayerInfo`].
+    #[serde(rename = "layer.update")]
+    UpdateLayer(Box<LayerUpdate>),
+    /// Removes a layer, ending its clips (`stopped`). Result: `null`.
+    #[serde(rename = "layer.remove")]
+    RemoveLayer(LayerRef),
+    /// Plays a sound on a layer, outside the queue, creating the layer (and the player) if
+    /// needed. Its `clipStart` comes before the response if it starts right away. Clips sent
+    /// for the same layer join it in the order they were sent. Result: [`ClipInfo`].
+    #[serde(rename = "clip.play")]
+    PlayClip(Box<PlayClip>),
+    /// Stops a clip of a layer, or all of them, waiting ones too. Result: [`LayerInfo`].
+    #[serde(rename = "clip.stop")]
+    StopClips(StopClips),
     /// Result: [`SessionSettings`].
     #[serde(rename = "session.configure")]
     ConfigureSession(SessionSettings),
@@ -230,7 +246,8 @@ pub struct GuildRef {
     pub guild_id: Snowflake,
 }
 
-/// Changes to a player; absent fields are left alone.
+/// Changes to a player; absent fields are left alone. Its `paused`, `volume`, `graph` and
+/// `preset` are the music's: its other layers, changed with `layer.update`, have their own.
 #[derive(Debug, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerUpdate {
@@ -252,6 +269,7 @@ pub struct PlayerUpdate {
     #[serde(default, deserialize_with = "present")]
     #[ts(optional)]
     pub end_time: Option<Option<Millis>>,
+    /// Pauses the music; the other layers play on.
     #[ts(optional)]
     pub paused: Option<bool>,
     /// Percent: 100 leaves the audio unchanged, up to 1000.
@@ -359,6 +377,134 @@ pub struct ConfigureQueue {
     #[serde(default)]
     #[ts(optional)]
     pub repeat: Option<Repeat>,
+    /// How long the end of each track overlaps the start of the next, up to 12 s; 0 plays them
+    /// back to back. At most half of a track fades, and streams never do.
+    #[serde(default)]
+    #[ts(optional)]
+    pub crossfade: Option<Millis>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct LayerRef {
+    pub guild_id: Snowflake,
+    pub layer: String,
+}
+
+/// Changes to a layer; absent fields are left alone.
+#[derive(Debug, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct LayerUpdate {
+    pub guild_id: Snowflake,
+    /// `a-z`, `0-9`, `_` and `-`, up to 32; not `main`, the music's.
+    pub layer: String,
+    /// Percent: 100 leaves the audio unchanged, up to 1000.
+    #[ts(optional)]
+    pub volume: Option<u16>,
+    /// The layer's own effect graph; `null` removes it.
+    #[serde(default, deserialize_with = "present")]
+    #[ts(optional)]
+    pub graph: Option<Option<GraphSpec>>,
+    /// Replaces the effect graph with a preset's. Not together with `graph`.
+    #[ts(optional)]
+    pub preset: Option<PresetSelection>,
+    /// A paused layer holds its clips where they are; the others play on.
+    #[ts(optional)]
+    pub paused: Option<bool>,
+    /// What a clip does to those playing already; only while the layer has none.
+    #[ts(optional)]
+    pub mode: Option<ClipMode>,
+    /// With `mix`: how many clips play at once, 1 to 8.
+    #[ts(optional)]
+    pub max_clips: Option<u8>,
+    /// Lowers other layers while one of this layer's clips is heard; `null` stops it.
+    #[serde(default, deserialize_with = "present")]
+    #[ts(optional)]
+    pub duck: Option<Option<Duck>>,
+}
+
+/// What a new clip does while a layer plays others.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum ClipMode {
+    /// It waits its turn and plays after them, e.g. announcements.
+    #[default]
+    Queue,
+    /// It plays over them, up to `maxClips` at once; beyond that the oldest ends as `replaced`.
+    Mix,
+    /// It ends them (`replaced`), and the waiting ones.
+    Replace,
+}
+
+/// How a layer lowers others while one of its clips is heard (playing and not waiting for
+/// media), e.g. the music under an announcement.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct Duck {
+    /// The layers lowered; `main` is the music.
+    pub layers: Vec<String>,
+    /// Percent of their volume they keep, 0 to 100.
+    pub volume: u16,
+    /// How long lowering them takes; 50 ms if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attack: Option<Millis>,
+    /// How long bringing them back takes; 500 ms if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub release: Option<Millis>,
+    /// How long they stay lowered after the clips went quiet, so that they do not come back
+    /// between two clips; 250 ms if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub hold: Option<Millis>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayClip {
+    pub guild_id: Snowflake,
+    pub layer: String,
+    pub track: TrackSelector,
+    /// The clip's id in its events, up to 64 characters, unique among the player's clips;
+    /// one is made up if absent.
+    #[serde(default)]
+    #[ts(optional)]
+    pub clip_id: Option<String>,
+    /// Percent of the layer's volume, up to 1000; 100 if absent.
+    #[ts(optional)]
+    pub volume: Option<u16>,
+    /// Where in the track it starts.
+    #[ts(optional)]
+    pub position: Option<Millis>,
+    /// Where in the track it ends.
+    #[ts(optional)]
+    pub end_time: Option<Millis>,
+    /// How long it takes to fade in, up to 10 s.
+    #[ts(optional)]
+    pub fade_in: Option<Millis>,
+    /// How long it takes to fade out when stopped or replaced, up to 10 s.
+    #[ts(optional)]
+    pub fade_out: Option<Millis>,
+    /// Plays again from the start whenever it ends, until stopped; not on `queue` layers,
+    /// where it would hold up every clip after it.
+    #[serde(default, rename = "loop")]
+    #[ts(optional, rename = "loop")]
+    pub looping: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct StopClips {
+    pub guild_id: Snowflake,
+    pub layer: String,
+    /// The clip to stop; every clip of the layer if absent.
+    #[serde(default)]
+    #[ts(optional)]
+    pub clip_id: Option<String>,
+    /// How long they take to fade out, up to 10 s; as each clip says if absent.
+    #[ts(optional)]
+    pub fade_out: Option<Millis>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -486,6 +632,42 @@ pub enum Event {
     /// The YouTube session's state changed, e.g. it expired and needs fresh cookies.
     #[serde(rename_all = "camelCase")]
     YoutubeSession { state: SessionState },
+    /// A clip started playing. One that waited its turn and was stopped never starts.
+    #[serde(rename_all = "camelCase")]
+    ClipStart {
+        guild_id: Snowflake,
+        layer: String,
+        clip_id: String,
+        track: Track,
+    },
+    /// Every clip `clip.play` accepted ends once: `finished`, `stopped`, `replaced`, `failed`
+    /// (after `clipError` or `clipStuck`) or `cleanup`.
+    #[serde(rename_all = "camelCase")]
+    ClipEnd {
+        guild_id: Snowflake,
+        layer: String,
+        clip_id: String,
+        track: Track,
+        reason: TrackEndReason,
+    },
+    #[serde(rename_all = "camelCase")]
+    ClipError {
+        guild_id: Snowflake,
+        layer: String,
+        clip_id: String,
+        track: Track,
+        error: ApiError,
+    },
+    /// The clip waited for media longer than the engine's threshold; it ends as `failed`, so
+    /// that the clips after it play.
+    #[serde(rename_all = "camelCase")]
+    ClipStuck {
+        guild_id: Snowflake,
+        layer: String,
+        clip_id: String,
+        track: Track,
+        waiting: Millis,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
@@ -528,6 +710,43 @@ pub struct PlayerInfo {
     /// The effect graph, as set or as a preset built it.
     pub graph: Option<GraphSpec>,
     pub state: PlayerState,
+    /// The player's layers besides the music, which the fields above describe.
+    pub layers: Vec<LayerInfo>,
+}
+
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LayerInfo {
+    pub name: String,
+    pub mode: ClipMode,
+    pub max_clips: u8,
+    pub volume: u16,
+    pub paused: bool,
+    pub graph: Option<GraphSpec>,
+    pub duck: Option<Duck>,
+    /// The clips playing, then those waiting, in the order they were played.
+    pub clips: Vec<ClipInfo>,
+}
+
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ClipInfo {
+    pub clip_id: String,
+    pub layer: String,
+    pub track: Track,
+    pub status: ClipStatus,
+    /// Position in the clip's track.
+    pub position: Millis,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum ClipStatus {
+    Playing,
+    /// Waits for those before it on a `queue` layer.
+    Waiting,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
@@ -539,6 +758,7 @@ pub struct QueueState {
     pub version: u64,
     pub length: u32,
     pub repeat: Repeat,
+    pub crossfade: Millis,
 }
 
 #[derive(Clone, Debug, Serialize, TS)]

@@ -59,3 +59,51 @@ pub fn assert_playing_second(audio: &[f32], second: f64) {
         "expected second {second} ({expected} Hz), heard {hz:.1} Hz"
     );
 }
+
+/// Amplitude of the left channel's component at `hz`, by the Goertzel algorithm: unlike zero
+/// crossings, it tells two tones playing at once apart.
+pub fn tone_level(interleaved: &[f32], hz: f64) -> f64 {
+    let left: Vec<f64> = interleaved
+        .iter()
+        .step_by(2)
+        .map(|&s| f64::from(s))
+        .collect();
+    let coefficient = 2.0 * (2.0 * std::f64::consts::PI * hz / 48_000.0).cos();
+    let (mut previous, mut before) = (0.0, 0.0);
+    for sample in &left {
+        let current = sample + coefficient * previous - before;
+        before = previous;
+        previous = current;
+    }
+    let power = previous * previous + before * before - coefficient * previous * before;
+    2.0 * power.sqrt() / left.len() as f64
+}
+
+/// A tone of `hz` at `amplitude` (linear) lasting `seconds`, made once per run.
+pub fn tone(hz: u32, amplitude: f64, seconds: u32) -> PathBuf {
+    static MAKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let path = dir.join(format!("stereo-tone-{hz}-{amplitude}-{seconds}.webm"));
+    let _one_at_a_time = MAKING.lock().unwrap_or_else(|e| e.into_inner());
+    if !path.exists() {
+        // under another name first, so that no test reads it half written
+        let partial = dir.join(format!(
+            "stereo-tone-{hz}-{amplitude}-{seconds}.{}.webm",
+            std::process::id()
+        ));
+        // both channels at the amplitude: upmixing mono would put them 3 dB lower
+        let channel = format!("{amplitude}*sin(2*PI*{hz}*t)");
+        let tone = format!("aevalsrc={channel}|{channel}:s=48000:d={seconds}");
+        let status = Command::new("ffmpeg")
+            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y"])
+            .args([
+                "-f", "lavfi", "-i", &tone, "-c:a", "libopus", "-b:a", "128k",
+            ])
+            .arg(&partial)
+            .status()
+            .expect("ffmpeg must be installed to run these tests");
+        assert!(status.success(), "ffmpeg failed to create a tone");
+        std::fs::rename(&partial, &path).unwrap();
+    }
+    path
+}

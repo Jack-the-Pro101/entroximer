@@ -37,6 +37,7 @@ export interface AddOptions {
 export class Queue extends Emitter<QueueEvents> {
   #items: readonly QueueItem[] = [];
   #repeat: Repeat = "off";
+  #crossfade = 0;
   #version = 0;
   /** Changes that arrive while syncing, applied on top of the fetched queue. */
   #buffered: Array<{ version: number; change: QueueChange }> | null = null;
@@ -67,6 +68,11 @@ export class Queue extends Emitter<QueueEvents> {
   /** `track` plays the current track again and again; `queue` sends finished tracks to the end. */
   get repeat(): Repeat {
     return this.#repeat;
+  }
+
+  /** How long the end of each track overlaps the start of the next, in ms; 0 for none. */
+  get crossfade(): number {
+    return this.#crossfade;
   }
 
   /** The engine's count of changes to this queue, as far as this mirror has followed them. */
@@ -113,6 +119,17 @@ export class Queue extends Emitter<QueueEvents> {
   }
 
   /**
+   * Overlaps the end of each track with the start of the next for `ms` (up to 12 000), one
+   * fading out as the other fades in; 0 plays them back to back. At most half of a track fades,
+   * and streams never do.
+   */
+  setCrossfade(ms: number): Promise<QueueState> {
+    return this.#edit(
+      this.#request("queue.configure", { guildId: this.guildId, crossfade: ms }),
+    );
+  }
+
+  /**
    * Fetches the whole queue again. The queue does this by itself when it notices missed
    * changes, so this is rarely needed.
    */
@@ -137,6 +154,8 @@ export class Queue extends Emitter<QueueEvents> {
    * applied by now, so a newer version means some were missed.
    */
   _handleState(state: QueueState): void {
+    // only clients change it, so the latest state has it right
+    this.#crossfade = state.crossfade;
     if (this.#buffered === null && state.version > this.#version) {
       this.#syncInBackground();
     }

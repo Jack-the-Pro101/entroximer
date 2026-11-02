@@ -1,31 +1,26 @@
-//! A guild's player: a deck playing into a songbird voice connection, fed from a queue.
+//! A guild's player: a mixer playing into a songbird voice connection, its music layer's deck
+//! fed from a queue.
 //!
 //! Every deck event, whether the mixer thread or a request drained it, travels through one
 //! channel to one task. A request waits for that task to catch up before it responds, so the
 //! events it caused arrive before its response. Events are emitted with the player's state
 //! locked, so clients see queue changes in the order of their versions.
 //!
-//! # Seamless queues
-//! The item that comes next is prepared in the deck's gapless next slot: resolved and
-//! downloading. A tick checks how much of the current track remains and starts preparing once
-//! that drops below the preload lead, so the next track is buffered long before it is needed,
-//! whatever the client does meanwhile. If the queue changes so that another item comes next, the
-//! prepared one is dropped, which cancels its download. When the deck switches to the prepared
-//! track, its item leaves the queue.
-//!
-//! A queue item that cannot be loaded is reported with `trackError` and removed, and the queue
-//! goes on; after [`MAX_FAILURES`] in a row it waits for the client to change something.
+//! The queue's scheduling is in [`queue_flow`], the other layers and their clips in [`layers`],
+//! the voice connection in [`connection`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU64;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use entroximer_core::deck::{Deck, DeckEvent, DeckTrack, EndReason, TrackId};
-use entroximer_core::dsp::GraphSpec;
+use entroximer_core::dsp::{Effects, GraphSpec, PresetSelection};
 use entroximer_core::error::display_chain;
+use entroximer_core::mixer::Mixer;
 use entroximer_core::player::{PlaybackError, Player, SAMPLE_RATE};
 use entroximer_core::timeline::{Ticks, TimelineStats, ticks};
 use songbird::events::context_data::DisconnectReason;
@@ -38,8 +33,10 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 use tokio::time::MissedTickBehavior;
 
+pub use layers::ClipTurn;
+
 use super::Node;
-use super::output::DeckSource;
+use super::output::MixerSource;
 use super::queue::{Queue, QueueChange, QueueItem, Repeat};
 use super::session::Session;
 use super::tracks::Loaded;
@@ -56,6 +53,8 @@ const MAX_FAILURES: u32 = 5;
 const MAX_VOLUME: u16 = 1000;
 /// Items one queue may hold.
 const MAX_QUEUE_LENGTH: usize = 10_000;
+/// The longest crossfade between queue tracks.
+const MAX_CROSSFADE: Millis = Millis(12_000);
 
 /// Something for the player's event task.
 pub(super) enum Signal {
@@ -70,9 +69,9 @@ pub struct GuildPlayer {
     me: Weak<GuildPlayer>,
     node: Weak<Node>,
     session: Weak<Session>,
-    deck: Arc<Mutex<Deck>>,
+    mixer: Arc<Mutex<Mixer>>,
     driver: tokio::sync::Mutex<Driver>,
-    /// songbird's track playing the deck; paused while there is nothing to hear.
+    /// songbird's track playing the mixer; paused while there is nothing to hear.
     output: TrackHandle,
     /// Whether `output` was last told to play; held while telling it, so that changes apply in
     /// order. `None` once telling it failed.
@@ -85,7 +84,7 @@ pub struct GuildPlayer {
     updating: tokio::sync::Mutex<()>,
 }
 
-/// Lock order: `output_playing`, `state`, then `deck`; never the other way around.
+/// Lock order: `output_playing`, `state`, then `mixer`; never the other way around.
 #[derive(Default)]
 struct State {
     /// The queue item each deck track plays.
@@ -112,6 +111,10 @@ struct State {
     voice: Option<VoiceState>,
     connected: bool,
     destroying: bool,
+    /// The layers besides the music, in the order they were made.
+    layers: Vec<layers::LayerState>,
+    /// The clips in the layers' decks, by deck track, in the order they were played.
+    clips: BTreeMap<TrackId, layers::ClipEntry>,
 }
 
 /// An item being resolved in the background.
@@ -131,7 +134,7 @@ impl GuildPlayer {
         session: &Arc<Session>,
         guild_id: Snowflake,
     ) -> Arc<Self> {
-        let deck = Arc::new(Mutex::new(Deck::new(node.settings.stuck_after)));
+        let mixer = Arc::new(Mutex::new(Mixer::new(node.settings.stuck_after)));
         let (signals, receiver) = mpsc::unbounded_channel();
         let player = Arc::new_cyclic(|me: &Weak<Self>| {
             let mut driver = Driver::new(songbird::Config::default());
@@ -140,9 +143,9 @@ impl GuildPlayer {
                 CoreEvent::DriverReconnect,
                 CoreEvent::DriverDisconnect,
             ] {
-                driver.add_global_event(event.into(), VoiceEvents(me.clone()));
+                driver.add_global_event(event.into(), connection::VoiceEvents(me.clone()));
             }
-            let source = DeckSource::new(Arc::clone(&deck), signals.clone());
+            let source = MixerSource::new(Arc::clone(&mixer), signals.clone());
             let output =
                 driver.play_only_input(Input::from(RawAdapter::new(source, SAMPLE_RATE, 2)));
             let paused = output.pause();
@@ -155,7 +158,7 @@ impl GuildPlayer {
                 me: me.clone(),
                 node: Arc::downgrade(node),
                 session: Arc::downgrade(session),
-                deck,
+                mixer,
                 driver: tokio::sync::Mutex::new(driver),
                 output,
                 output_playing: Mutex::new(paused.is_ok().then_some(false)),
@@ -185,27 +188,7 @@ impl GuildPlayer {
         if update.volume.is_some_and(|volume| volume > MAX_VOLUME) {
             return Err(bad_request(format!("volume must be 0 to {MAX_VOLUME}")));
         }
-        let graph = match (update.graph, update.preset) {
-            (Some(_), Some(_)) => {
-                return Err(bad_request("give either `graph` or `preset`, not both"));
-            }
-            (Some(graph), None) => Some(graph),
-            (None, Some(preset)) => Some(Some(
-                node.presets
-                    .build(&preset)
-                    .map_err(|e| bad_request(display_chain(&e)))?,
-            )),
-            (None, None) => None,
-        };
-        let effects = match &graph {
-            Some(Some(spec)) => Some(Some(
-                node.registry
-                    .compile(spec, f64::from(SAMPLE_RATE))
-                    .map_err(|e| bad_request(display_chain(&e)))?,
-            )),
-            Some(None) => Some(None),
-            None => None,
-        };
+        let effects = compile_effects(node, update.graph, update.preset)?;
         let voice = update
             .voice
             .map(|voice| self.connection_info(&voice).map(|info| (voice, info)))
@@ -225,12 +208,13 @@ impl GuildPlayer {
             self.deck().set_volume(f32::from(volume) / 100.0);
             self.state().volume = volume;
         }
-        if let (Some(graph), Some(effects)) = (graph, effects) {
+        if let Some((graph, effects)) = effects {
             self.deck().set_effects(effects);
             self.state().graph = graph;
         }
         if let Some(paused) = update.paused {
             self.state().paused = paused;
+            self.mixer().main_mut().paused = paused;
         }
         let end_at = update.end_time.map(|end| end.map(Millis::to_ticks));
         let mut seek = update.position.map(Millis::to_ticks);
@@ -332,8 +316,27 @@ impl GuildPlayer {
             .await
     }
 
-    pub async fn set_repeat(&self, repeat: Repeat) -> Result<QueueState, ApiError> {
-        self.edit_queue(|queue| Ok(queue.set_repeat(repeat))).await
+    /// Sets what repeats and how long tracks crossfade; a crossfade over 12 s is refused, and
+    /// changes nothing.
+    pub async fn configure_queue(
+        &self,
+        repeat: Option<Repeat>,
+        crossfade: Option<Millis>,
+    ) -> Result<QueueState, ApiError> {
+        if crossfade.is_some_and(|crossfade| crossfade > MAX_CROSSFADE) {
+            return Err(bad_request(format!(
+                "crossfade must be 0 to {} ms",
+                MAX_CROSSFADE.0
+            )));
+        }
+        self.edit_queue(|queue| {
+            if let Some(crossfade) = crossfade {
+                queue.set_crossfade(crossfade);
+                self.deck().set_crossfade(crossfade.to_ticks());
+            }
+            Ok(repeat.and_then(|repeat| queue.set_repeat(repeat)))
+        })
+        .await
     }
 
     /// Ends the current track and plays the first item of the queue (after dropping the items
@@ -356,6 +359,7 @@ impl GuildPlayer {
             let mut state = self.state();
             state.destroying = true;
             self.drop_prepared(&mut state);
+            self.end_clips(&mut state);
         }
         self.deck().stop();
         self.drain_deck();
@@ -376,6 +380,7 @@ impl GuildPlayer {
             volume: state.volume,
             graph: state.graph.clone(),
             state: player_state,
+            layers: self.layer_infos(&state),
         }
     }
 
@@ -397,15 +402,12 @@ impl GuildPlayer {
         }
     }
 
-    /// Whether audio is flowing: something is loaded, the client has not paused it and is
-    /// connected. (Without a voice connection songbird reads nothing either, so the position
-    /// also holds while voice reconnects.)
+    /// Whether audio is flowing: some layer that the client has not paused has something to
+    /// play, and the client is connected. (Without a voice connection songbird reads nothing
+    /// either, so positions also hold while voice reconnects.)
     pub fn is_playing(&self) -> bool {
-        let audible = {
-            let state = self.state();
-            !state.paused && !state.client_away
-        };
-        audible && !self.deck().is_idle()
+        let present = !self.state().client_away;
+        present && self.mixer().is_audible()
     }
 
     /// Pauses playback while the client is away and continues it, from the same position, when
@@ -415,13 +417,11 @@ impl GuildPlayer {
         self.sync_output();
     }
 
-    /// Cached audio of the current and next tracks.
+    /// Cached audio of every track the player holds.
     pub fn cache_stats(&self) -> TimelineStats {
-        let deck = self.deck();
-        [deck.current(), deck.next()]
-            .into_iter()
-            .flatten()
-            .map(|t| t.player.cache_stats())
+        self.mixer()
+            .players()
+            .map(|player| player.cache_stats())
             .fold(TimelineStats::default(), |sum, s| TimelineStats {
                 ranges: sum.ranges + s.ranges,
                 packets: sum.packets + s.packets,
@@ -458,272 +458,11 @@ impl GuildPlayer {
         Ok(queue)
     }
 
-    fn skip_locked(&self, state: &mut State, to: Option<&str>) -> Result<(), ApiError> {
-        if let Some(to) = to {
-            let position = state.queue.position(to).ok_or_else(|| no_item(to))?;
-            let before: Vec<String> = state
-                .queue
-                .iter()
-                .take(position)
-                .map(|item| item.id.clone())
-                .collect();
-            let change = state.queue.remove(&before);
-            self.report(&state.queue, change);
-        }
-        state.halted = false;
-        state.failures = 0;
-        state.finished = None;
-        let repeat_queue = state.queue.repeat() == Repeat::Queue;
-
-        // the item skipped: the one an earlier skip is still waiting for, else the current one
-        match state.preparing.take_if(|p| p.skip) {
-            Some(pending) if Some(pending.item_id.as_str()) == to => {
-                // on its way already
-                state.preparing = Some(pending);
-                return Ok(());
-            }
-            Some(pending) => {
-                pending.task.abort();
-                let change = if repeat_queue {
-                    state.queue.move_item(&pending.item_id, usize::MAX)
-                } else {
-                    state.queue.remove(std::slice::from_ref(&pending.item_id))
-                };
-                self.report(&state.queue, change);
-            }
-            None => {
-                let current = state.current.and_then(|id| state.items.get(&id)).cloned();
-                if repeat_queue && let Some(current) = current {
-                    let change = state.queue.add(vec![current], None);
-                    self.report(&state.queue, change);
-                }
-            }
-        }
-
-        let head = state.queue.head().cloned();
-        let head_prepared = head.as_ref().is_some_and(|head| {
-            state
-                .prepared
-                .as_ref()
-                .is_some_and(|(_, item)| *item == head.id)
-        });
-        match head {
-            Some(_) if head_prepared => self.deck().skip(),
-            Some(head) => {
-                self.drop_prepared(state);
-                self.start_preparation(state, head, true);
-            }
-            None => {
-                self.drop_prepared(state);
-                self.deck().skip();
-            }
-        }
-        Ok(())
-    }
-
     /// Lets the deck's events reach clients and the output follow, before a response goes out.
     async fn settle(&self) {
         self.drain_deck();
         self.flush().await;
         self.sync_output();
-    }
-
-    /// The client stopped playback: the queue waits until it asks for something to play.
-    fn halt(&self) {
-        let mut state = self.state();
-        state.halted = true;
-        state.finished = None;
-        self.drop_prepared(&mut state);
-        self.deck().stop();
-    }
-
-    /// Prepares the item that comes next once the current track nears its end, and drops a
-    /// prepared or preparing item that no longer comes next. Called with the state locked,
-    /// right after it changed.
-    fn plan_next(&self, state: &mut State) {
-        if state.destroying || state.halted || !self.caught_up(state) {
-            return;
-        }
-        if state.preparing.as_ref().is_some_and(|p| p.skip) {
-            return; // the skip decides what plays
-        }
-        let anchor = state
-            .current
-            .and_then(|id| state.items.get(&id))
-            .or(state.finished.as_ref());
-        let wanted = state.queue.upcoming(anchor).cloned();
-        let wanted_id = wanted.as_ref().map(|item| item.id.as_str());
-        let prepared = state.prepared.as_ref().map(|(_, item)| item.as_str());
-        let preparing = state.preparing.as_ref().map(|p| p.item_id.as_str());
-        if wanted_id.is_some() && (prepared == wanted_id || preparing == wanted_id) {
-            return;
-        }
-        self.drop_prepared(state);
-        if let Some(wanted) = wanted
-            && state.failures < MAX_FAILURES
-            && self.preparation_due(state)
-        {
-            self.start_preparation(state, wanted, false);
-        }
-    }
-
-    /// Whether the state has caught up with the deck, i.e. no switch of tracks is still on its
-    /// way to [`Self::handle`] (which plans again once it arrives).
-    fn caught_up(&self, state: &State) -> bool {
-        let deck = self.deck();
-        deck.current().map(|t| t.id) == state.current
-            && deck.next().map(|t| t.id) == state.prepared.as_ref().map(|(id, _)| *id)
-    }
-
-    /// Whether the current track ends within the preload lead, or nothing plays. A stream's end
-    /// cannot be foreseen; what follows it is prepared once it ends.
-    fn preparation_due(&self, state: &State) -> bool {
-        let Some(node) = self.node.upgrade() else {
-            return false;
-        };
-        let deck = self.deck();
-        let Some(playing) = deck.current() else {
-            return true;
-        };
-        let length = state
-            .items
-            .get(&playing.id)
-            .and_then(|item| item.track.info.length)
-            .map(Millis::to_ticks);
-        let end = playing
-            .end_at
-            .or_else(|| playing.player.media_end())
-            .or(length);
-        let lead = ticks(node.settings.preload_lead);
-        end.is_some_and(|end| end - playing.player.position() <= lead)
-    }
-
-    /// Resolves `item` in the background; see [`Self::finish_preparation`].
-    fn start_preparation(&self, state: &mut State, item: QueueItem, skip: bool) {
-        let Some(node) = self.node.upgrade() else {
-            return;
-        };
-        if let Some(previous) = state.preparing.take() {
-            previous.task.abort();
-        }
-        let attempt = self.next_attempt.fetch_add(1, Ordering::Relaxed);
-        tracing::debug!(
-            guild_id = %self.guild_id,
-            item = %item.id,
-            title = %item.track.info.title,
-            skip,
-            "preparing the next track"
-        );
-        let item_id = item.id.clone();
-        let player = self.me.clone();
-        let task = tokio::spawn(async move {
-            let loaded = node.tracks.get(&node.ctx, &item.track.encoded).await;
-            if let Some(player) = player.upgrade() {
-                player.finish_preparation(&node, item, attempt, loaded);
-            }
-        });
-        state.preparing = Some(Preparation {
-            item_id,
-            attempt,
-            skip,
-            task: task.abort_handle(),
-        });
-    }
-
-    fn finish_preparation(
-        &self,
-        node: &Node,
-        mut item: QueueItem,
-        attempt: u64,
-        loaded: Result<Loaded, ApiError>,
-    ) {
-        {
-            let mut state = self.state();
-            let Some(preparation) = state.preparing.take_if(|p| p.attempt == attempt) else {
-                return; // cancelled meanwhile
-            };
-            match loaded {
-                Ok(loaded) => {
-                    state.failures = 0;
-                    // resolving can tell more, e.g. a YouTube Music result's artist and length
-                    let track = Track {
-                        user_data: item.track.user_data.take(),
-                        ..loaded.track.clone()
-                    };
-                    let change = state.queue.update(&item.id, track.clone());
-                    self.report(&state.queue, change);
-                    item.track = track;
-                    let deck_track = self.deck_track(node, loaded, None, None);
-                    state.prepared = Some((deck_track.id, item.id.clone()));
-                    state.items.insert(deck_track.id, item);
-                    let mut deck = self.deck();
-                    if preparation.skip {
-                        deck.play(deck_track);
-                    } else {
-                        deck.set_next(Some(deck_track));
-                    }
-                }
-                Err(error) => {
-                    state.failures += 1;
-                    tracing::debug!(
-                        guild_id = %self.guild_id,
-                        item = %item.id,
-                        "cannot load a queued track: {}",
-                        error.message
-                    );
-                    self.emit(Event::TrackError {
-                        guild_id: self.guild_id,
-                        track: item.track.clone(),
-                        item_id: item.id.clone(),
-                        error,
-                    });
-                    let change = if state.queue.position(&item.id).is_some() {
-                        state.queue.remove(std::slice::from_ref(&item.id))
-                    } else {
-                        // the item being repeated cannot be loaded again
-                        state.queue.set_repeat(Repeat::Off)
-                    };
-                    self.report(&state.queue, change);
-                    if preparation.skip {
-                        self.continue_skip(&mut state);
-                    } else {
-                        self.plan_next(&mut state);
-                        self.end_if_ran_out(&state);
-                    }
-                }
-            }
-        }
-        self.drain_deck();
-        self.sync_output();
-    }
-
-    /// The item a skip waited for failed: skip to the next one, or stop.
-    fn continue_skip(&self, state: &mut State) {
-        match state.queue.head().cloned() {
-            Some(head) if state.failures < MAX_FAILURES => {
-                self.start_preparation(state, head, true);
-            }
-            // the playing track ends, which reports the end of the queue
-            _ if !self.deck().is_idle() => self.deck().skip(),
-            _ => self.end_if_ran_out(state),
-        }
-    }
-
-    /// Forgets the prepared next track, cancelling its download, and stops any preparation.
-    fn drop_prepared(&self, state: &mut State) {
-        if let Some(preparing) = state.preparing.take() {
-            preparing.task.abort();
-        }
-        let Some(track_id) = state.prepared.as_ref().map(|(id, _)| *id) else {
-            return;
-        };
-        let mut deck = self.deck();
-        // once started, it is no longer next; its events are on the way and settle it
-        if deck.next().is_some_and(|next| next.id == track_id) {
-            deck.set_next(None);
-            state.prepared = None;
-            state.items.remove(&track_id);
-        }
     }
 
     fn deck_track(
@@ -735,6 +474,7 @@ impl GuildPlayer {
     ) -> DeckTrack {
         DeckTrack {
             id: self.next_track.fetch_add(1, Ordering::Relaxed),
+            length: loaded.track.info.length.map(Millis::to_ticks),
             player: Player::new(
                 Handle::current(),
                 loaded.producer,
@@ -745,49 +485,9 @@ impl GuildPlayer {
         }
     }
 
-    /// Checks the voice details a client sent and puts them the way songbird takes them.
-    fn connection_info(&self, voice: &VoiceState) -> Result<ConnectionInfo, ApiError> {
-        let id = |snowflake: Snowflake, what: &str| {
-            NonZeroU64::new(snowflake.0).ok_or_else(|| bad_request(format!("{what} must not be 0")))
-        };
-        Ok(ConnectionInfo {
-            channel_id: ChannelId(id(voice.channel_id, "channelId")?),
-            endpoint: voice.endpoint.clone(),
-            guild_id: GuildId(id(self.guild_id, "guildId")?),
-            session_id: voice.session_id.clone(),
-            token: voice.token.clone(),
-            user_id: UserId(id(self.user_id, "the bot's user ID")?),
-        })
-    }
-
-    /// Connects to voice with new details; unchanged ones keep the connection as it is.
-    ///
-    /// Discord answers asynchronously: the outcome arrives as a driver event (see
-    /// [`VoiceEvents`]), not in the response. A connection that fails or that Discord closes
-    /// forgets its details, so that sending the same ones again retries.
-    async fn connect(&self, voice: VoiceState, info: ConnectionInfo) {
-        {
-            let mut state = self.state();
-            if state.voice.as_ref() == Some(&voice) {
-                return;
-            }
-            tracing::info!(
-                guild_id = %self.guild_id,
-                channel_id = %voice.channel_id,
-                endpoint = %voice.endpoint,
-                session = short(&voice.session_id),
-                "connecting to voice"
-            );
-            state.voice = Some(voice);
-            state.connected = false;
-        }
-        // songbird keeps connecting when the outcome is not awaited
-        drop(self.driver.lock().await.connect(info));
-    }
-
-    /// Passes events the deck produced during a request to the event task.
+    /// Passes events the mixer produced during a request to the event task.
     fn drain_deck(&self) {
-        let events = self.deck().drain_events();
+        let events = self.mixer().drain_events();
         for event in events {
             let _ = self.signals.send(Signal::Deck(event));
         }
@@ -804,6 +504,18 @@ impl GuildPlayer {
     fn handle(&self, event: DeckEvent) {
         {
             let mut state = self.state();
+            let id = match &event {
+                DeckEvent::Started(id)
+                | DeckEvent::Ended(id, _)
+                | DeckEvent::Failed(id, _)
+                | DeckEvent::Stuck(id, _) => *id,
+            };
+            if layers::is_clip(id) {
+                self.clip_event(&mut state, id, event);
+                drop(state);
+                self.sync_output();
+                return;
+            }
             match event {
                 DeckEvent::Started(id) => self.started(&mut state, id),
                 DeckEvent::Ended(id, reason) => self.ended(&mut state, id, reason),
@@ -831,90 +543,6 @@ impl GuildPlayer {
             self.plan_next(&mut state);
         }
         self.sync_output();
-    }
-
-    fn started(&self, state: &mut State, id: TrackId) {
-        state.current = Some(id);
-        state.finished = None;
-        let Some(item) = state.items.get(&id).cloned() else {
-            return;
-        };
-        // the item leaves the queue first, so that clients see what comes next at `trackStart`
-        if state
-            .prepared
-            .as_ref()
-            .is_some_and(|(prepared, _)| *prepared == id)
-        {
-            state.prepared = None;
-            let change = state.queue.advance(&item);
-            self.report(&state.queue, change);
-        }
-        self.emit(Event::TrackStart {
-            guild_id: self.guild_id,
-            track: item.track,
-            item_id: item.id,
-        });
-    }
-
-    fn ended(&self, state: &mut State, id: TrackId, reason: EndReason) {
-        if state.current == Some(id) {
-            state.current = None;
-        }
-        let reason = match reason {
-            EndReason::Finished => TrackEndReason::Finished,
-            EndReason::Stopped if state.destroying => TrackEndReason::Cleanup,
-            EndReason::Stopped => TrackEndReason::Stopped,
-            EndReason::Replaced => TrackEndReason::Replaced,
-            EndReason::Failed => TrackEndReason::Failed,
-        };
-        let Some(item) = state.items.remove(&id) else {
-            return;
-        };
-        self.emit(Event::TrackEnd {
-            guild_id: self.guild_id,
-            track: item.track.clone(),
-            item_id: item.id.clone(),
-            reason,
-        });
-        if reason == TrackEndReason::Finished {
-            // a repeated queue gets its tracks back at the end (a skip may have sent it there)
-            if state.queue.repeat() == Repeat::Queue && state.queue.position(&item.id).is_none() {
-                let change = state.queue.add(vec![item.clone()], None);
-                self.report(&state.queue, change);
-            }
-            state.finished = Some(item);
-        }
-        if reason != TrackEndReason::Replaced {
-            self.end_if_ran_out(state);
-        }
-    }
-
-    /// Reports the end of the queue if nothing plays, nothing is on its way and nothing comes
-    /// next (though not after a stop by the client).
-    fn end_if_ran_out(&self, state: &State) {
-        let ran_out = !state.halted
-            && !state.destroying
-            && state.prepared.is_none()
-            && state.preparing.is_none()
-            && state.queue.upcoming(state.finished.as_ref()).is_none()
-            && self.deck().is_idle();
-        if ran_out {
-            self.emit(Event::QueueEnd {
-                guild_id: self.guild_id,
-            });
-        }
-    }
-
-    /// Tells clients about a queue change. Called with the state locked, so they see changes in
-    /// the order of their versions.
-    fn report(&self, queue: &Queue, change: Option<QueueChange>) {
-        if let Some(change) = change {
-            self.emit(Event::QueueChanged {
-                guild_id: self.guild_id,
-                version: queue.version(),
-                change,
-            });
-        }
     }
 
     /// Plays the songbird output only while there is something to hear, so Discord gets no
@@ -948,12 +576,34 @@ impl GuildPlayer {
         }
     }
 
-    fn deck(&self) -> MutexGuard<'_, Deck> {
-        self.deck.lock().unwrap_or_else(|e| e.into_inner())
+    /// The music's deck, which the queue plays into.
+    fn deck(&self) -> DeckGuard<'_> {
+        DeckGuard(self.mixer())
+    }
+
+    fn mixer(&self) -> MutexGuard<'_, Mixer> {
+        self.mixer.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// The mixer, locked, as its music deck.
+struct DeckGuard<'a>(MutexGuard<'a, Mixer>);
+
+impl Deref for DeckGuard<'_> {
+    type Target = Deck;
+
+    fn deref(&self) -> &Deck {
+        &self.0.main().deck
+    }
+}
+
+impl DerefMut for DeckGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Deck {
+        &mut self.0.main_mut().deck
     }
 }
 
@@ -970,6 +620,7 @@ fn queue_state(queue: &Queue) -> QueueState {
         version: queue.version(),
         length: u32::try_from(queue.len()).unwrap_or(u32::MAX),
         repeat: queue.repeat(),
+        crossfade: queue.crossfade(),
     }
 }
 
@@ -994,7 +645,8 @@ async fn handle_signals(player: Weak<GuildPlayer>, mut signals: mpsc::UnboundedR
     }
 }
 
-/// Checks regularly whether to prepare the next item, while the player exists.
+/// Checks regularly whether to prepare the next item, while the player exists, and whether the
+/// output still has something to play: tails of cut-off tracks end without an event.
 async fn preload_ticks(player: Weak<GuildPlayer>) {
     let mut ticks = tokio::time::interval(PRELOAD_TICK);
     ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -1003,101 +655,44 @@ async fn preload_ticks(player: Weak<GuildPlayer>) {
         let Some(player) = player.upgrade() else {
             return;
         };
-        let mut state = player.state();
-        if state.destroying {
-            return;
+        {
+            let mut state = player.state();
+            if state.destroying {
+                return;
+            }
+            player.plan_next(&mut state);
         }
-        player.plan_next(&mut state);
+        player.sync_output();
     }
 }
 
-/// Reports the voice connection's state.
-struct VoiceEvents(Weak<GuildPlayer>);
+/// New effects: the graph to show, and what it compiles to; `None` for none.
+type NewEffects = (Option<GraphSpec>, Option<Effects>);
 
-#[async_trait]
-impl songbird::EventHandler for VoiceEvents {
-    async fn act(&self, ctx: &EventContext<'_>) -> Option<songbird::Event> {
-        let player = self.0.upgrade()?;
-        match ctx {
-            EventContext::DriverConnect(data) | EventContext::DriverReconnect(data) => {
-                tracing::info!(
-                    guild_id = %player.guild_id,
-                    channel_id = data.channel_id.0.get(),
-                    server = data.server,
-                    session = short(data.session_id),
-                    reconnected = matches!(ctx, EventContext::DriverReconnect(_)),
-                    "voice connected"
-                );
-                player.state().connected = true;
-                player.sync_output();
-            }
-            EventContext::DriverDisconnect(data) => {
-                let requested = matches!(data.reason, Some(DisconnectReason::Requested));
-                {
-                    let mut state = player.state();
-                    state.connected = false;
-                    // songbird gave up on these details; the same ones sent again retry
-                    if state
-                        .voice
-                        .as_ref()
-                        .is_some_and(|v| v.session_id == data.session_id)
-                    {
-                        state.voice = None;
-                    }
-                }
-                let (code, by_remote) = match data.reason {
-                    Some(DisconnectReason::WsClosed(code)) => (code.map(|c| c as u16), true),
-                    _ => (None, false),
-                };
-                let reason = disconnect_reason(data);
-                if requested {
-                    tracing::debug!(guild_id = %player.guild_id, "left voice");
-                } else {
-                    // 4006 right after connecting usually means another gateway session of the
-                    // bot joined this guild's voice since (e.g. the bot runs twice)
-                    tracing::warn!(
-                        guild_id = %player.guild_id,
-                        code,
-                        session = short(data.session_id),
-                        "voice connection lost: {reason}"
-                    );
-                }
-                player.emit(Event::VoiceClosed {
-                    guild_id: player.guild_id,
-                    code,
-                    reason,
-                    by_remote,
-                });
-            }
-            _ => {}
+/// Checks a client's new effects, given as a graph or a preset; `None` leaves them alone.
+fn compile_effects(
+    node: &Node,
+    graph: Option<Option<GraphSpec>>,
+    preset: Option<PresetSelection>,
+) -> Result<Option<NewEffects>, ApiError> {
+    let graph = match (graph, preset) {
+        (Some(_), Some(_)) => {
+            return Err(bad_request("give either `graph` or `preset`, not both"));
         }
-        None
-    }
-}
-
-/// Why songbird dropped a voice connection, for people.
-fn disconnect_reason(data: &songbird::events::context_data::DisconnectData<'_>) -> String {
-    use songbird::events::context_data::DisconnectKind;
-    let cause = match data.reason {
-        None | Some(DisconnectReason::Requested) => return "left the voice channel".to_owned(),
-        Some(DisconnectReason::WsClosed(Some(code))) => {
-            format!("Discord closed it with {} ({code:?})", code as u16)
-        }
-        Some(DisconnectReason::WsClosed(None)) => "Discord closed it".to_owned(),
-        Some(DisconnectReason::TimedOut) => "Discord did not answer in time".to_owned(),
-        Some(DisconnectReason::Io) => "a network error".to_owned(),
-        Some(other) => format!("{other:?}"),
+        (Some(graph), None) => graph,
+        (None, Some(preset)) => Some(
+            node.presets
+                .build(&preset)
+                .map_err(|e| bad_request(display_chain(&e)))?,
+        ),
+        (None, None) => return Ok(None),
     };
-    match data.kind {
-        DisconnectKind::Connect => format!("could not connect: {cause}"),
-        DisconnectKind::Reconnect => format!("could not reconnect: {cause}"),
-        _ => cause,
-    }
-}
-
-/// The start of a voice session ID: enough to tell sessions apart in logs.
-fn short(session_id: &str) -> &str {
-    session_id.get(..8).unwrap_or(session_id)
+    let effects = graph
+        .as_ref()
+        .map(|spec| node.registry.compile(spec, f64::from(SAMPLE_RATE)))
+        .transpose()
+        .map_err(|e| bad_request(display_chain(&e)))?;
+    Ok(Some((graph, effects)))
 }
 
 fn playback_error(e: &PlaybackError) -> ApiError {
@@ -1114,5 +709,8 @@ fn bad_request(message: impl Into<String>) -> ApiError {
     ApiError::new(ErrorCode::BadRequest, message)
 }
 
+mod connection;
+mod layers;
+mod queue_flow;
 #[cfg(test)]
 mod tests;

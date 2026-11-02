@@ -8,6 +8,8 @@ export type {
 } from "./manager";
 export { Player } from "./player";
 export type { JoinOptions, PlayOptions, VoiceClosedInfo } from "./player";
+export { Layer } from "./layer";
+export type { ClipOptions, LayerChanges, LayerEvents, LayerHost } from "./layer";
 export { Queue } from "./queue";
 export type { AddOptions } from "./queue";
 export type { Playable } from "./tracks";
@@ -29,11 +31,17 @@ export { Emitter } from "./emitter";
 
 // the protocol's types, generated from the engine
 export type * from "./generated/ApiError";
+export type * from "./generated/ClipInfo";
+export type * from "./generated/ClipMode";
+export type * from "./generated/ClipStatus";
+export type * from "./generated/Duck";
 export type * from "./generated/Edge";
 export type * from "./generated/Endpoint";
 export type * from "./generated/ErrorCode";
 export type * from "./generated/Event";
 export type * from "./generated/GraphSpec";
+export type * from "./generated/LayerInfo";
+export type * from "./generated/LayerUpdate";
 export type * from "./generated/LoadResult";
 export type * from "./generated/Millis";
 export type * from "./generated/NodeDescriptor";

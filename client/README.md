@@ -93,6 +93,45 @@ const graph = withRate(await engine.buildPreset("telephone"), 1.15);
 | `withParams(graph, id, params)` | The graph with one node's parameters changed |
 | `withRate(graph, rate)` | The graph at a playback rate from 0.5 to 2 (1 removes it) |
 
+## Layers
+
+Besides the music, a player has up to four *layers* of its own sounds, *clips*, mixed over the
+music after its effects: an announcement does not go through the music's nightcore preset or
+its volume. `player.layer(name)` returns the `Layer`; the engine makes it with its first change
+or clip, and `player.layers` holds the ones the engine reported or this client used.
+
+```ts
+const announcements = player.layer("announcements");
+// one after another, each lowering the music to a quarter while it plays
+await announcements.setDuck({ layers: ["main"], volume: 25 });
+await announcements.play(attachment.url, { userData: { by: user.id } });
+
+const sfx = player.layer("sfx");
+await sfx.configure({ mode: "mix", volume: 80 });
+await sfx.play("https://example.com/rain.ogg", { loop: true, fadeIn: 2_000 });
+```
+
+| Method | Does |
+|---|---|
+| `play(track, { clipId, volume, startAt, endAt, fadeIn, fadeOut, loop, userData })` | Plays a sound on the layer; resolves with its `ClipInfo` (`playing`, or `waiting` its turn) |
+| `stop(clipId?, fadeOut?)` | Stops a clip, or every clip of the layer, waiting ones too |
+| `configure(changes)` | Several changes in one request: `volume`, `graph` or `preset`, `paused`, `mode`, `maxClips`, `duck` |
+| `setVolume(percent)`, `setGraph(graph)`, `setPreset(name, params?)`, `pause()`, `resume()` | As for the player, for this layer alone |
+| `setDuck({ layers, volume, attack, release, hold })` | Lowers other layers (`main` is the music) while this one's clips are heard; `null` stops |
+| `remove()` | Removes the layer, ending its clips |
+
+A layer's `mode` decides what a clip does while others play: `queue` (the default) waits its
+turn, `mix` plays over them (up to `maxClips`, 8; the oldest makes room), `replace` ends them.
+Pausing the player pauses only the music; layers pause on their own.
+
+A layer mirrors the engine's `mode`, `volume`, `paused`, `graph`, `duck` and `clips`, and emits
+`clipStart`, `clipEnd` (with a reason), `clipError` and `clipStuck`, each with the clip's id;
+the player emits them too, with the layer's name. Clip events never touch `player.track` or the
+queue. Every clip `play` resolved ends once with `clipEnd`; one that waited and was stopped never
+starts. `play` sends a `clipId` it makes up if none is given, so listeners can tell a clip's
+events apart even when they come before `play` resolves: a clip that starts right away does so
+before.
+
 ## Queues
 
 Each player has a `queue`, which the engine plays by itself: it loads the next track well
@@ -104,12 +143,18 @@ other without a gap.
 | `add(tracks, { index, userData })` | Adds tracks or queries: a search adds its first result, a playlist link all its tracks |
 | `remove(...ids)`, `move(id, index)`, `clear()`, `shuffle()` | Edit the queue |
 | `setRepeat("off" \| "track" \| "queue")` | Repeat the current track, or send finished tracks to the end |
+| `setCrossfade(ms)` | Fade each track into the next over `ms` (up to 12 000; `queue.crossfade`); 0 plays them back to back |
 
 `queue.items` mirrors the engine's queue, following its changes (`change` events); if any are
 missed, the queue fetches itself again (`sync`). Search results and playlist tracks carry the
 metadata their listing had; once the engine loads one to play it, fuller metadata (e.g. a
 YouTube Music result's artist) arrives as an `updated` change. A queued track that fails to
 load is reported with `trackError` and removed, and the queue goes on.
+
+With a crossfade, the next track's `trackStart` comes when the fade starts, right after the
+current track's `trackEnd` (`finished`), so `player.track` shows the incoming track while the
+other fades out under it. A crossfade is no change to the queue's items, so it has no `change`
+event: `queue.crossfade` is what this client last set.
 
 ## Connection
 

@@ -7,6 +7,8 @@
 //!   [`NodeRegistry::compile`] turns it into [`Effects`].
 //! - Presets ([`PresetRegistry`]) build ready-made graphs, such as nightcore or karaoke, that
 //!   clients use as they are or extend with nodes of their own.
+//! - A [`Strip`] runs a deck's audio through its effects and volume; [`Ramp`]s change gains
+//!   without clicks.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -21,7 +23,9 @@ mod effects;
 mod graph;
 mod nodes;
 mod presets;
+mod ramp;
 mod rate;
+mod strip;
 
 pub use chain::{ChainError, parse_chain};
 pub use effects::Effects;
@@ -30,7 +34,9 @@ pub use graph::{
     MAX_NODES, NodeSpec,
 };
 pub use presets::{PresetDescriptor, PresetError, PresetFactory, PresetRegistry, PresetSelection};
+pub use ramp::{Curve, Ramp};
 pub use rate::RATE_RANGE;
+pub use strip::Strip;
 
 /// A node type that graphs can instantiate.
 pub trait NodeFactory: Send + Sync {

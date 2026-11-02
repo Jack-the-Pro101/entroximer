@@ -28,11 +28,14 @@ guild, permission to view, connect to and speak in voice channels.
 | `/skip [to]` | Skips to the next track, or to a position in the queue |
 | `/remove position`, `/move from to`, `/shuffle`, `/clear` | Edit the queue |
 | `/repeat mode` | Repeats nothing, the current track, or the queue |
+| `/crossfade seconds` | Fades each track into the next over up to 12 s; 0 plays them back to back |
 | `/pause`, `/resume` | Control playback |
 | `/stop` | Stops playback; `/skip` continues with the queue |
 | `/seek position` | Jumps to `90`, `1:30` or `1:02:03` |
-| `/volume percent` | 0 to 1000; 100 leaves the audio unchanged |
-| `/effects [preset] [chain]` | Applies a preset (suggested as you type, e.g. `nightcore`, `bass_boost`, `karaoke`), a chain such as `lowpass(800) => reverb(10, 2)`, or a preset followed by a chain; with neither, removes effects |
+| `/volume percent [layer]` | 0 to 1000; 100 leaves the audio unchanged. The music's, or the sound effects' or announcements' |
+| `/effects [preset] [chain] [layer]` | Applies a preset (suggested as you type, e.g. `nightcore`, `bass_boost`, `karaoke`), a chain such as `lowpass(800) => reverb(10, 2)`, or a preset followed by a chain; with neither, removes effects. To the music, or to the sound effects or announcements |
+| `/sfx play [file] [url] [loop] [volume]`, `/sfx stop` | Plays an attached audio file or a link over the music, up to 8 at once, on a loop if asked; stops them |
+| `/announce [file] [url]` | Plays an announcement over the music, lowering it to a quarter meanwhile; announcements play one after another |
 | `/nowplaying` | The track with its artwork, position, downloaded parts and what comes next |
 | `/channel [channel] [silent]` | Moves playback messages to a channel, or turns silent on or off: only problems are posted, not what starts playing. Both last until the bot leaves. With neither, says where messages go |
 | `/leave` | Stops and leaves the voice channel |
@@ -51,11 +54,13 @@ The bot also needs permission to view and send messages in the channels it posts
 ## Smoke test
 
 `bun run smoke <voice channel id> <track URL>` checks playback end to end without slash commands:
-it joins the channel, plays the track, seeks, pauses and applies effects, then plays a queue: a
-gapless transition to a queued track, a SoundCloud search result skipped to and seeked,
-repeating a track, and skipping past the end. It checks each step against what the engine
-reports; with `RUST_LOG=entroximer_server::node::player=debug`, the engine's log shows when it
-prepares each next track.
+it joins the channel, plays the track, seeks, pauses and applies effects, plays stretches of the
+track over itself on layers of their own (one while the music is paused, one ducking it), then
+plays a queue: a gapless transition to a queued track, a 6 s crossfade into another, a
+SoundCloud search result skipped to and seeked, repeating a track, and skipping past the end.
+It checks each step against what the engine reports; with
+`RUST_LOG=entroximer_server::node::player=debug`, the engine's log shows when it prepares each
+next track.
 
 ## Troubleshooting
 
