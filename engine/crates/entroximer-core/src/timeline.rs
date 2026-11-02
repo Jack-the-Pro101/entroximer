@@ -22,6 +22,10 @@
 //! where distance ahead counts `1 / forward_bias` as much as distance behind. If the incoming
 //! packet would itself be the farthest unit, the producer is paused (backpressure) instead, so a
 //! source that cannot seek by time never has to be restarted from the beginning.
+//!
+//! Each player reading a timeline is a *reader* with a playhead of its own, so that a repeated
+//! track plays again from what it downloaded, even while it crossfades into itself. Distances are
+//! measured from the nearest playhead: what any reader is near is kept.
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, VecDeque};
@@ -29,6 +33,7 @@ use std::fs::File;
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -42,6 +47,7 @@ pub type Ticks = i64;
 pub const TICKS_PER_SECOND: Ticks = 48_000;
 
 pub type ProducerId = u64;
+pub type ReaderId = u64;
 
 pub fn ticks(d: Duration) -> Ticks {
     (d.as_nanos() * TICKS_PER_SECOND as u128 / 1_000_000_000) as Ticks
@@ -67,6 +73,16 @@ fn weighted_distance(playhead: Ticks, forward_bias: f64, start: Ticks, end: Tick
     } else {
         0
     }
+}
+
+/// [`weighted_distance`] from the nearest of the readers' playheads; with no readers, from the
+/// start of the media, where playback begins.
+fn nearest_distance(readers: &[Reader], forward_bias: f64, start: Ticks, end: Ticks) -> Ticks {
+    readers
+        .iter()
+        .map(|r| weighted_distance(r.playhead, forward_bias, start, end))
+        .min()
+        .unwrap_or_else(|| weighted_distance(0, forward_bias, start, end))
 }
 
 /// A producer's packet that lands this far past its own range's end starts a new range.
@@ -111,6 +127,8 @@ pub struct RetentionConfig {
     pub memory_max_bytes: usize,
     /// Disk spill; `None` keeps every payload in RAM (bounded by `memory_max_bytes`).
     pub spill: Option<SpillConfig>,
+    /// Caps on what this timeline holds together with the others sharing the budget.
+    pub budget: Option<Arc<CacheBudget>>,
 }
 
 #[derive(Clone, Debug)]
@@ -129,7 +147,57 @@ impl Default for RetentionConfig {
             forward_bias: 4.0,
             memory_max_bytes: 8 << 20,
             spill: Some(SpillConfig::default()),
+            budget: None,
         }
+    }
+}
+
+/// Caps on the RAM and disk that timelines take together. Each may take an equal share, within
+/// its own caps: one long track cannot crowd out the others, and short ones leave most of their
+/// share unused. When a timeline joins, the others keep to their smaller shares as they play.
+#[derive(Debug)]
+pub struct CacheBudget {
+    memory_bytes: usize,
+    disk_bytes: u64,
+    timelines: AtomicUsize,
+}
+
+impl CacheBudget {
+    pub fn new(memory_bytes: usize, disk_bytes: u64) -> Self {
+        Self {
+            memory_bytes,
+            disk_bytes,
+            timelines: AtomicUsize::new(0),
+        }
+    }
+
+    fn join(self: &Arc<Self>) -> Share {
+        self.timelines.fetch_add(1, Ordering::Relaxed);
+        Share(Arc::clone(self))
+    }
+}
+
+/// A timeline's place in a [`CacheBudget`], given up when dropped.
+#[derive(Debug)]
+struct Share(Arc<CacheBudget>);
+
+impl Share {
+    fn timelines(&self) -> usize {
+        self.0.timelines.load(Ordering::Relaxed).max(1)
+    }
+
+    fn memory_bytes(&self) -> usize {
+        self.0.memory_bytes / self.timelines()
+    }
+
+    fn disk_bytes(&self) -> u64 {
+        self.0.disk_bytes / self.timelines() as u64
+    }
+}
+
+impl Drop for Share {
+    fn drop(&mut self) {
+        self.0.timelines.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -300,6 +368,13 @@ struct ProducerState {
     segment: Option<u64>,
 }
 
+struct Reader {
+    id: ReaderId,
+    playhead: Ticks,
+    /// The playhead at the last sweep of RAM it caused.
+    last_sweep: Ticks,
+}
+
 struct Inner {
     cfg: RetentionConfig,
     codec: Option<AudioCodecParameters>,
@@ -311,8 +386,9 @@ struct Inner {
     spill_failed: bool,
     memory_bytes: usize,
     disk_bytes: u64,
-    playhead: Ticks,
-    last_sweep: Ticks,
+    share: Option<Share>,
+    readers: Vec<Reader>,
+    next_reader: ReaderId,
     media_end: Option<Ticks>,
     failure: Option<MediaError>,
     /// Sealed blocks with room reserved on disk, to be written without the lock held.
@@ -359,6 +435,7 @@ impl Timeline {
     pub fn new(cfg: RetentionConfig) -> Self {
         Self {
             inner: Mutex::new(Inner {
+                share: cfg.budget.as_ref().map(CacheBudget::join),
                 cfg,
                 codec: None,
                 ranges: Vec::new(),
@@ -369,8 +446,8 @@ impl Timeline {
                 spill_failed: false,
                 memory_bytes: 0,
                 disk_bytes: 0,
-                playhead: 0,
-                last_sweep: 0,
+                readers: Vec::new(),
+                next_reader: 1,
                 media_end: None,
                 failure: None,
                 unwritten: Vec::new(),
@@ -566,12 +643,35 @@ impl Timeline {
         }
     }
 
-    /// Informs retention of the current playback position; wakes paused producers.
-    pub fn set_playhead(&self, t: Ticks) {
+    /// Adds a reader whose playback starts at `at`.
+    pub fn add_reader(&self, at: Ticks) -> ReaderId {
         let mut g = self.lock();
-        g.playhead = t;
-        if (t - g.last_sweep).abs() >= SWEEP_INTERVAL {
-            g.last_sweep = t;
+        let id = g.next_reader;
+        g.next_reader += 1;
+        g.readers.push(Reader {
+            id,
+            playhead: at,
+            last_sweep: at,
+        });
+        id
+    }
+
+    /// Stops keeping media for a reader that is done.
+    pub fn remove_reader(&self, reader: ReaderId) {
+        self.lock().readers.retain(|r| r.id != reader);
+        // what it held may now make room for paused producers
+        self.changed.notify_all();
+    }
+
+    /// Informs retention of a reader's playback position; wakes paused producers.
+    pub fn set_playhead(&self, reader: ReaderId, t: Ticks) {
+        let mut g = self.lock();
+        let Some(r) = g.readers.iter_mut().find(|r| r.id == reader) else {
+            return;
+        };
+        r.playhead = t;
+        if (t - r.last_sweep).abs() >= SWEEP_INTERVAL {
+            r.last_sweep = t;
             g.sweep_memory();
             g.enforce_caps();
         }
@@ -715,7 +815,7 @@ impl Inner {
         }
         block.mem = Some(packets);
         self.memory_bytes += block.bytes;
-        if self.memory_bytes > self.cfg.memory_max_bytes {
+        if self.memory_bytes > self.memory_cap() {
             self.sweep_memory();
         }
     }
@@ -724,8 +824,20 @@ impl Inner {
         self.cfg.spill.is_some() && !self.spill_failed
     }
 
+    /// Cap on payload bytes in RAM: the timeline's own, or its share of the budget if smaller.
+    fn memory_cap(&self) -> usize {
+        let share = self.share.as_ref().map_or(usize::MAX, Share::memory_bytes);
+        self.cfg.memory_max_bytes.min(share)
+    }
+
+    /// Cap on spilled bytes, like [`Self::memory_cap`].
+    fn disk_cap(&self) -> u64 {
+        let own = self.cfg.spill.as_ref().map_or(u64::MAX, |s| s.max_bytes);
+        own.min(self.share.as_ref().map_or(u64::MAX, Share::disk_bytes))
+    }
+
     fn weight(&self, start: Ticks, end: Ticks) -> Ticks {
-        weighted_distance(self.playhead, self.cfg.forward_bias, start, end)
+        nearest_distance(&self.readers, self.cfg.forward_bias, start, end)
     }
 
     fn in_memory_window(&self, start: Ticks, end: Ticks) -> bool {
@@ -735,18 +847,17 @@ impl Inner {
     /// Whether `extra` more payload bytes would exceed the active tier's cap. Open blocks count
     /// with the space they will take on disk.
     fn over_cap(&self, extra: usize) -> bool {
-        match &self.cfg.spill {
-            Some(spill) if !self.spill_failed => {
-                let open: u64 = self
-                    .ranges
-                    .iter()
-                    .filter_map(|r| r.blocks.back())
-                    .filter(|b| !b.sealed)
-                    .map(Block::spilled_len)
-                    .sum();
-                self.disk_bytes + open + (extra + PACKET_HEADER) as u64 > spill.max_bytes
-            }
-            _ => self.memory_bytes + extra > self.cfg.memory_max_bytes,
+        if self.spill_active() {
+            let open: u64 = self
+                .ranges
+                .iter()
+                .filter_map(|r| r.blocks.back())
+                .filter(|b| !b.sealed)
+                .map(Block::spilled_len)
+                .sum();
+            self.disk_bytes + open + (extra + PACKET_HEADER) as u64 > self.disk_cap()
+        } else {
+            self.memory_bytes + extra > self.memory_cap()
         }
     }
 
@@ -998,8 +1109,7 @@ impl Inner {
             self.retain_blocks(|b| !is_it(b));
             return;
         }
-        let keep =
-            self.in_memory_window(start, end) && self.memory_bytes <= self.cfg.memory_max_bytes;
+        let keep = self.in_memory_window(start, end) && self.memory_bytes <= self.memory_cap();
         let block = &mut self.ranges[range].blocks[block];
         block.disk = Some(loc);
         if keep {
@@ -1018,8 +1128,8 @@ impl Inner {
             return;
         }
         let behind = ticks(self.cfg.memory_behind);
-        let (playhead, bias) = (self.playhead, self.cfg.forward_bias);
-        let weight = |b: &Block| weighted_distance(playhead, bias, b.start, b.end);
+        let (readers, bias) = (&self.readers, self.cfg.forward_bias);
+        let weight = |b: &Block| nearest_distance(readers, bias, b.start, b.end);
         let mut freed = 0;
         for b in self.ranges.iter_mut().flat_map(|r| r.blocks.iter_mut()) {
             if b.disk.is_some() && weight(b) > behind && b.mem.take().is_some() {
@@ -1028,7 +1138,7 @@ impl Inner {
         }
         self.memory_bytes -= freed;
 
-        if self.memory_bytes > self.cfg.memory_max_bytes {
+        if self.memory_bytes > self.memory_cap() {
             let mut held: Vec<(Ticks, usize, usize)> = Vec::new();
             for (ri, r) in self.ranges.iter().enumerate() {
                 for (bi, b) in r.blocks.iter().enumerate() {
@@ -1039,7 +1149,7 @@ impl Inner {
             }
             held.sort_unstable_by_key(|&(weight, ..)| Reverse(weight));
             for (_, ri, bi) in held {
-                if self.memory_bytes <= self.cfg.memory_max_bytes {
+                if self.memory_bytes <= self.memory_cap() {
                     break;
                 }
                 let block = &mut self.ranges[ri].blocks[bi];
@@ -1053,7 +1163,7 @@ impl Inner {
     fn enforce_caps(&mut self) {
         if self.spill_active() {
             // RAM is kept in check where blocks enter it, and by sweeps as the playhead moves
-            let max = self.cfg.spill.as_ref().map_or(u64::MAX, |s| s.max_bytes);
+            let max = self.disk_cap();
             while self.disk_bytes > max {
                 let Some(id) = self
                     .segments
@@ -1068,7 +1178,7 @@ impl Inner {
                 self.evict_segment(id);
             }
         } else {
-            while self.memory_bytes > self.cfg.memory_max_bytes {
+            while self.memory_bytes > self.memory_cap() {
                 if !self.evict_farthest_endpoint() {
                     break;
                 }
@@ -1091,9 +1201,10 @@ impl Inner {
         self.retain_blocks(|b| b.disk.is_none_or(|d| d.segment != id));
     }
 
-    /// Drops the block at whichever range end is farthest from the playhead.
+    /// Drops the block at whichever range end is farthest from the playheads.
     fn evict_farthest_endpoint(&mut self) -> bool {
-        let (playhead, bias) = (self.playhead, self.cfg.forward_bias);
+        let (readers, bias) = (&self.readers, self.cfg.forward_bias);
+        let weight = |b: &Block| nearest_distance(readers, bias, b.start, b.end);
         let farthest = self
             .ranges
             .iter()
@@ -1101,9 +1212,10 @@ impl Inner {
             .flat_map(|(i, r)| {
                 let front = r.blocks.front().map(|b| (b, RangeEnd::Front));
                 let back = r.blocks.back().map(|b| (b, RangeEnd::Back));
-                front.into_iter().chain(back).map(move |(b, end)| {
-                    (weighted_distance(playhead, bias, b.start, b.end), i, end)
-                })
+                front
+                    .into_iter()
+                    .chain(back)
+                    .map(move |(b, end)| (weight(b), i, end))
             })
             .filter(|&(weight, ..)| weight > 0)
             .max_by_key(|&(weight, ..)| weight);
@@ -1321,6 +1433,7 @@ mod tests {
     fn merged_ranges_read_back_from_disk() {
         let dir = tempfile::tempdir().unwrap();
         let tl = Timeline::new(spill_into(&dir, 1 << 30, 1 << 20));
+        let reader = tl.add_reader(0);
         let a = tl.register_producer(Some(100 * PKT));
         fill(&tl, a, 100..400);
         let b = tl.register_producer(None);
@@ -1330,7 +1443,7 @@ mod tests {
         assert_eq!(tl.buffered(), vec![(0, 400 * PKT)]);
 
         // far away, so that every block is read back from its spill file
-        tl.set_playhead(3600 * TICKS_PER_SECOND);
+        tl.set_playhead(reader, 3600 * TICKS_PER_SECOND);
         assert_eq!(tl.stats().memory_bytes, 0);
         for i in 0..400 {
             assert_eq!(ready(&tl, i * PKT + PKT / 2), pkt(i));
@@ -1383,7 +1496,7 @@ mod tests {
     fn a_block_a_cancel_seals_is_written_when_its_producer_finishes() {
         let dir = tempfile::tempdir().unwrap();
         let tl = Timeline::new(spill_into(&dir, 1 << 30, 1 << 20));
-        tl.set_playhead(60 * TICKS_PER_SECOND);
+        tl.add_reader(60 * TICKS_PER_SECOND);
         let p = tl.register_producer(None);
         fill(&tl, p, 0..3);
         // cancels come from wherever producers are dropped, so they only reserve the room
@@ -1405,6 +1518,7 @@ mod tests {
     fn spilled_payloads_leave_ram_outside_asymmetric_window() {
         let dir = tempfile::tempdir().unwrap();
         let tl = Timeline::new(spill_into(&dir, 1 << 30, 1 << 20));
+        let reader = tl.add_reader(0);
         let p = tl.register_producer(None);
         fill(&tl, p, 0..packets_in(300));
         // playhead 0: only the first ~60 s (15 s * bias 4) stays in RAM
@@ -1414,7 +1528,7 @@ mod tests {
             "{in_ram}"
         );
 
-        tl.set_playhead(150 * TICKS_PER_SECOND);
+        tl.set_playhead(reader, 150 * TICKS_PER_SECOND);
         let in_ram = tl.stats().memory_bytes / 400;
         // 0..60 s is now 90 s behind and released; nothing new is pulled into RAM
         assert_eq!(in_ram, 0);
@@ -1425,15 +1539,57 @@ mod tests {
         }
     }
 
+    /// Whether the block holding `t` has its packets in RAM.
+    fn in_ram(tl: &Timeline, t: Ticks) -> bool {
+        let g = tl.lock();
+        let Probe::Buffered { range, block } = g.probe(t) else {
+            panic!("{t} is not buffered");
+        };
+        g.ranges[range].blocks[block].mem.is_some()
+    }
+
+    #[test]
+    fn retention_keeps_what_any_reader_is_near() {
+        let dir = tempfile::tempdir().unwrap();
+        let tl = Timeline::new(spill_into(&dir, 1 << 30, 1 << 20));
+        let ending = tl.add_reader(0);
+        let p = tl.register_producer(None);
+        fill(&tl, p, 0..packets_in(300));
+        tl.finish(p, Finish::Eof);
+        // each reader reads what it plays, from disk
+        let play = |seconds: std::ops::Range<i64>| {
+            for i in packets_in(seconds.start)..packets_in(seconds.end) {
+                assert_eq!(ready(&tl, i * PKT), pkt(i));
+            }
+        };
+        tl.set_playhead(ending, 290 * TICKS_PER_SECOND);
+        play(290..291);
+        assert!(!in_ram(&tl, 0));
+
+        // the media again from the start, while the first reader plays on
+        let replaying = tl.add_reader(0);
+        play(0..2);
+        tl.set_playhead(replaying, 2 * TICKS_PER_SECOND);
+        assert!(in_ram(&tl, 0));
+        assert!(in_ram(&tl, 290 * TICKS_PER_SECOND));
+
+        // once the first reader is done, only what the other one is near stays
+        tl.remove_reader(ending);
+        tl.set_playhead(replaying, 4 * TICKS_PER_SECOND);
+        assert!(in_ram(&tl, 0));
+        assert!(!in_ram(&tl, 290 * TICKS_PER_SECOND));
+    }
+
     #[test]
     fn ram_only_eviction_prefers_data_behind_the_playhead() {
         let tl = Timeline::new(RetentionConfig {
             memory_max_bytes: packets_in(100) as usize * 400,
             ..memory_only()
         });
+        let reader = tl.add_reader(0);
         let p = tl.register_producer(None);
         fill(&tl, p, 0..packets_in(100));
-        tl.set_playhead(50 * TICKS_PER_SECOND);
+        tl.set_playhead(reader, 50 * TICKS_PER_SECOND);
         // the cap is full; pushing another 10 s forces 10 s out
         fill(&tl, p, packets_in(100)..packets_in(110));
         let (start, end) = tl.buffered()[0];
@@ -1443,10 +1599,42 @@ mod tests {
     }
 
     #[test]
+    fn timelines_sharing_a_budget_take_equal_shares() {
+        let seconds = |s: i64| packets_in(s) as usize * 400;
+        let cfg = RetentionConfig {
+            budget: Some(Arc::new(CacheBudget::new(seconds(100), u64::MAX))),
+            ..memory_only()
+        };
+        let tl = Timeline::new(cfg.clone());
+        tl.add_reader(80 * TICKS_PER_SECOND);
+        let p = tl.register_producer(None);
+        // alone, it may take the whole budget
+        fill(&tl, p, 0..packets_in(80));
+        assert_eq!(tl.stats().memory_bytes, seconds(80));
+
+        // a second timeline halves its share, which it keeps to from its next packet on
+        let other = Timeline::new(cfg);
+        fill(&tl, p, packets_in(80)..packets_in(81));
+        assert!(tl.stats().memory_bytes <= seconds(50));
+        let (start, end) = tl.buffered()[0];
+        assert!(
+            start >= 31 * TICKS_PER_SECOND,
+            "the oldest data went first: {start}"
+        );
+        assert_eq!(end, 81 * TICKS_PER_SECOND);
+
+        // once the other one is gone, the whole budget is the first one's again
+        drop(other);
+        fill(&tl, p, packets_in(81)..packets_in(120));
+        assert_eq!(tl.buffered()[0], (start, 120 * TICKS_PER_SECOND));
+    }
+
+    #[test]
     fn backpressure_pauses_producer_until_playhead_moves() {
         let dir = tempfile::tempdir().unwrap();
         let seg = packets_in(10) as u64 * 400; // ~10 s per spill file
         let tl = Arc::new(Timeline::new(spill_into(&dir, seg * 6, seg)));
+        let reader = tl.add_reader(0);
         let p = tl.register_producer(None);
         let worker = std::thread::spawn({
             let tl = tl.clone();
@@ -1460,7 +1648,7 @@ mod tests {
         assert!(!worker.is_finished());
 
         // move the playhead; data behind it becomes evictable and the producer resumes
-        tl.set_playhead(40 * TICKS_PER_SECOND);
+        tl.set_playhead(reader, 40 * TICKS_PER_SECOND);
         std::thread::sleep(Duration::from_millis(200));
         let (start, end2) = tl.buffered()[0];
         assert!(end2 > end, "producer did not resume");

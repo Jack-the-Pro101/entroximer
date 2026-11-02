@@ -156,6 +156,35 @@ fn seeks_within_buffered_audio_are_instant_and_exact() {
 }
 
 #[test]
+fn a_replay_plays_from_what_was_downloaded() {
+    let opens = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let producer = ProcessProducer::new(ProducerCaps::default(), Some("webm".into()), {
+        let opens = Arc::clone(&opens);
+        let path = fixture().to_string_lossy().into_owned();
+        move |_| {
+            opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (ProcessSpec::new("cat").arg(&path), TimestampMode::Absolute)
+        }
+    });
+    let mut h = Harness::new(producer);
+    h.wait_until_fully_buffered();
+    h.player.seek(at(55.0)).unwrap();
+    h.render(1.0);
+
+    // the replay outlives the player it came from, as a repeated track does
+    let replay = h.player.replay();
+    drop(std::mem::replace(&mut h.player, replay));
+    let audio = h.render(10.5);
+    assert_playing_second(&audio[at(0.3) as usize * 2..at(0.5) as usize * 2], 0.3);
+    assert_playing_second(&audio[at(10.3) as usize * 2..], 10.3);
+    assert_eq!(
+        opens.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the media was loaded again"
+    );
+}
+
+#[test]
 fn far_seek_reopens_a_time_seekable_source() {
     let mut h = Harness::new(throttled(true));
     h.render(0.5);

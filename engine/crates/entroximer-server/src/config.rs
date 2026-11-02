@@ -12,7 +12,7 @@ use anyhow::Context;
 use clap::builder::BoolishValueParser;
 use clap::{Args, ValueEnum};
 use entroximer_core::player::PlayerConfig;
-use entroximer_core::timeline::{RetentionConfig, SpillConfig};
+use entroximer_core::timeline::{CacheBudget, RetentionConfig, SpillConfig};
 use tokio::sync::Semaphore;
 
 use crate::cache::CacheDir;
@@ -78,6 +78,15 @@ pub struct MediaConfig {
     /// Disk cap for one track's cached audio, in MiB.
     #[arg(long, env = "ENTROXIMER_DISK_MAX_MB", default_value_t = 1024)]
     pub disk_max_mb: u64,
+
+    /// RAM cap for all tracks' cached audio together, in MiB. Each track playing, preparing or
+    /// sounding as a clip may take an equal share of it, up to `memory_max_mb`.
+    #[arg(long, env = "ENTROXIMER_MEMORY_TOTAL_MB", default_value_t = 128)]
+    pub memory_total_mb: u64,
+
+    /// Disk cap for all tracks' cached audio together, in MiB, shared like `memory_total_mb`.
+    #[arg(long, env = "ENTROXIMER_DISK_TOTAL_MB", default_value_t = 4096)]
+    pub disk_total_mb: u64,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -320,6 +329,8 @@ pub struct MediaContext {
     /// Files clients uploaded, if uploads are on.
     pub uploads: Option<Arc<UploadStore>>,
     cache: CacheDir,
+    /// What all tracks' cached audio may take together.
+    cache_budget: Arc<CacheBudget>,
 }
 
 /// Turns for yt-dlp runs; see [`YtDlpConfig::max_runs`].
@@ -357,6 +368,10 @@ impl MediaContext {
             None
         };
         let sources = Sources::new(&config.sources, &config.spotify, uploads.clone())?;
+        let cache_budget = Arc::new(CacheBudget::new(
+            usize::try_from(config.memory_total_mb * MIB).unwrap_or(usize::MAX),
+            config.disk_total_mb * MIB,
+        ));
         Ok(Self {
             config,
             ytdlp,
@@ -366,6 +381,7 @@ impl MediaContext {
             artwork: Artwork::default(),
             uploads,
             cache,
+            cache_budget,
         })
     }
 
@@ -387,6 +403,7 @@ impl MediaContext {
                 forward_bias: c.forward_bias,
                 memory_max_bytes: usize::try_from(c.memory_max_mb * MIB).unwrap_or(usize::MAX),
                 spill,
+                budget: Some(Arc::clone(&self.cache_budget)),
             },
             ..PlayerConfig::default()
         }

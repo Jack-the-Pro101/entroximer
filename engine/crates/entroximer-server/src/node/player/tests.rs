@@ -498,6 +498,31 @@ async fn repeating_a_track_and_turning_it_off() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_repeated_track_plays_again_from_what_it_downloaded() {
+    let mut h = Harness::new(Duration::from_secs(1)).await;
+    h.player
+        .configure_queue(Some(Repeat::Track), None)
+        .await
+        .unwrap();
+    let tracks = h.tones(&["a"]).await;
+    h.add(tracks, None).await;
+    h.events_until("start").await;
+    h.until("a downloads", |p| {
+        p.deck()
+            .current()
+            .is_some_and(|current| current.player.media_end().is_some())
+    })
+    .await;
+    // loading it again would fail now
+    std::fs::remove_file(h.dir.path().join("a.webm")).unwrap();
+
+    let batches = h.play(WHOLE_TONE).await;
+    assert_eq!(batches, [strings(["end a finished", "start a"])]);
+    let batches = h.play(TONE).await;
+    assert_eq!(batches, [strings(["end a finished", "start a"])]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn repeating_the_queue_sends_finished_tracks_to_its_end() {
     let mut h = Harness::new(Duration::from_secs(1)).await;
     let tracks = h.tones(&["a", "b"]).await;

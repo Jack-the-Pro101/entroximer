@@ -287,7 +287,9 @@ Each player plays its queue by itself. Once the current track has less than
 `ENTROXIMER_PRELOAD_SECS` left, the engine resolves the next item and starts downloading it, so
 it follows without a gap, whatever the client does meanwhile; if the queue changes so that
 another item comes next, that one is prepared instead. Items leave the queue when they start.
-Repeating a `track` plays it again; repeating the `queue` sends finished tracks to its end.
+Repeating a `track` plays it again from what was downloaded, without loading it again;
+repeating the `queue` sends finished tracks to its end, and each is loaded again when it
+comes back.
 
 With a `crossfade`, the next track starts that long before the current one ends, fading in as
 the current one fades out (at equal power, so the overlap does not dip), and the next track is
@@ -355,7 +357,13 @@ blocks: about 3 MB for ten hours of audio, which is downloaded to disk as fast a
 allows (about 640 MB for ten hours of YouTube Opus). The window reaches
 `ENTROXIMER_FORWARD_BIAS` times further ahead than behind, and the same bias decides what is
 evicted first when a cap is reached. When the cache is full the download pauses rather than
-being thrown away.
+being thrown away. A track's cache is deleted when it ends, unless it repeats: then it plays
+again from it.
+
+Besides each track's caps, `ENTROXIMER_MEMORY_TOTAL_MB` and `ENTROXIMER_DISK_TOTAL_MB` cap all
+tracks together: each track playing, preparing or sounding as a clip may take an equal share,
+so that a ten-hour mix on one server cannot crowd out the others. Songs take far less than
+their share.
 
 yt-dlp runs as a separate process for every search and every track it loads; with YouTube's
 JavaScript challenges, one peaks at up to 350 MB. `ENTROXIMER_YTDLP_MAX_RUNS` bounds how many run
@@ -391,6 +399,7 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_MEMORY_BEHIND_SECS` | `15` | Seconds kept in RAM behind the playhead |
 | `ENTROXIMER_FORWARD_BIAS` | `4` | How much more is kept ahead than behind |
 | `ENTROXIMER_MEMORY_MAX_MB` / `ENTROXIMER_DISK_MAX_MB` | `8` / `1024` | Per-track caps |
+| `ENTROXIMER_MEMORY_TOTAL_MB` / `ENTROXIMER_DISK_TOTAL_MB` | `128` / `4096` | Caps for all tracks together; each track playing, preparing or sounding as a clip may take an equal share, up to its own caps |
 | `ENTROXIMER_DATA_DIR` | `$XDG_DATA_HOME/entroximer` | Persistent state: the managed yt-dlp and the YouTube session |
 | `ENTROXIMER_YTDLP_MANAGED` | off (on in the image) | Let the engine install and update yt-dlp |
 | `ENTROXIMER_YTDLP_PACKAGE` | `yt-dlp[default]` | pip requirement for the managed install |

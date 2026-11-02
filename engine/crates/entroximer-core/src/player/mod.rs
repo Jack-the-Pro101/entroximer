@@ -23,8 +23,8 @@ use crate::error::{MediaError, display_chain};
 use crate::producer::{Producer, ProducerCaps};
 use crate::resample::{ResampleError, Resampler};
 use crate::timeline::{
-    Lookup, Packet, Pending, RangeState, RetentionConfig, TICKS_PER_SECOND, Ticks, Timeline,
-    TimelineStats, ticks,
+    Lookup, Packet, Pending, RangeState, ReaderId, RetentionConfig, TICKS_PER_SECOND, Ticks,
+    Timeline, TimelineStats, ticks,
 };
 
 /// Output sample rate (Discord's).
@@ -121,6 +121,8 @@ pub struct Player {
     caps: ProducerCaps,
     /// Taken only when the player is dropped.
     timeline: Option<Arc<Timeline>>,
+    /// This player among the timeline's readers.
+    reader: ReaderId,
     cfg: PlayerConfig,
     /// Live producers; dropping one cancels it.
     producers: Vec<DemuxTask>,
@@ -159,6 +161,7 @@ impl Drop for Player {
     /// a timeline holds, often thousands of packets, is left to the runtime.
     fn drop(&mut self) {
         if let Some(timeline) = self.timeline.take() {
+            timeline.remove_reader(self.reader);
             drop(self.rt.spawn(async move { drop(timeline) }));
         }
     }
@@ -172,13 +175,37 @@ impl Player {
         cfg: PlayerConfig,
         start: Option<Ticks>,
     ) -> Self {
-        let caps = source.caps();
         let timeline = Arc::new(Timeline::new(cfg.retention.clone()));
+        Self::reading(rt, source, cfg, timeline, start.unwrap_or(0).max(0))
+    }
+
+    /// Plays the same media again from the start, from what this player has downloaded: only
+    /// what is missing is loaded again. Both players keep what they are near.
+    pub fn replay(&self) -> Self {
+        Self::reading(
+            self.rt.clone(),
+            Arc::clone(&self.source),
+            self.cfg.clone(),
+            Arc::clone(self.timeline()),
+            0,
+        )
+    }
+
+    fn reading(
+        rt: Handle,
+        source: Arc<dyn Producer>,
+        cfg: PlayerConfig,
+        timeline: Arc<Timeline>,
+        start: Ticks,
+    ) -> Self {
+        let caps = source.caps();
+        let reader = timeline.add_reader(start);
         let mut player = Self {
             rt,
             source,
             caps,
             timeline: Some(timeline),
+            reader,
             cfg,
             producers: Vec::new(),
             pipeline: None,
@@ -193,22 +220,19 @@ impl Player {
             decode_failures: 0,
             buffering_since: None,
         };
-        player.reposition(start.unwrap_or(0).max(0));
-        let plan = coverage::plan(
-            Pending::Gap,
-            player.cursor,
-            caps,
-            None,
-            &player.cfg.coverage,
-        );
-        player.apply(plan);
+        player.reposition(start);
+        // starts loading what plays first, unless it is buffered or on its way
+        if let Some(pending) = player.timeline().pending_at(player.cursor) {
+            let plan = coverage::plan(pending, player.cursor, caps, None, &player.cfg.coverage);
+            player.apply(plan);
+        }
         player
     }
 
     /// Fills `out` (interleaved stereo) with as many frames as are ready. Never blocks.
     pub fn render(&mut self, out: &mut [f32]) -> Result<Rendered, PlaybackError> {
         let wanted = out.len() / CHANNELS;
-        self.timeline().set_playhead(self.position());
+        self.timeline().set_playhead(self.reader, self.position());
         let status = self.fill(wanted)?;
 
         let frames = wanted.min(self.pcm.len() / CHANNELS);
@@ -305,7 +329,7 @@ impl Player {
             .range_at(target)
             .map_or(0, |(start, ..)| start);
         self.cursor = (target - preroll).max(earliest);
-        self.timeline().set_playhead(target);
+        self.timeline().set_playhead(self.reader, target);
     }
 
     fn fill(&mut self, wanted: usize) -> Result<Status, PlaybackError> {

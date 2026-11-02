@@ -6,7 +6,8 @@
 //! that drops below the preload lead, so the next track is buffered long before it is needed,
 //! whatever the client does meanwhile. If the queue changes so that another item comes next, the
 //! prepared one is dropped, which cancels its download. When the deck switches to the prepared
-//! track, its item leaves the queue.
+//! track, its item leaves the queue. An item that comes again right after itself (a repeated
+//! track) is not loaded again: it plays again from what the current track downloaded.
 //!
 //! A queue item that cannot be loaded is reported with `trackError` and removed, and the queue
 //! goes on; after [`MAX_FAILURES`] in a row it waits for the client to change something.
@@ -158,6 +159,17 @@ impl GuildPlayer {
         if let Some(previous) = state.preparing.take() {
             previous.task.abort();
         }
+        if let Some(replay) = self.replay(state, &item) {
+            tracing::debug!(
+                guild_id = %self.guild_id,
+                item = %item.id,
+                title = %item.track.info.title,
+                skip,
+                "replaying the current track"
+            );
+            self.set_prepared(state, item, replay, skip);
+            return;
+        }
         let attempt = self.next_attempt.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(
             guild_id = %self.guild_id,
@@ -196,7 +208,6 @@ impl GuildPlayer {
             };
             match loaded {
                 Ok(loaded) => {
-                    state.failures = 0;
                     // resolving can tell more, e.g. a YouTube Music result's artist and length
                     let track = Track {
                         user_data: item.track.user_data.take(),
@@ -206,14 +217,7 @@ impl GuildPlayer {
                     self.report(&state.queue, change);
                     item.track = track;
                     let deck_track = self.deck_track(node, loaded, None, None);
-                    state.prepared = Some((deck_track.id, item.id.clone()));
-                    state.items.insert(deck_track.id, item);
-                    let mut deck = self.deck();
-                    if preparation.skip {
-                        deck.play(deck_track);
-                    } else {
-                        deck.set_next(Some(deck_track));
-                    }
+                    self.set_prepared(&mut state, item, deck_track, preparation.skip);
                 }
                 Err(error) => {
                     state.failures += 1;
@@ -247,6 +251,36 @@ impl GuildPlayer {
         }
         self.drain_deck();
         self.sync_output();
+    }
+
+    /// The track playing `item` again from what it downloaded, if `item` is the one playing
+    /// (a repeated track), so that it is not loaded again. Not for a stream, whose start is gone.
+    fn replay(&self, state: &State, item: &QueueItem) -> Option<DeckTrack> {
+        let deck = self.deck();
+        let current = deck.current()?;
+        let playing = state.items.get(&current.id)?;
+        if playing.id != item.id || current.player.caps().live {
+            return None;
+        }
+        Some(DeckTrack {
+            id: self.next_track.fetch_add(1, Ordering::Relaxed),
+            length: current.length,
+            player: current.player.replay(),
+            end_at: None,
+        })
+    }
+
+    /// Makes `track`, which plays `item`, the deck's next track, or plays it now for a skip.
+    fn set_prepared(&self, state: &mut State, item: QueueItem, track: DeckTrack, skip: bool) {
+        state.failures = 0;
+        state.prepared = Some((track.id, item.id.clone()));
+        state.items.insert(track.id, item);
+        let mut deck = self.deck();
+        if skip {
+            deck.play(track);
+        } else {
+            deck.set_next(Some(track));
+        }
     }
 
     /// The item a skip waited for failed: skip to the next one, or stop.
