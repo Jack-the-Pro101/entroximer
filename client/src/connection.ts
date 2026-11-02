@@ -55,6 +55,18 @@ export interface Results {
 export type ParamsOf<O extends Op> =
   Extract<Call, { op: O }> extends { params: infer P } ? [params: P] : [];
 
+/**
+ * Requests that may load tracks, which can take as long as yt-dlp does: the engine gives up on
+ * an extraction after two minutes.
+ */
+const LOADING_OPS: ReadonlySet<Op> = new Set<Op>([
+  "tracks.load",
+  "tracks.search",
+  "queue.add",
+  "player.update",
+  "clip.play",
+]);
+
 /** Sends a request and resolves with its result; see `Connection.request`. */
 export type Requester = <O extends Op>(op: O, ...params: ParamsOf<O>) => Promise<Results[O]>;
 
@@ -69,6 +81,11 @@ export interface ConnectionOptions {
   clientName?: string;
   /** How long a request may take, including waiting for a reconnect. Default 30 s. */
   requestTimeoutMs?: number;
+  /**
+   * The same for requests that may load tracks (`tracks.load`, `tracks.search`, `queue.add`,
+   * `player.update`, `clip.play`), which take as long as the source does. Default 150 s.
+   */
+  loadTimeoutMs?: number;
   /** Delay before reconnecting, doubling per failed attempt up to the maximum. Default 1 s to 30 s. */
   reconnectDelayMs?: { min: number; max: number };
 }
@@ -118,10 +135,13 @@ export class Connection extends Emitter<ConnectionEvents> {
   readonly #headers: Record<string, string>;
   readonly #password: string | undefined;
   readonly #requestTimeoutMs: number;
+  readonly #loadTimeoutMs: number;
   readonly #reconnectDelay: { min: number; max: number };
 
   #socket: WebSocket | null = null;
   #ready = false;
+  #readyInfo: ReadyInfo | null = null;
+  #connecting: Promise<ReadyInfo> | null = null;
   #sessionId: string | null = null;
   #nextId = 1;
   readonly #pending = new Map<number, Pending>();
@@ -142,6 +162,7 @@ export class Connection extends Emitter<ConnectionEvents> {
       ...(options.password === undefined ? {} : { Authorization: options.password }),
     };
     this.#requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
+    this.#loadTimeoutMs = options.loadTimeoutMs ?? 150_000;
     this.#reconnectDelay = options.reconnectDelayMs ?? { min: 1_000, max: 30_000 };
   }
 
@@ -157,17 +178,32 @@ export class Connection extends Emitter<ConnectionEvents> {
   /**
    * Connects and waits for the engine's `ready`. Rejects if this first attempt fails, e.g. for
    * a wrong URL or password; after that, dropped connections are reopened automatically.
+   * Calling it again while connected or connecting waits for the same connection.
    */
   connect(): Promise<ReadyInfo> {
     if (this.#closed) {
       return Promise.reject(new EntroximerError("closed", "the connection was closed"));
     }
+    if (this.#ready && this.#readyInfo !== null) {
+      return Promise.resolve(this.#readyInfo);
+    }
+    this.#connecting ??= this.#firstConnect().finally(() => {
+      this.#connecting = null;
+    });
+    return this.#connecting;
+  }
+
+  #firstConnect(): Promise<ReadyInfo> {
     return new Promise((resolve, reject) => {
       const removeReady = this.once("ready", (info) => {
         removeDisconnect();
         resolve(info);
       });
-      const removeDisconnect = this.once("disconnect", ({ code, reason }) => {
+      // once connected, a dropped connection is reopened instead
+      const removeDisconnect = this.once("disconnect", ({ code, reason, willReconnect }) => {
+        if (willReconnect) {
+          return;
+        }
         removeReady();
         this.close();
         reject(
@@ -178,7 +214,10 @@ export class Connection extends Emitter<ConnectionEvents> {
           ),
         );
       });
-      this.#open();
+      // already reconnecting by itself
+      if (this.#socket === null && this.#reconnectTimer === null) {
+        this.#open();
+      }
     });
   }
 
@@ -216,7 +255,8 @@ export class Connection extends Emitter<ConnectionEvents> {
     if (this.#closed) {
       throw new EntroximerError("closed", "the connection was closed");
     }
-    const deadline = Date.now() + this.#requestTimeoutMs;
+    const deadline =
+      Date.now() + (LOADING_OPS.has(op) ? this.#loadTimeoutMs : this.#requestTimeoutMs);
     // the connection can drop again between waking up and sending
     while (!this.#ready) {
       await this.#waitUntilReady(deadline);
@@ -242,10 +282,17 @@ export class Connection extends Emitter<ConnectionEvents> {
     const socket = new WebSocket(this.#url, { headers });
     this.#socket = socket;
     socket.addEventListener("message", (message) => {
-      if (this.#socket === socket && typeof message.data === "string") {
-        this.#watchSilence();
-        this.#handle(JSON.parse(message.data) as ServerMessage);
+      if (this.#socket !== socket || typeof message.data !== "string") {
+        return;
       }
+      this.#watchSilence();
+      let parsed: ServerMessage;
+      try {
+        parsed = JSON.parse(message.data) as ServerMessage;
+      } catch {
+        return; // the engine only sends JSON; nothing to act on
+      }
+      this.#handle(parsed);
     });
     socket.addEventListener("close", ({ code, reason }) => {
       if (this.#socket === socket) {
@@ -260,14 +307,15 @@ export class Connection extends Emitter<ConnectionEvents> {
         this.#ready = true;
         this.#sessionId = message.sessionId;
         this.#failedAttempts = 0;
-        for (const wake of [...this.#readyWaiters]) {
-          wake();
-        }
-        this.emit("ready", {
+        this.#readyInfo = {
           sessionId: message.sessionId,
           resumed: message.resumed,
           missedEvents: message.missedEvents,
-        });
+        };
+        for (const wake of [...this.#readyWaiters]) {
+          wake();
+        }
+        this.emit("ready", this.#readyInfo);
         break;
       }
       case "response": {

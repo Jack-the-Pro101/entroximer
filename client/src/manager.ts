@@ -93,6 +93,8 @@ export class Entroximer extends Emitter<ManagerEvents> {
   readonly #host: PlayerHost;
   /** This process's gateway sessions, from `READY`; empty if none was passed on. */
   readonly #gatewaySessions = new Set<string>();
+  /** Guilds whose `player.destroy` went unanswered as the connection dropped. */
+  readonly #unconfirmedDestroys = new Set<string>();
   #connectedBefore = false;
 
   constructor(options: EntroximerOptions) {
@@ -310,6 +312,7 @@ export class Entroximer extends Emitter<ManagerEvents> {
       this.emit("playersLost", lost);
     }
     this.#connectedBefore = true;
+    this.#retryDestroys(info.resumed);
     if (info.resumed && info.missedEvents > 0) {
       // the players continued, but some of what happened meanwhile was not kept
       for (const player of this.#players.values()) {
@@ -342,12 +345,35 @@ export class Entroximer extends Emitter<ManagerEvents> {
     try {
       await this.connection.request("player.destroy", { guildId });
     } catch (error) {
-      // the engine never had this player, e.g. it was only asked to join voice
-      if (!(error instanceof EntroximerError && error.code === "not_found")) {
+      const code = error instanceof EntroximerError ? error.code : null;
+      if (code === "connection_lost" || code === "timeout") {
+        // the engine may still have it, so it is destroyed once the connection is back
+        this.#unconfirmedDestroys.add(guildId);
+      } else if (code !== "not_found") {
+        // `not_found`: the engine never had it, e.g. it was only asked to join voice
         throw error;
       }
     } finally {
       player?._markDestroyed();
+    }
+  }
+
+  /**
+   * Destroys the players the connection dropped while destroying, unless the bot has used their
+   * guild again since, which took the engine's player over.
+   */
+  #retryDestroys(resumed: boolean): void {
+    const guilds = [...this.#unconfirmedDestroys];
+    this.#unconfirmedDestroys.clear();
+    if (!resumed) {
+      return; // a new session has no players
+    }
+    for (const guildId of guilds.filter((guild) => !this.#players.has(guild))) {
+      this.connection.request("player.destroy", { guildId }).catch((error: unknown) => {
+        if (!(error instanceof EntroximerError && error.code === "not_found")) {
+          this.#report(error);
+        }
+      });
     }
   }
 

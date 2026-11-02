@@ -9,6 +9,7 @@ import type { Repeat } from "./generated/Repeat";
 import type { JsonValue } from "./generated/serde_json/JsonValue";
 import { selector } from "./tracks";
 import type { Playable } from "./tracks";
+import { whole } from "./units";
 
 /** Items one `queue.get` fetches while syncing. */
 const PAGE = 1000;
@@ -125,7 +126,7 @@ export class Queue extends Emitter<QueueEvents> {
    */
   setCrossfade(ms: number): Promise<QueueState> {
     return this.#edit(
-      this.#request("queue.configure", { guildId: this.guildId, crossfade: ms }),
+      this.#request("queue.configure", { guildId: this.guildId, crossfade: whole(ms) }),
     );
   }
 

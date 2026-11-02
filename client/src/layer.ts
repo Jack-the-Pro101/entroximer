@@ -13,6 +13,7 @@ import type { TrackEndReason } from "./generated/TrackEndReason";
 import type { JsonValue } from "./generated/serde_json/JsonValue";
 import { selector } from "./tracks";
 import type { Playable } from "./tracks";
+import { whole } from "./units";
 
 /** Clip events name the clip; every clip that `play` resolved ends once with `clipEnd`. */
 export type LayerEvents = {
@@ -103,8 +104,9 @@ export class Layer extends Emitter<LayerEvents> {
     return info;
   }
 
+  /** Percent: 100 leaves the audio unchanged, up to 1000. */
   setVolume(percent: number): Promise<LayerInfo> {
-    return this.configure({ volume: percent });
+    return this.configure({ volume: whole(percent) });
   }
 
   setGraph(graph: GraphSpec | null): Promise<LayerInfo> {
@@ -125,7 +127,19 @@ export class Layer extends Emitter<LayerEvents> {
 
   /** Lowers other layers (`main` is the music) while this layer's clips are heard; `null` stops. */
   setDuck(duck: Duck | null): Promise<LayerInfo> {
-    return this.configure({ duck });
+    if (duck === null) {
+      return this.configure({ duck });
+    }
+    const { layers, volume, attack, release, hold } = duck;
+    return this.configure({
+      duck: {
+        layers,
+        volume: whole(volume),
+        ...(attack === undefined ? {} : { attack: whole(attack) }),
+        ...(release === undefined ? {} : { release: whole(release) }),
+        ...(hold === undefined ? {} : { hold: whole(hold) }),
+      },
+    });
   }
 
   /**
@@ -144,11 +158,11 @@ export class Layer extends Emitter<LayerEvents> {
         layer: this.name,
         clipId,
         track: selector(track, options.userData),
-        ...(options.volume === undefined ? {} : { volume: options.volume }),
-        ...(options.startAt === undefined ? {} : { position: options.startAt }),
-        ...(options.endAt === undefined ? {} : { endTime: options.endAt }),
-        ...(options.fadeIn === undefined ? {} : { fadeIn: options.fadeIn }),
-        ...(options.fadeOut === undefined ? {} : { fadeOut: options.fadeOut }),
+        ...(options.volume === undefined ? {} : { volume: whole(options.volume) }),
+        ...(options.startAt === undefined ? {} : { position: whole(options.startAt) }),
+        ...(options.endAt === undefined ? {} : { endTime: whole(options.endAt) }),
+        ...(options.fadeIn === undefined ? {} : { fadeIn: whole(options.fadeIn) }),
+        ...(options.fadeOut === undefined ? {} : { fadeOut: whole(options.fadeOut) }),
         ...(options.loop === undefined ? {} : { loop: options.loop }),
       });
       // it may have ended already, before the response came
@@ -171,7 +185,7 @@ export class Layer extends Emitter<LayerEvents> {
       guildId: this.guildId,
       layer: this.name,
       ...(clipId === undefined ? {} : { clipId }),
-      ...(fadeOut === undefined ? {} : { fadeOut }),
+      ...(fadeOut === undefined ? {} : { fadeOut: whole(fadeOut) }),
     });
     this._apply(info);
     return info;

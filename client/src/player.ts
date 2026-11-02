@@ -14,6 +14,7 @@ import { Layer } from "./layer";
 import { Queue } from "./queue";
 import { selector } from "./tracks";
 import type { Playable } from "./tracks";
+import { whole } from "./units";
 
 export interface PlayOptions {
   /** Data echoed back in this track's events, e.g. who requested it. */
@@ -190,8 +191,8 @@ export class Player extends Emitter<PlayerEvents> {
   play(track: Playable, options: PlayOptions = {}): Promise<PlayerInfo> {
     return this.update({
       track: selector(track, options.userData),
-      ...(options.startAt === undefined ? {} : { position: options.startAt }),
-      ...(options.endAt === undefined ? {} : { endTime: options.endAt }),
+      ...(options.startAt === undefined ? {} : { position: whole(options.startAt) }),
+      ...(options.endAt === undefined ? {} : { endTime: whole(options.endAt) }),
       ...(options.onlyIfIdle === undefined ? {} : { onlyIfIdle: options.onlyIfIdle }),
     });
   }
@@ -212,7 +213,7 @@ export class Player extends Emitter<PlayerEvents> {
   }
 
   seek(positionMs: number): Promise<PlayerInfo> {
-    return this.update({ position: Math.max(0, Math.round(positionMs)) });
+    return this.update({ position: whole(positionMs) });
   }
 
   pause(): Promise<PlayerInfo> {
@@ -233,12 +234,12 @@ export class Player extends Emitter<PlayerEvents> {
 
   /** Percent: 100 leaves the audio unchanged, up to 1000. */
   setVolume(percent: number): Promise<PlayerInfo> {
-    return this.update({ volume: Math.round(percent) });
+    return this.update({ volume: whole(percent) });
   }
 
   /** Where the current track stops, in milliseconds; `null` plays it to the end. */
   setEndTime(positionMs: number | null): Promise<PlayerInfo> {
-    return this.update({ endTime: positionMs });
+    return this.update({ endTime: positionMs === null ? null : whole(positionMs) });
   }
 
   /**
@@ -443,7 +444,13 @@ export class Player extends Emitter<PlayerEvents> {
       return;
     }
     this.#sentVoice = voice;
-    this.update({ voice }).catch((error: unknown) => this.#report(error));
+    this.update({ voice }).catch((error: unknown) => {
+      // sent again when Discord repeats them, unless newer ones went out meanwhile
+      if (this.#sentVoice === voice) {
+        this.#sentVoice = null;
+      }
+      this.#report(error);
+    });
   }
 
   #report(error: unknown): void {

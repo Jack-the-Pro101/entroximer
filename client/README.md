@@ -192,6 +192,10 @@ engine's YouTube session needs fresh cookies.
 
 Failures are `EntroximerError`s with a `code`: the engine's codes (`age_restricted`,
 `unavailable`, `bad_request`, ...) or the client's own (`connection_lost`, `timeout`, `closed`).
+A request times out after `requestTimeoutMs` (30 s), or `loadTimeoutMs` (150 s) for those that
+may load tracks (`load`, `search`, adding to the queue, playing), which take as long as the source
+does; both include waiting for a dropped connection to come back. Times and percents may be
+fractional; they are rounded to the whole milliseconds and percents the engine takes.
 The protocol's types in `src/generated` are produced from the engine by `cargo test`.
 
 ## Development

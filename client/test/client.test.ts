@@ -68,6 +68,45 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
     expect(youtube?.searchPrefixes).toEqual(["ytsearch", "ytmsearch"]);
   });
 
+  test("connecting again waits for the same connection", async () => {
+    const manager = client();
+    const [first, second] = await Promise.all([manager.connection.connect(), manager.connection.connect()]);
+    expect(second.sessionId).toBe(first.sessionId);
+    expect((await manager.connection.connect()).sessionId).toBe(first.sessionId);
+  });
+
+  test("takes fractional milliseconds and percents", async () => {
+    const manager = client();
+    await manager.connect();
+    const player = manager.player("7");
+    expect((await player.setVolume(55.4)).volume).toBe(55);
+    expect((await player.queue.setCrossfade(1500.7)).crossfade).toBe(1501);
+    const clip = await player.layer("sfx").play(engine.tone, { volume: 80.2, fadeIn: 10.5 });
+    expect(clip.status).toBe("playing");
+    await player.destroy();
+  });
+
+  test("destroying while the connection drops leaves no player behind", async () => {
+    const manager = client();
+    await manager.connect();
+    await manager.player("8").setVolume(50);
+    // the engine may or may not get the request before the connection closes; if it does not,
+    // the client destroys the player again once it has reconnected
+    manager.connection.reconnect();
+    await manager.player("8").destroy();
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const error = await manager.connection
+        .request("player.get", { guildId: "8" })
+        .then(() => null, (e: unknown) => e as EntroximerError);
+      if (error?.code === "not_found") {
+        break;
+      }
+      expect(Date.now()).toBeLessThan(deadline);
+      await Bun.sleep(50);
+    }
+  });
+
   test("a wrong password is refused", async () => {
     const error = await client({ password: "wrong" }).connect().catch((e: unknown) => e);
     expect(error).toBeInstanceOf(EntroximerError);
