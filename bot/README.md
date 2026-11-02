@@ -54,11 +54,13 @@ The bot also needs permission to view and send messages in the channels it posts
 ## Smoke test
 
 `bun run smoke <voice channel id> <track URL>` checks playback end to end without slash commands:
-it joins the channel, plays the track, seeks, pauses and applies effects, plays stretches of the
-track over itself on layers of their own (one while the music is paused, one ducking it), then
+it joins the channel, plays the track, seeks, pauses and applies effects, plays clips over it on
+layers of their own (one while the music is paused, one ducking it), then
 plays a queue: a gapless transition to a queued track, a 6 s crossfade into another, a
 SoundCloud search result skipped to and seeked, repeating a track, and skipping past the end.
-It checks each step against what the engine reports; with
+The clips are beeps it uploads, if the engine takes uploads (`ENTROXIMER_UPLOADS=true`), so
+that they are easy to hear; otherwise stretches of the track. It checks each step against what
+the engine reports; with
 `RUST_LOG=entroximer_server::node::player=debug`, the engine's log shows when it prepares each
 next track.
 

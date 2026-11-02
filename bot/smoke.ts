@@ -1,12 +1,14 @@
 // An end-to-end check in a real voice channel, without slash commands: joins, plays a track,
 // seeks, pauses, applies effects, plays clips over the music on layers of their own (ducking it
 // for one), plays a queue (a gapless transition, a crossfade, a SoundCloud search result,
-// skipping, repeating), and leaves, checking each step against what the engine reports.
+// skipping, repeating), and leaves, checking each step against what the engine reports. The
+// clips are beeps uploaded to the engine if it takes uploads, so that they are easy to hear;
+// otherwise stretches of the track.
 // Needs a running engine; its debug log shows when it prepares each next track.
 //   bun run smoke <voice channel id> <track URL or search>
 import { Client, Events, GatewayIntentBits } from "discord.js";
 import { parseChain } from "entroximer-client";
-import type { PlayerState, Track, TrackEndReason } from "entroximer-client";
+import type { ClipOptions, PlayerState, Track, TrackEndReason } from "entroximer-client";
 
 import { connectEngine, keepGatewayReady } from "./engine";
 import { env } from "./env";
@@ -92,6 +94,71 @@ async function step(name: string, run: () => Promise<string>): Promise<void> {
   }
 }
 
+/**
+ * `seconds` of beeps at `hz` as a WAV file: `onMs` of tone and `offMs` of silence in turn, each
+ * beep fading in and out over 5 ms so that it does not click.
+ */
+function beeps(seconds: number, hz: number, onMs: number, offMs: number): Uint8Array<ArrayBuffer> {
+  const rate = 48_000;
+  const frames = Math.round(seconds * rate);
+  const wav = new DataView(new ArrayBuffer(44 + frames * 4));
+  const text = (offset: number, value: string) => {
+    for (let i = 0; i < value.length; i++) wav.setUint8(offset + i, value.charCodeAt(i));
+  };
+  text(0, "RIFF");
+  wav.setUint32(4, 36 + frames * 4, true);
+  text(8, "WAVEfmt ");
+  wav.setUint32(16, 16, true); // the format chunk's size
+  wav.setUint16(20, 1, true); // PCM
+  wav.setUint16(22, 2, true); // channels
+  wav.setUint32(24, rate, true);
+  wav.setUint32(28, rate * 4, true); // bytes per second
+  wav.setUint16(32, 4, true); // bytes per frame
+  wav.setUint16(34, 16, true); // bits per sample
+  text(36, "data");
+  wav.setUint32(40, frames * 4, true);
+  const [period, beep, ramp] = [((onMs + offMs) / 1000) * rate, (onMs / 1000) * rate, 0.005 * rate];
+  for (let i = 0; i < frames; i++) {
+    const t = i % period;
+    const envelope = t < beep ? Math.min(1, t / ramp, (beep - t) / ramp) : 0;
+    const sample = Math.round(Math.sin((2 * Math.PI * hz * i) / rate) * envelope * 0.4 * 32_767);
+    wav.setInt16(44 + i * 4, sample, true);
+    wav.setInt16(46 + i * 4, sample, true);
+  }
+  return new Uint8Array(wav.buffer);
+}
+
+/** Something to play over the music, and how to clean it up. */
+interface Overlay {
+  sound: Track;
+  options: ClipOptions;
+  what: string;
+  done(): Promise<void>;
+}
+
+/**
+ * 6 s of `wav` uploaded to the engine, if it takes uploads; else 6 s of the test track from
+ * `startAt`, which is harder to tell apart from the music.
+ */
+async function overlay(title: string, wav: Uint8Array<ArrayBuffer>, startAt: number): Promise<Overlay> {
+  if ((await manager.info()).uploads === null) {
+    if (!track) throw new Error("nothing loaded");
+    return {
+      sound: track,
+      options: { startAt, endAt: startAt + 6_000 },
+      what: `6 s of the track at ${formatTime(startAt)} (the engine takes no uploads)`,
+      done: async () => {},
+    };
+  }
+  const upload = await manager.upload(wav, { title });
+  return {
+    sound: upload.track,
+    options: {},
+    what: `6 s of uploaded ${title.toLowerCase()}`,
+    done: () => manager.deleteUpload(upload.id),
+  };
+}
+
 let track: Track | undefined;
 
 await step("join the voice channel", async () => {
@@ -167,13 +234,12 @@ await step("effects", async () => {
 });
 
 await step("layers: a clip plays over the music, and on while the music is paused", async () => {
-  if (!track) throw new Error("nothing loaded");
+  const { sound, options, what, done } = await overlay("Low beeps", beeps(6, 440, 500, 500), 60_000);
   const sfx = player.layer("smoke-sfx");
   await sfx.configure({ mode: "mix", volume: 60 });
   const started = new Promise<void>((resolve) => sfx.once("clipStart", () => resolve()));
   const ended = new Promise<TrackEndReason>((resolve) => sfx.once("clipEnd", (_, reason) => resolve(reason)));
-  // a stretch of the same track, from 1:00 to 1:06
-  const clip = await sfx.play(track, { startAt: 60_000, endAt: 66_000, fadeIn: 300 });
+  const clip = await sfx.play(sound, { ...options, fadeIn: 300 });
   await started;
   await Bun.sleep(2_000);
   await player.pause();
@@ -182,23 +248,25 @@ await step("layers: a clip plays over the music, and on while the music is pause
   const after = (await state()).position;
   await player.resume();
   await sfx.remove();
+  await done();
   if (reason !== "finished") throw new Error(`the clip ended with ${reason}`);
   if (Math.abs(after - held) > 100) throw new Error(`the paused music moved from ${held} to ${after} ms`);
-  return `${clip.status} at once; it finished while the music held at ${formatTime(held)}`;
+  return `${what}, ${clip.status} at once; it finished while the music held at ${formatTime(held)}`;
 });
 
 await step("layers: an announcement lowers the music while it plays", async () => {
-  if (!track) throw new Error("nothing loaded");
+  const { sound, options, what, done } = await overlay("High beeps", beeps(6, 880, 150, 150), 30_000);
   const announcements = player.layer("smoke-announcements");
   await announcements.setDuck({ layers: ["main"], volume: 20 });
   const ended = new Promise<TrackEndReason>((resolve) =>
     announcements.once("clipEnd", (_, reason) => resolve(reason)),
   );
-  await announcements.play(track, { startAt: 30_000, endAt: 36_000 });
+  await announcements.play(sound, options);
   const reason = await ended;
   await announcements.remove();
+  await done();
   if (reason !== "finished") throw new Error(`the announcement ended with ${reason}`);
-  return "6 s of the track at 0:30 over the music, lowered to 20%";
+  return `${what} over the music, lowered to 20%`;
 });
 
 await step("queue: the next track loads ahead and follows without a gap", async () => {
