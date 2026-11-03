@@ -52,7 +52,7 @@ mod profiles;
 
 use activation::UrlActivation;
 use entry::Entry;
-use profiles::{SITES, SearchTarget, Site, site_of};
+use profiles::{SITES, SearchTarget, Site, is_youtube_target, site_of};
 
 pub struct YtDlpProvider {
     site: &'static Site,
@@ -521,6 +521,9 @@ async fn run_once(
         .expect("the semaphore is never closed");
     let mut command = tokio::process::Command::new(ctx.ytdlp.program());
     command.args(&ctx.config.ytdlp.args.0).args(args);
+    if let Some(proxy) = ctx.youtube.proxy().filter(|_| is_youtube_target(target)) {
+        command.arg("--proxy").arg(proxy.as_str());
+    }
     if let Some(session) = session {
         command.arg("--cookies").arg(session.path());
     }
@@ -656,6 +659,12 @@ impl YtDlpProducer {
         let transport = format
             .transport()
             .expect("best_audio only picks supported protocols");
+        // YouTube's media URLs only work from the address that extracted them
+        let proxy = ctx
+            .youtube
+            .proxy()
+            .filter(|_| is_youtube_target(page))
+            .map(|proxy| proxy.to_string());
         let direct = format.url.as_ref().map(|url| FfmpegProducer {
             headers: format
                 .http_headers
@@ -663,6 +672,7 @@ impl YtDlpProducer {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
             live,
+            http_proxy: proxy.clone(),
             ..FfmpegProducer::new(&media.ffmpeg, url)
         });
         let caps = ProducerCaps {
@@ -673,6 +683,9 @@ impl YtDlpProducer {
         let base_args = || -> Vec<String> {
             let mut args = media.ytdlp.args.0.clone();
             args.extend(["--quiet", "--no-warnings", "--no-progress"].map(String::from));
+            if let Some(proxy) = &proxy {
+                args.extend(["--proxy".to_owned(), proxy.clone()]);
+            }
             args
         };
         let work_dir = ctx.work_dir().to_owned();
@@ -728,7 +741,13 @@ impl YtDlpProducer {
             .and_then(|at| Duration::try_from_secs_f64(at).ok())
             .map(|since_epoch| UNIX_EPOCH + since_epoch);
         let activation = direct.as_ref().filter(|_| await_url).map(|direct| {
+            let client = if proxy.is_some() {
+                ctx.youtube.client().clone()
+            } else {
+                net::client().clone()
+            };
             Arc::new(UrlActivation::new(
+                client,
                 direct.input.clone(),
                 direct.headers.clone(),
                 expected,

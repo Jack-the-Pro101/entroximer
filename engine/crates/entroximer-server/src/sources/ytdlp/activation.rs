@@ -25,6 +25,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub(super) struct UrlActivation {
+    /// Through the proxy yt-dlp got the URL with, since it only works from that address.
+    client: reqwest::Client,
     url: String,
     headers: Vec<(String, String)>,
     /// When YouTube expects the URL to work (yt-dlp's `available_at`).
@@ -35,11 +37,13 @@ pub(super) struct UrlActivation {
 
 impl UrlActivation {
     pub(super) fn new(
+        client: reqwest::Client,
         url: String,
         headers: Vec<(String, String)>,
         expected: Option<SystemTime>,
     ) -> Self {
         Self {
+            client,
             url,
             headers,
             expected,
@@ -84,7 +88,8 @@ impl UrlActivation {
     }
 
     async fn request(&self) -> reqwest::Result<StatusCode> {
-        let mut request = crate::sources::net::client()
+        let mut request = self
+            .client
             .get(&self.url)
             .header(RANGE, "bytes=0-0")
             .timeout(REQUEST_TIMEOUT);
@@ -131,7 +136,12 @@ mod tests {
     #[tokio::test]
     async fn waits_until_the_url_is_accepted_and_only_once() {
         let (url, requests) = server(3).await;
-        let activation = UrlActivation::new(url, vec![("User-Agent".into(), "test".into())], None);
+        let activation = UrlActivation::new(
+            crate::sources::net::client().clone(),
+            url,
+            vec![("User-Agent".into(), "test".into())],
+            None,
+        );
 
         let started = Instant::now();
         activation.wait().await;
@@ -152,7 +162,12 @@ mod tests {
 
     #[tokio::test]
     async fn other_answers_end_the_wait_at_once() {
-        let activation = UrlActivation::new("http://127.0.0.1:9/media".into(), Vec::new(), None);
+        let activation = UrlActivation::new(
+            crate::sources::net::client().clone(),
+            "http://127.0.0.1:9/media".into(),
+            Vec::new(),
+            None,
+        );
         let started = Instant::now();
         activation.wait().await;
         assert!(
@@ -165,7 +180,12 @@ mod tests {
     async fn polling_starts_shortly_before_the_expected_time() {
         let (url, requests) = server(0).await;
         let expected = SystemTime::now() + START_EARLY + Duration::from_millis(500);
-        let activation = UrlActivation::new(url, Vec::new(), Some(expected));
+        let activation = UrlActivation::new(
+            crate::sources::net::client().clone(),
+            url,
+            Vec::new(),
+            Some(expected),
+        );
 
         let started = Instant::now();
         activation.wait().await;

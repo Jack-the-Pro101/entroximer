@@ -69,6 +69,16 @@ Keep the plugin and server versions the same. The plugin reaches the server at
 do not get past a bot check on an address YouTube distrusts; that takes another address or the
 signed-in session.
 
+### A proxy for YouTube
+
+YouTube distrusts many server addresses, data centres' especially. `ENTROXIMER_YOUTUBE_PROXY`
+sends everything for YouTube through an HTTP proxy, e.g. one on a home connection: yt-dlp's
+runs for YouTube links and searches (Spotify tracks included, since they play from YouTube), the
+downloads of YouTube tracks, and the engine's and ffmpeg's own requests for their streams, whose
+URLs only work from the address that extracted them. Other sites, direct links and Spotify's API
+are reached directly. The proxy must speak HTTP (`http://` or `https://`); ffmpeg cannot use
+SOCKS.
+
 ## Client protocol
 
 Bots talk to the engine over one WebSocket, `/v1/ws`, sending the headers `User-Id` (the bot's
@@ -440,6 +450,7 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_YOUTUBE_COOKIES_FILE` | | cookies.txt imported whenever it changes, e.g. a secret |
 | `ENTROXIMER_YOUTUBE_CHECK_HOURS` | `12` | Session check interval; `0` disables it |
 | `ENTROXIMER_YOUTUBE_CHECK_VIDEO` | an age-restricted video | Video used to check the session |
+| `ENTROXIMER_YOUTUBE_PROXY` | | HTTP proxy for everything sent to YouTube; other sites go direct |
 | `ENTROXIMER_YTDLP_ARGS` | | Extra yt-dlp arguments, e.g. `--extractor-args youtube:formats=duplicate` |
 | `ENTROXIMER_YTDLP_MAX_RUNS` | `2` | yt-dlp runs at once, counted separately for searches; downloads do not count |
 | `ENTROXIMER_LOG_FORMAT` | `pretty` | `json` for log collectors |

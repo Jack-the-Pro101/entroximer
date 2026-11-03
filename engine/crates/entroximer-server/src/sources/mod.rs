@@ -8,7 +8,7 @@ pub mod artwork;
 mod direct;
 pub mod local;
 pub mod metadata;
-mod net;
+pub(crate) mod net;
 pub mod provider;
 pub mod spotify;
 pub mod upload;

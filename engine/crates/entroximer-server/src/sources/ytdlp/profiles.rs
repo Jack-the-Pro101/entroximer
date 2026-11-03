@@ -74,6 +74,16 @@ pub(crate) static BANDCAMP: Site = Site {
     adjust: keep,
 };
 
+/// Whether yt-dlp run on `target` talks to YouTube: a YouTube link, a YouTube Music search
+/// page, or a `ytsearch` key.
+pub(crate) fn is_youtube_target(target: &str) -> bool {
+    target.starts_with("ytsearch")
+        || Url::parse(target)
+            .ok()
+            .and_then(|url| url.host_str().map(|host| YOUTUBE.claims(host)))
+            .unwrap_or(false)
+}
+
 /// Any other site yt-dlp supports.
 pub(crate) static GENERIC: Site = Site {
     name: "generic",
@@ -147,6 +157,26 @@ fn keep(_: &mut TrackInfo, _: &Entry) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tells_youtube_targets() {
+        for target in [
+            "https://www.youtube.com/watch?v=x",
+            "https://youtu.be/x",
+            "https://music.youtube.com/search?q=x",
+            "ytsearch5:terms",
+        ] {
+            assert!(is_youtube_target(target), "{target}");
+        }
+        for target in [
+            "https://soundcloud.com/a/b",
+            "scsearch5:terms",
+            "https://notyoutube.com/x",
+            "https://example.com/youtube.com",
+        ] {
+            assert!(!is_youtube_target(target), "{target}");
+        }
+    }
 
     #[test]
     fn links_are_matched_to_sites_by_host() {

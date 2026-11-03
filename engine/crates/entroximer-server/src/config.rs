@@ -13,6 +13,7 @@ use clap::builder::BoolishValueParser;
 use clap::{Args, ValueEnum};
 use entroximer_core::player::PlayerConfig;
 use entroximer_core::timeline::{CacheBudget, RetentionConfig, SpillConfig};
+use reqwest::Url;
 use tokio::sync::Semaphore;
 
 use crate::cache::CacheDir;
@@ -293,6 +294,22 @@ pub struct YouTubeConfig {
         default_value = "https://www.youtube.com/watch?v=Tq92D6wQ1mg"
     )]
     pub check_video: String,
+
+    /// An HTTP proxy for everything sent to YouTube (yt-dlp, the engine's own requests for its
+    /// streams, ffmpeg), e.g. a home connection YouTube trusts more than a server's; other sites
+    /// are reached directly. `http://` or `https://` only: ffmpeg cannot use SOCKS.
+    #[arg(long = "youtube-proxy", env = "ENTROXIMER_YOUTUBE_PROXY", value_parser = parse_http_proxy)]
+    pub proxy: Option<Url>,
+}
+
+fn parse_http_proxy(value: &str) -> Result<Url, String> {
+    let url = Url::parse(value).map_err(|e| format!("not a URL: {e}"))?;
+    match url.scheme() {
+        "http" | "https" => Ok(url),
+        scheme => Err(format!(
+            "{scheme}:// proxies are not supported; use an http:// or https:// proxy, since ffmpeg cannot use SOCKS"
+        )),
+    }
 }
 
 impl MediaConfig {
@@ -368,7 +385,9 @@ impl MediaContext {
             config.data_root().join("youtube"),
             config.youtube.auth,
             config.youtube.check_video.clone(),
-        );
+            config.youtube.proxy.clone(),
+        )
+        .context("cannot set up the YouTube proxy")?;
         let uploads = if config.uploads.enabled {
             let dir = cache.path().join("uploads");
             let store = UploadStore::new(dir.clone(), config.uploads.limits())
@@ -478,6 +497,14 @@ impl FromStr for ExtraArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn youtube_proxies_must_be_http() {
+        assert!(parse_http_proxy("http://100.64.0.1:8888").is_ok());
+        assert!(parse_http_proxy("https://proxy.example").is_ok());
+        assert!(parse_http_proxy("socks5://100.64.0.1:1080").is_err());
+        assert!(parse_http_proxy("not a url").is_err());
+    }
 
     #[test]
     fn secrets_stay_out_of_debug_output() {

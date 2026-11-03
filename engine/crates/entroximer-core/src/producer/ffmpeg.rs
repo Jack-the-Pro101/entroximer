@@ -24,6 +24,8 @@ pub struct FfmpegProducer {
     pub headers: Vec<(String, String)>,
     /// A live input: not seekable, and every open starts at the live edge.
     pub live: bool,
+    /// An HTTP proxy for the input's requests, HLS segments included.
+    pub http_proxy: Option<String>,
 }
 
 impl FfmpegProducer {
@@ -33,6 +35,7 @@ impl FfmpegProducer {
             input: input.into(),
             headers: Vec::new(),
             live: false,
+            http_proxy: None,
         }
     }
 
@@ -48,6 +51,9 @@ impl FfmpegProducer {
                     headers
                 });
             spec = spec.arg("-headers").arg(headers);
+        }
+        if let Some(proxy) = &self.http_proxy {
+            spec = spec.arg("-http_proxy").arg(proxy);
         }
         if let Some(start) = start.filter(|&t| t > 0 && !self.live) {
             spec = spec.arg("-ss").arg(seconds_arg(start));
@@ -76,5 +82,29 @@ impl Producer for FfmpegProducer {
                 hint: Some("mkv".into()),
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proxy_applies_to_the_input() {
+        let producer = FfmpegProducer {
+            http_proxy: Some("http://proxy:8888".to_owned()),
+            ..FfmpegProducer::new("ffmpeg", "https://media.example/a.webm")
+        };
+        let args = producer.spec(None).args;
+        let proxy = args.iter().position(|a| a == "-http_proxy").unwrap();
+        let input = args.iter().position(|a| a == "-i").unwrap();
+        assert_eq!(args[proxy + 1], "http://proxy:8888");
+        assert!(proxy < input, "input options go before -i");
+        assert!(
+            !FfmpegProducer::new("ffmpeg", "x")
+                .spec(None)
+                .args
+                .contains(&"-http_proxy".to_owned())
+        );
     }
 }

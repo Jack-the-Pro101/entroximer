@@ -15,15 +15,23 @@ const NAME: &str = concat!("entroximer/", env!("CARGO_PKG_VERSION"));
 pub(crate) fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .default_headers(
-                [(USER_AGENT, NAME.parse().expect("valid header"))]
-                    .into_iter()
-                    .collect(),
-            )
+        builder()
             .build()
             .expect("the HTTP client's settings are valid")
     })
+}
+
+/// A client like [`client`] whose requests all go through `proxy`.
+pub(crate) fn proxied_client(proxy: &Url) -> reqwest::Result<reqwest::Client> {
+    builder().proxy(reqwest::Proxy::all(proxy.clone())?).build()
+}
+
+fn builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().default_headers(
+        [(USER_AGENT, NAME.parse().expect("valid header"))]
+            .into_iter()
+            .collect(),
+    )
 }
 
 /// Fails if `url` points at this machine or a private network: a client could otherwise make the

@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use clap::ValueEnum;
 use entroximer_core::error::display_chain;
+use reqwest::Url;
 use tokio::sync::{Notify, broadcast};
 
 pub use session::{
@@ -23,8 +24,8 @@ pub use session::{
 
 use crate::config::MediaContext;
 use crate::expiring::Expiring;
-use crate::sources::ResolveError;
 use crate::sources::ytdlp::{self, Failure, Restriction, SESSION_ENDED_WARNING};
+use crate::sources::{ResolveError, net};
 
 /// When the YouTube session is sent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -82,6 +83,10 @@ pub struct YouTube {
     recently_restricted: Expiring<String, ()>,
     check_requested: Notify,
     changes: broadcast::Sender<SessionState>,
+    /// What everything sent to YouTube goes through, if set.
+    proxy: Option<Url>,
+    /// For the engine's own requests to YouTube: through `proxy`, if set.
+    client: reqwest::Client,
 }
 
 impl YouTube {
@@ -90,8 +95,17 @@ impl YouTube {
     const REMEMBER_RESTRICTED_FOR: Duration = Duration::from_secs(24 * 3600);
     const REMEMBERED_RESTRICTED: usize = 4096;
 
-    pub fn new(dir: PathBuf, policy: AuthPolicy, check_video: String) -> Self {
-        Self {
+    pub fn new(
+        dir: PathBuf,
+        policy: AuthPolicy,
+        check_video: String,
+        proxy: Option<Url>,
+    ) -> reqwest::Result<Self> {
+        let client = match &proxy {
+            Some(proxy) => net::proxied_client(proxy)?,
+            None => net::client().clone(),
+        };
+        Ok(Self {
             store: Arc::new(SessionStore::new(dir)),
             policy,
             check_video,
@@ -101,7 +115,19 @@ impl YouTube {
             ),
             check_requested: Notify::new(),
             changes: broadcast::Sender::new(16),
-        }
+            proxy,
+            client,
+        })
+    }
+
+    /// The proxy for everything sent to YouTube, if one is set.
+    pub fn proxy(&self) -> Option<&Url> {
+        self.proxy.as_ref()
+    }
+
+    /// The HTTP client for the engine's own requests to YouTube.
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
     }
 
     /// Changes of the session's state observed by this process.
