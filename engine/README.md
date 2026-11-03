@@ -45,7 +45,29 @@ podman exec <container> entroximer ytdlp update
 
 Use `ENTROXIMER_YTDLP_NIGHTLY=true` to follow nightly builds, which get YouTube fixes first, pin
 with `ENTROXIMER_YTDLP_PACKAGE='yt-dlp[default]==<version>'`, or try a test build such as
-yt-dlp's SABR branch with `ENTROXIMER_YTDLP_PACKAGE='yt-dlp[default] @ git+https://...'`.
+yt-dlp's SABR branch (PR #13515) with
+`ENTROXIMER_YTDLP_PACKAGE='yt-dlp[default] @ git+https://github.com/coletdjnz/yt-dlp-dev@feat/youtube/sabr'`.
+yt-dlp keeps preferring `https` formats, so SABR is only used where YouTube offers nothing else.
+`ENTROXIMER_YTDLP_PLUGINS` installs yt-dlp plugins from PyPI alongside it; adding one triggers a
+fresh install on the next update check, or at once with `entroximer ytdlp update`.
+
+### PO tokens
+
+YouTube expects its apps to prove they are genuine with PO (proof of origin) tokens, and refuses
+some formats, or the whole video, without them. yt-dlp gets them from a provider plugin; the
+[bgutil](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) provider runs YouTube's
+BotGuard challenge in a small server next to the engine:
+
+```sh
+podman run -d --name bgutil --pod <engine pod> docker.io/brainicism/bgutil-ytdlp-pot-provider:<version>
+ENTROXIMER_YTDLP_PLUGINS='bgutil-ytdlp-pot-provider==<version>'
+```
+
+Keep the plugin and server versions the same. The plugin reaches the server at
+`http://127.0.0.1:4416`; elsewhere, set
+`ENTROXIMER_YTDLP_ARGS='--extractor-args youtubepot-bgutilhttp:base_url=http://host:4416'`. Tokens
+do not get past a bot check on an address YouTube distrusts; that takes another address or the
+signed-in session.
 
 ## Client protocol
 
@@ -334,7 +356,7 @@ every video is tried anonymously first and the session is only sent when YouTube
 which keeps the account out of most traffic. Cookies YouTube rotates are merged back after every
 yt-dlp run, and the session is re-checked every 12 hours; when YouTube stops accepting it the
 engine logs a warning and tracks needing it fail with instructions until fresh cookies are
-imported. `entroximer youtube cookies status|check|remove` manage it; a cookie file mounted as a
+imported, or a later check finds it accepted again. `entroximer youtube cookies status|check|remove` manage it; a cookie file mounted as a
 secret (`ENTROXIMER_YOUTUBE_COOKIES_FILE`) is imported whenever it changes.
 
 ## How seeking works
@@ -406,6 +428,7 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_DATA_DIR` | `$XDG_DATA_HOME/entroximer` | Persistent state: the managed yt-dlp and the YouTube session |
 | `ENTROXIMER_YTDLP_MANAGED` | off (on in the image) | Let the engine install and update yt-dlp |
 | `ENTROXIMER_YTDLP_PACKAGE` | `yt-dlp[default]` | pip requirement for the managed install |
+| `ENTROXIMER_YTDLP_PLUGINS` | | More pip requirements for the managed install, whitespace separated, e.g. `bgutil-ytdlp-pot-provider==<version>` |
 | `ENTROXIMER_YTDLP_NIGHTLY` | off | Install nightly builds |
 | `ENTROXIMER_YTDLP_UPDATE_HOURS` | `24` | Update check interval; `0` installs once and never updates |
 | `ENTROXIMER_YTDLP`, `ENTROXIMER_FFMPEG`, `ENTROXIMER_FFPROBE` | `yt-dlp`, `ffmpeg`, `ffprobe` | Executables (`ENTROXIMER_YTDLP` only when not managed) |

@@ -64,6 +64,8 @@ pub struct ManagedYtDlp {
     python: String,
     /// A pip requirement: `yt-dlp[default]`, a pinned version, or a git URL for a test build.
     package: String,
+    /// More requirements installed alongside, e.g. yt-dlp plugins.
+    plugins: Vec<String>,
     /// Allow pre-releases, i.e. yt-dlp's nightly builds.
     pre_release: bool,
     /// Version of the active install, once known.
@@ -71,11 +73,18 @@ pub struct ManagedYtDlp {
 }
 
 impl ManagedYtDlp {
-    pub fn new(root: PathBuf, python: String, package: String, pre_release: bool) -> Self {
+    pub fn new(
+        root: PathBuf,
+        python: String,
+        package: String,
+        plugins: Vec<String>,
+        pre_release: bool,
+    ) -> Self {
         Self {
             root,
             python,
             package,
+            plugins,
             pre_release,
             installed: watch::Sender::new(None),
         }
@@ -183,14 +192,15 @@ impl ManagedYtDlp {
         }
     }
 
-    /// Asks pip whether installing the requirement now would change anything.
+    /// Asks pip whether installing the requirements now would change anything, which includes
+    /// a plugin added to them since.
     async fn update_available(&self) -> Result<bool, InstallError> {
         let pip = self.root.join(CURRENT).join("bin").join("pip");
         let report = run(Command::new(pip)
             .args(["install", "--dry-run", "--quiet", "--report", "-"])
             .args(["--upgrade", "--upgrade-strategy", "eager"])
             .args(self.pip_flags())
-            .arg(&self.package))
+            .args(self.requirements()))
         .await?;
         Ok(!parse_report(&report)?.install.is_empty())
     }
@@ -206,7 +216,7 @@ impl ManagedYtDlp {
         let installed = run(Command::new(dir.join("bin").join("pip"))
             .args(["install", "--quiet", "--no-cache-dir"])
             .args(self.pip_flags())
-            .arg(&self.package))
+            .args(self.requirements()))
         .await;
         if let Err(e) = installed {
             // never leave a broken install behind
@@ -214,6 +224,10 @@ impl ManagedYtDlp {
             return Err(e);
         }
         Ok(dir)
+    }
+
+    fn requirements(&self) -> impl Iterator<Item = &String> {
+        std::iter::once(&self.package).chain(&self.plugins)
     }
 
     fn pip_flags(&self) -> Vec<&'static str> {

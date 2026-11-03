@@ -10,7 +10,10 @@
 //! - `https`: yt-dlp writes the file to stdout. Re-opening at an offset goes through ffmpeg,
 //!   which seeks the format's direct URL with range requests using the container index.
 //! - `sabr`: YouTube's server-driven streaming (yt-dlp PR #13515) cannot be written to stdout,
-//!   so yt-dlp writes a file that is read while it grows. Seeking waits for the download.
+//!   so yt-dlp writes files that are read while they grow. Seeking waits for the download. Its
+//!   downloads extract the page again instead of reading the info JSON: mid-stream, the SABR
+//!   downloader fetches fresh PO tokens and reloads the stream through the extractor, which a
+//!   loaded info JSON cannot provide.
 //! - `m3u8`/`m3u8_native` (SoundCloud, live streams): ffmpeg plays the playlist, seeking by
 //!   segment unless it is live; yt-dlp's own stdout output would be MPEG-TS, which the demuxer
 //!   does not read.
@@ -35,7 +38,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Semaphore;
 
-pub use failure::{Failure, Restriction, SESSION_ENDED_WARNING, classify};
+pub use failure::{Failure, Restriction, SESSION_ENDED_WARNING, classify, token_fetch_failed};
 
 use super::provider::{MAX_SEARCH_RESULTS, Provider, ProviderDescriptor};
 use super::{FoundTrack, LoadOutcome, PlaylistInfo, ResolveError, ResolvedTrack, artwork, net};
@@ -249,6 +252,7 @@ impl YtDlpProvider {
         let producer = YtDlpProducer::new(
             ctx,
             Bytes::from(json.to_string()),
+            &track.info.uri,
             &format,
             entry.is_live(),
             await_url,
@@ -462,8 +466,13 @@ impl Purpose {
     }
 }
 
+/// How long a run that failed for want of a PO token waits before its one retry: about as long
+/// as a provider server takes to restart.
+const TOKEN_RETRY_DELAY: Duration = Duration::from_secs(5);
+
 /// Runs yt-dlp on `target` once its purpose's turn comes. Warnings stay on so that yt-dlp can
-/// report a session YouTube ended.
+/// report a session YouTube ended, or a PO token provider it could not reach; a run that failed
+/// for the latter is retried once.
 async fn run(
     ctx: &MediaContext,
     purpose: Purpose,
@@ -471,6 +480,40 @@ async fn run(
     session: Option<&SessionCopy>,
     args: &[&str],
 ) -> Result<Output, ResolveError> {
+    let mut retried = false;
+    loop {
+        let (succeeded, output) = run_once(ctx, purpose, target, session, args).await?;
+        if succeeded {
+            return Ok(output);
+        }
+        let message = error_line(&output.stderr);
+        let failure = classify(&message);
+        if !retried && failure.may_need_token() && token_fetch_failed(&output.stderr) {
+            retried = true;
+            tracing::info!(
+                target,
+                %message,
+                "yt-dlp failed without a PO token from its provider; retrying"
+            );
+            tokio::time::sleep(TOKEN_RETRY_DELAY).await;
+            continue;
+        }
+        return Err(ResolveError::Extraction {
+            query: target.to_owned(),
+            failure,
+            message,
+        });
+    }
+}
+
+/// One yt-dlp run; returns whether it succeeded, and its output.
+async fn run_once(
+    ctx: &MediaContext,
+    purpose: Purpose,
+    target: &str,
+    session: Option<&SessionCopy>,
+    args: &[&str],
+) -> Result<(bool, Output), ResolveError> {
     let _turn = purpose
         .turns(ctx)
         .acquire()
@@ -494,18 +537,13 @@ async fn run(
     if let Some(session) = session {
         ctx.youtube.observe(session, &stderr);
     }
-    if !output.status.success() {
-        let message = error_line(&stderr);
-        return Err(ResolveError::Extraction {
-            query: target.to_owned(),
-            failure: classify(&message),
-            message,
-        });
-    }
-    Ok(Output {
-        stdout: output.stdout,
-        stderr,
-    })
+    Ok((
+        output.status.success(),
+        Output {
+            stdout: output.stdout,
+            stderr,
+        },
+    ))
 }
 
 /// The formats of a fully extracted track.
@@ -608,6 +646,7 @@ impl YtDlpProducer {
     fn new(
         ctx: &MediaContext,
         info_json: Bytes,
+        page: &str,
         format: &Format,
         live: bool,
         await_url: bool,
@@ -633,36 +672,35 @@ impl YtDlpProducer {
         let hint = format.ext.clone();
         let base_args = || -> Vec<String> {
             let mut args = media.ytdlp.args.0.clone();
-            args.extend(
-                [
-                    "--load-info-json",
-                    "-",
-                    "--quiet",
-                    "--no-warnings",
-                    "--no-progress",
-                ]
-                .map(String::from),
-            );
-            if let Some(id) = &format.format_id {
-                args.extend(["-f".to_owned(), id.clone()]);
-            }
+            args.extend(["--quiet", "--no-warnings", "--no-progress"].map(String::from));
             args
         };
         let work_dir = ctx.work_dir().to_owned();
 
         let download: Arc<dyn Producer> = match transport {
             Transport::Stdout => {
-                let spec = ProcessSpec::new(ctx.ytdlp.program())
+                let mut spec = ProcessSpec::new(ctx.ytdlp.program())
                     .args(base_args())
-                    .args(["-o", "-"])
+                    .args(["--load-info-json", "-", "-o", "-"])
                     .stdin(info_json);
+                if let Some(id) = &format.format_id {
+                    spec = spec.args(["-f", id]);
+                }
                 Arc::new(ProcessProducer::new(caps, hint, move |_| {
                     let spec = signed_in(spec.clone(), session.as_ref(), &work_dir);
                     (spec, TimestampMode::Absolute)
                 }))
             }
             Transport::GrowingFile => {
-                let (program, args) = (ctx.ytdlp.program(), base_args());
+                let (program, mut args) = (ctx.ytdlp.program(), base_args());
+                // extracted again, the format may be missing or come over `https` instead; the
+                // best audio left is as good
+                let formats = match &format.format_id {
+                    Some(id) => format!("{id}/bestaudio"),
+                    None => "bestaudio".to_owned(),
+                };
+                args.extend(["--no-playlist".to_owned(), "-f".to_owned(), formats]);
+                let page = page.to_owned();
                 Arc::new(GrowingFileProducer::new(
                     ctx.work_dir().to_owned(),
                     caps,
@@ -672,9 +710,9 @@ impl YtDlpProducer {
                         let spec = ProcessSpec::new(&program)
                             .args(args.clone())
                             .arg("-o")
-                            .arg(template.to_string_lossy())
-                            .stdin(info_json.clone());
-                        let spec = signed_in(spec, session.as_ref(), &work_dir);
+                            .arg(template.to_string_lossy());
+                        // options must come before `--`
+                        let spec = signed_in(spec, session.as_ref(), &work_dir).args(["--", &page]);
                         (spec, TimestampMode::Absolute)
                     },
                 ))

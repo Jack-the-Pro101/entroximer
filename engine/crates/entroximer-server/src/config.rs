@@ -109,6 +109,15 @@ pub struct YtDlpConfig {
     )]
     pub package: String,
 
+    /// More pip requirements for the managed install, whitespace separated: yt-dlp plugins such
+    /// as a PO token provider (`bgutil-ytdlp-pot-provider==<version>`).
+    #[arg(
+        long = "ytdlp-plugins",
+        env = "ENTROXIMER_YTDLP_PLUGINS",
+        default_value = ""
+    )]
+    pub plugins: ExtraArgs,
+
     /// Install yt-dlp's nightly builds, which get YouTube fixes first.
     #[arg(long = "ytdlp-nightly", env = "ENTROXIMER_YTDLP_NIGHTLY", value_parser = BoolishValueParser::new())]
     pub nightly: bool,
@@ -304,6 +313,7 @@ impl MediaConfig {
             self.data_root().join("yt-dlp"),
             self.ytdlp.python.clone(),
             self.ytdlp.package.clone(),
+            self.ytdlp.plugins.0.clone(),
             self.ytdlp.nightly,
         )
     }
