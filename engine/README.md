@@ -191,10 +191,11 @@ their parameters and ranges:
 
 | Nodes | |
 |---|---|
-| `volume`, `limiter`, `drive`, `channel_mix` | Gain, peak limiting, saturation, mixing the channels (mono, swapped, center removed) |
+| `volume`, `limiter`, `compressor`, `drive`, `channel_mix` | Gain, peak limiting, evening out the level, saturation, mixing the channels (mono, swapped, center removed) |
 | `lowpass`, `highpass`, `bandpass`, `bell`, `lowshelf`, `highshelf` | Filters and equalizer bands |
-| `reverb`, `echo`, `chorus`, `flanger`, `phaser` | Space and modulation; `reverb` and `echo` have a dry/wet `mix` |
-| `tremolo`, `vibrato`, `auto_pan`, `pitch` | Periodic volume and pitch, side-to-side movement ("8D"), pitch shift at the same speed |
+| `reverb`, `echo`, `chorus`, `flanger`, `phaser` | Space and modulation; `reverb` and `echo` have a dry/wet `mix`, and a reverb keeps the loudness whatever its room and mix |
+| `tremolo`, `vibrato`, `auto_pan`, `orbit`, `pitch` | Periodic volume and pitch, side-to-side movement, circling around the head ("8D", with the delay and shadow of a head), pitch shift at the same speed |
+| `vinyl` | The hiss and crackle of a worn record |
 
 ```json
 { "rate": 1.25,
@@ -208,11 +209,13 @@ or slower and lower, like a turntable: it resamples what feeds the graph, so the
 
 Presets build ready-made graphs: `bass_boost`, `nightcore`, `sped_up`, `vaporwave`,
 `slowed_reverb`, `8d`, `karaoke`, `lofi`, `phonograph`, `telephone`, `chipmunk`, `deep` and
-`concert_hall`, several with parameters (`bass_boost` takes `gain_db` and `frequency`). Their
-nodes have readable ids, e.g. `bass_boost` is a `subsonic` high-pass, a `headroom` gain, the `bass`
-shelf, a `mud` cut and a `limiter`. `player.update` with `preset` applies one, and the player's
-`graph` then shows its nodes, ready to be changed or extended and set again as `graph`;
-`presets.build` returns the graph without applying it.
+`concert_hall`, several with parameters (`bass_boost` takes `gain_db` and `frequency`). They keep
+about the loudness of the music they play, apart from what they add on purpose, such as
+`bass_boost`'s bass. Their nodes have readable ids, e.g. `bass_boost` splits the bass off (`low1`,
+`low2`) into the `bass` compressor, whose `makeup` is the boost, and `grit` saturation, lowers the
+`rest` (`high1`, `high2`) to make room, and ends in a `limiter`. `player.update` with `preset`
+applies one, and the player's `graph` then shows its nodes, ready to be changed or extended and set
+again as `graph`; `presets.build` returns the graph without applying it.
 
 ## Layers and clips
 

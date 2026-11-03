@@ -1,16 +1,18 @@
 //! Node types shipped with the engine. All of them are stereo in, stereo out.
 
-use std::f32::consts::{FRAC_1_SQRT_2, TAU};
+use std::f32::consts::{FRAC_1_SQRT_2, FRAC_PI_2, TAU};
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use fundsp::audiounit::AudioUnit;
 use fundsp::prelude32::{
-    An, bandpass_hz, bell_hz, chorus, db_amp, delay, feedback, flanger, highpass_hz, highshelf_hz,
-    lerp, limiter_stereo, lowpass_hz, lowshelf_hz, pass, phaser, reverb_stereo,
+    An, allnest_c, bandpass_hz, bell_hz, chorus, db_amp, delay, feedback, flanger, highpass_hz,
+    highshelf_hz, lerp, limiter_stereo, lowpass_hz, lowshelf_hz, pass, phaser, reverb_stereo,
 };
 
-use super::nodes::{AutoPan, ChannelMix, Drive, PitchShift, Tremolo, Vibrato};
+use super::nodes::{
+    AutoPan, ChannelMix, Compressor, Drive, Orbit, PitchShift, Tremolo, Vibrato, Vinyl,
+};
 use super::{NodeDescriptor, NodeFactory, NodeRegistry, ParamSpec, ParamValues};
 
 pub(super) fn register(registry: &mut NodeRegistry) {
@@ -102,6 +104,20 @@ fn mix(default: f32) -> ParamSpec {
     )
 }
 
+/// The gain that brings `reverb_stereo`'s output about as loud as its input.
+///
+/// Its feedback network loses a share `1 - a²` of its energy on every pass, so what it puts out
+/// adds up to `a² / (1 - a²)` of an eighth of what goes in (the input feeds 16 lines per channel,
+/// summed at 1/16). Measured on music, the output is 11 dB below the input times that, within a
+/// dB across rooms and times. Short reverberations in large rooms barely sound at all; they are
+/// raised by at most 12 dB.
+fn reverb_level(room_size: f32, time: f32) -> f32 {
+    // as fundsp computes the feedback gain `a`
+    let a_squared = 10f32.powf(-0.018 * room_size / time);
+    let gain = 10f32.powf(11.2 / 20.0) * ((1.0 - a_squared) / a_squared).sqrt();
+    gain.min(4.0)
+}
+
 fn builtins() -> Vec<BuiltinNode> {
     vec![
         node(
@@ -117,9 +133,15 @@ fn builtins() -> Vec<BuiltinNode> {
         ),
         node(
             "reverb",
-            "Stereo feedback-delay-network reverb.",
+            "Stereo feedback-delay-network reverb. The reverberated signal alone (`mix` 1) is about \
+             as loud as the input, whatever the room, and the mix keeps the loudness even.",
             [
-                param("room_size", "Room size in meters.", 10.0, 1.0..=100.0),
+                param(
+                    "room_size",
+                    "Room size in meters; 10 to 30 sound best.",
+                    10.0,
+                    1.0..=100.0,
+                ),
                 param(
                     "time",
                     "Reverberation time to -60 dB, in seconds.",
@@ -127,12 +149,40 @@ fn builtins() -> Vec<BuiltinNode> {
                     0.1..=30.0,
                 ),
                 param("damping", "High frequency damping.", 0.5, 0.0..=1.0),
-                mix(0.3),
+                mix(0.25),
+                param(
+                    "pre_delay",
+                    "Seconds before the reverberation starts; keeps it apart from the sound.",
+                    0.01,
+                    0.0..=0.2,
+                ),
+                param(
+                    "low_cut",
+                    "Frequency in Hz below which nothing is reverberated, so the bass stays clean.",
+                    100.0,
+                    20.0..=1000.0,
+                ),
             ],
             |p| {
-                let wet = p.get("mix");
-                let reverb = reverb_stereo(p.get("room_size"), p.get("time"), p.get("damping"));
-                Box::new(((pass() | pass()) * (1.0 - wet)) & (reverb * wet))
+                let (room_size, time) = (p.get("room_size"), p.get("time"));
+                // equal power, as the reverberation is uncorrelated with the dry signal
+                let angle = p.get("mix") * FRAC_PI_2;
+                let (dry, wet) = (angle.cos(), angle.sin() * reverb_level(room_size, time));
+                let (pre_delay, low_cut) = (p.get("pre_delay"), p.get("low_cut"));
+                let highs =
+                    highpass_hz(low_cut, FRAC_1_SQRT_2) | highpass_hz(low_cut, FRAC_1_SQRT_2);
+                // smear the input into a dense cloud first, so the reverberation does not start
+                // with distinct echoes (fundsp's `reverb2_stereo` diffusers, in samples at 44.1 kHz)
+                let diffuser = |first: f32, second: f32| {
+                    delay(pre_delay)
+                        >> allnest_c(0.618, delay(first / 44_100.0))
+                        >> allnest_c(0.618, delay(second / 44_100.0))
+                };
+                let reverb = (diffuser(224.0, 340.0) | diffuser(247.0, 366.0))
+                    >> reverb_stereo(room_size, time, p.get("damping"));
+                // only the highs are crossfaded: the bass below the cut passes as it is
+                let crossfade = ((pass() | pass()) * (dry - 1.0)) & (reverb * wet);
+                Box::new((pass() | pass()) & (highs >> crossfade))
             },
         ),
         node(
@@ -271,10 +321,10 @@ fn builtins() -> Vec<BuiltinNode> {
             "vibrato",
             "Wobbles the pitch periodically.",
             [
-                modulation_frequency(5.0, 14.0),
+                param("frequency", "Modulation frequency in Hz.", 5.0, 0.1..=14.0),
                 param(
                     "depth",
-                    "Strength: 1 swings about a semitone and a half either way at 5 Hz.",
+                    "How far the pitch swings either way, in semitones.",
                     0.5,
                     0.0..=1.0,
                 ),
@@ -283,7 +333,8 @@ fn builtins() -> Vec<BuiltinNode> {
         ),
         node(
             "auto_pan",
-            "Moves the sound from side to side (\"8D audio\"), keeping its loudness even.",
+            "Moves the sound from side to side, keeping its loudness even; `orbit` circles it \
+             around the head instead.",
             [
                 modulation_frequency(0.15, 5.0),
                 param(
@@ -294,6 +345,35 @@ fn builtins() -> Vec<BuiltinNode> {
                 ),
             ],
             |p| Box::new(An(AutoPan::new(p.get("frequency"), p.get("depth")))),
+        ),
+        node(
+            "orbit",
+            "Circles the sound around the listener's head (\"8D audio\"); best on headphones. The \
+             middle of the stereo image orbits as one source: the far ear hears it later, quieter \
+             and duller, and from behind it sounds duller still.",
+            [
+                param("frequency", "Rounds per second.", 0.15, 0.01..=2.0),
+                param(
+                    "depth",
+                    "How far towards each side it goes: 1 reaches all the way.",
+                    0.8,
+                    0.0..=1.0,
+                ),
+                param(
+                    "width",
+                    "How much of the stereo image stays where it is: 0 orbits a single point, 1 \
+                     keeps all of it.",
+                    0.3,
+                    0.0..=1.0,
+                ),
+            ],
+            |p| {
+                Box::new(An(Orbit::new(
+                    p.get("frequency"),
+                    p.get("depth"),
+                    p.get("width"),
+                )))
+            },
         ),
         node(
             "channel_mix",
@@ -342,6 +422,61 @@ fn builtins() -> Vec<BuiltinNode> {
                 mix(1.0),
             ],
             |p| Box::new(An(Drive::new(p.get("drive"), p.get("mix")))),
+        ),
+        node(
+            "compressor",
+            "Evens out the level: whatever rises above the threshold is turned down by the ratio, \
+             so the quiet parts come forward and the whole can be turned up.",
+            [
+                param(
+                    "threshold",
+                    "Level in dB (0 is full scale) above which it turns down.",
+                    -18.0,
+                    -60.0..=0.0,
+                ),
+                param(
+                    "ratio",
+                    "How much it turns down: at 4, every 4 dB above the threshold become 1.",
+                    4.0,
+                    1.0..=20.0,
+                ),
+                param(
+                    "attack",
+                    "Seconds it takes to turn down; longer lets the start of a beat through.",
+                    0.01,
+                    0.0001..=0.5,
+                ),
+                param(
+                    "release",
+                    "Seconds it takes to come back up.",
+                    0.15,
+                    0.01..=2.0,
+                ),
+                param("makeup", "Gain in dB applied afterwards.", 0.0, 0.0..=24.0),
+            ],
+            |p| {
+                Box::new(An(Compressor::new(
+                    p.get("threshold"),
+                    p.get("ratio"),
+                    p.get("attack"),
+                    p.get("release"),
+                    p.get("makeup"),
+                )))
+            },
+        ),
+        node(
+            "vinyl",
+            "Adds the surface noise of a worn record: a soft hiss and random crackles.",
+            [
+                param(
+                    "amount",
+                    "How loud the noise is: 1 is a badly worn record.",
+                    0.5,
+                    0.0..=1.0,
+                ),
+                param("density", "Crackles per second.", 8.0, 0.0..=100.0),
+            ],
+            |p| Box::new(An(Vinyl::new(p.get("amount"), p.get("density")))),
         ),
         node(
             "phaser",
@@ -426,10 +561,70 @@ fn builtins() -> Vec<BuiltinNode> {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{Map, Value};
+    use serde_json::{Map, Value, json};
 
     use super::*;
-    use crate::dsp::{GraphSpec, NodeSpec};
+    use crate::dsp::{Effects, GraphSpec, NodeSpec};
+
+    fn one_node(kind: &str, params: Value) -> Effects {
+        let spec = GraphSpec {
+            nodes: vec![NodeSpec {
+                id: "node".into(),
+                kind: kind.into(),
+                params: serde_json::from_value(params).unwrap(),
+            }],
+            ..GraphSpec::default()
+        };
+        NodeRegistry::with_builtins()
+            .compile(&spec, 48_000.0)
+            .unwrap()
+    }
+
+    fn level_db(audio: &[f32]) -> f32 {
+        10.0 * (audio.iter().map(|s| s * s).sum::<f32>() / audio.len() as f32).log10()
+    }
+
+    #[test]
+    fn reverberation_alone_is_about_as_loud_as_its_input() {
+        for (room_size, time) in [(10.0, 0.5), (10.0, 2.0), (20.0, 3.0), (30.0, 6.0)] {
+            let mut reverb = one_node(
+                "reverb",
+                json!({ "room_size": room_size, "time": time, "damping": 0, "mix": 1, "low_cut": 20 }),
+            );
+            let mut state = 0x1234_5678_u32;
+            let mut out = vec![0.0; 48_000 * 2 * 4];
+            reverb.render(&mut out, |input| {
+                for sample in input {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    *sample = state as f32 / u32::MAX as f32 - 0.5;
+                }
+            });
+            // uniform noise in -0.5..0.5; the reverberation has built up after 2 s
+            let change = level_db(&out[48_000 * 2 * 2..]) - 10.0 * (1.0f32 / 12.0).log10();
+            assert!(
+                change.abs() < 3.0,
+                "a {room_size} m room ringing {time} s changes the level by {change:+.1} dB"
+            );
+        }
+    }
+
+    #[test]
+    fn reverb_leaves_the_bass_below_its_cut_alone() {
+        let mut reverb = one_node("reverb", json!({ "mix": 1, "low_cut": 400 }));
+        let mut out = vec![0.0; 48_000 * 2];
+        let mut t = 0;
+        reverb.render(&mut out, |input| {
+            for frame in input.as_chunks_mut::<2>().0 {
+                frame.fill(0.5 * (TAU * 50.0 * t as f32 / 48_000.0).sin());
+                t += 1;
+            }
+        });
+        // a sine of amplitude 0.5 has a power of 1/8
+        let change = level_db(&out[48_000..]) - 10.0 * (1.0f32 / 8.0).log10();
+        assert!(change.abs() < 1.0, "50 Hz changed by {change:+.1} dB");
+    }
 
     #[test]
     fn every_node_builds_with_defaults_and_extremes_and_stays_finite() {

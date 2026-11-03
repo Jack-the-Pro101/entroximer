@@ -158,11 +158,11 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
     const player = manager.player("2");
     await player.setPreset("bass_boost", { gain_db: 9 });
     const graph = player.graph!;
-    expect(graph.nodes.find((node) => node.id === "bass")?.params["gain_db"]).toBe(9);
+    expect(graph.nodes.find((node) => node.id === "bass")?.params["makeup"]).toBe(9);
 
     // the preset's graph is a starting point
-    await player.setGraph(append(withParams(graph, "bass", { gain_db: 12 }), { type: "reverb", id: "room" }));
-    expect(player.graph?.nodes.find((node) => node.id === "bass")?.params["gain_db"]).toBe(12);
+    await player.setGraph(append(withParams(graph, "bass", { makeup: 12 }), { type: "reverb", id: "room" }));
+    expect(player.graph?.nodes.find((node) => node.id === "bass")?.params["makeup"]).toBe(12);
     expect(player.graph?.nodes.at(-1)?.id).toBe("room");
 
     expect((await manager.buildPreset("nightcore")).rate).toBe(1.25);

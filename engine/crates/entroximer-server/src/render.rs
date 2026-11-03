@@ -181,6 +181,8 @@ fn render_to_wav(
     let limit = args.duration.map(|d| ticks(d.0));
     let mut written: Ticks = 0;
     let mut block = vec![0.0; BLOCK_FRAMES * CHANNELS];
+    // as a guild's mixer keeps its sum within full scale
+    let mut master = Effects::limiter();
     let mut source = PlayerSource {
         player,
         ended: false,
@@ -213,6 +215,7 @@ fn render_to_wav(
         if let Some(error) = source.error.take() {
             return Err(error.into());
         }
+        master.process(block);
         for &sample in block.iter() {
             wav.write_sample(sample)?;
         }

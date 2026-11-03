@@ -205,52 +205,85 @@ fn semitones_against(rate: f32) -> f32 {
     -12.0 * rate.log2()
 }
 
+/// A node that mixes both channels into the middle.
+fn mono(id: &str) -> NodeSpec {
+    node(
+        id,
+        "channel_mix",
+        &[
+            ("left_to_left", 0.5),
+            ("right_to_left", 0.5),
+            ("left_to_right", 0.5),
+            ("right_to_right", 0.5),
+        ],
+    )
+}
+
+// The presets keep about the loudness of what they play: measured on music, each is within
+// about 2 LU of the original, apart from what it adds on purpose (bass_boost's bass). The
+// `level` nodes make up for what filters and saturation change.
 fn builtins() -> Vec<BuiltinPreset> {
     vec![
         preset(
             "bass_boost",
-            "More bass, the way mastering engineers add it: rumble below hearing is filtered out \
-             first so it cannot eat the headroom, a low shelf lifts the bass, a gentle cut around \
-             350 Hz keeps the boost from turning muddy, and the level is lowered by half the boost \
-             before a limiter catches the remaining peaks, so the limiter does not pump.",
+            "More bass, as much as fits without clipping: the bass below the frequency is split off \
+             and raised, then compressed and lightly saturated, so that its peaks stay in range and \
+             it is heard even on small speakers. The rest is lowered by a quarter of the boost to \
+             make room, and a limiter catches what is left.",
             [
-                param(
-                    "gain_db",
-                    "Bass boost in dB; 6 to 8 is a strong but clean boost.",
-                    6.0,
-                    0.0..=18.0,
-                ),
+                param("gain_db", "Bass boost in dB.", 10.0, 0.0..=18.0),
                 param(
                     "frequency",
                     "Everything below this frequency, in Hz, is boosted.",
-                    100.0,
+                    150.0,
                     40.0..=250.0,
                 ),
             ],
             |p| {
-                let gain_db = p.get("gain_db");
-                chain(
-                    None,
-                    vec![
-                        node("subsonic", "highpass", &[("cutoff", 30.0)]),
-                        node(
-                            "headroom",
-                            "volume",
-                            &[("gain", db_to_gain(-gain_db / 2.0))],
-                        ),
+                let (gain_db, frequency) = (p.get("gain_db"), p.get("frequency"));
+                GraphSpec {
+                    rate: None,
+                    nodes: vec![
+                        node("subsonic", "highpass", &[("cutoff", 25.0)]),
+                        // two Butterworth filters each way: a crossover whose halves add up flat
+                        node("low1", "lowpass", &[("cutoff", frequency)]),
+                        node("low2", "lowpass", &[("cutoff", frequency)]),
                         node(
                             "bass",
-                            "lowshelf",
-                            &[("cutoff", p.get("frequency")), ("gain_db", gain_db)],
+                            "compressor",
+                            &[
+                                // only what the boost pushes above -6 dBFS is compressed
+                                ("threshold", -6.0 - gain_db),
+                                ("ratio", 3.0),
+                                ("attack", 0.02),
+                                ("release", 0.15),
+                                ("makeup", gain_db),
+                            ],
                         ),
                         node(
-                            "mud",
-                            "bell",
-                            &[("center", 350.0), ("q", 1.0), ("gain_db", -gain_db / 4.0)],
+                            "grit",
+                            "drive",
+                            &[("drive", 2.5), ("mix", (gain_db / 25.0).min(0.5))],
                         ),
+                        node("high1", "highpass", &[("cutoff", frequency)]),
+                        node("high2", "highpass", &[("cutoff", frequency)]),
+                        node("rest", "volume", &[("gain", db_to_gain(-gain_db / 4.0))]),
                         node("limiter", "limiter", &[]),
                     ],
-                )
+                    edges: vec![
+                        edge(GRAPH_INPUT, "subsonic"),
+                        edge("subsonic", "low1"),
+                        edge("low1", "low2"),
+                        edge("low2", "bass"),
+                        edge("bass", "grit"),
+                        edge("grit", "limiter"),
+                        edge("subsonic", "high1"),
+                        edge("high1", "high2"),
+                        edge("high2", "rest"),
+                        edge("rest", "limiter"),
+                        edge("limiter", GRAPH_OUTPUT),
+                    ],
+                }
             },
         ),
         preset(
@@ -277,17 +310,25 @@ fn builtins() -> Vec<BuiltinPreset> {
         ),
         preset(
             "vaporwave",
-            "Slower and lower, muffled and spacious.",
+            "Slower and lower, muffled and gently wobbling, in a large room.",
             [param("rate", "Playback rate.", 0.8, 0.5..=1.0)],
             |p| {
                 chain(
                     Some(p.get("rate")),
                     vec![
-                        node("muffle", "lowpass", &[("cutoff", 5000.0)]),
+                        node("muffle", "lowpass", &[("cutoff", 6000.0), ("q", 0.5)]),
+                        node("wobble", "vibrato", &[("frequency", 0.3), ("depth", 0.1)]),
                         node(
                             "reverb",
                             "reverb",
-                            &[("room_size", 20.0), ("time", 3.0), ("mix", 0.25)],
+                            &[
+                                ("room_size", 25.0),
+                                ("time", 3.0),
+                                ("damping", 0.6),
+                                ("mix", 0.35),
+                                ("pre_delay", 0.02),
+                                ("low_cut", 150.0),
+                            ],
                         ),
                     ],
                 )
@@ -295,10 +336,10 @@ fn builtins() -> Vec<BuiltinPreset> {
         ),
         preset(
             "slowed_reverb",
-            "Slower and lower, in a large reverberant room.",
+            "Slower and lower, drenched in a long, dark reverberation.",
             [
                 param("rate", "Playback rate.", 0.85, 0.5..=1.0),
-                param("mix", "How much reverb.", 0.35, 0.0..=1.0),
+                param("mix", "How much reverb.", 0.5, 0.0..=1.0),
             ],
             |p| {
                 chain(
@@ -308,9 +349,11 @@ fn builtins() -> Vec<BuiltinPreset> {
                         "reverb",
                         &[
                             ("room_size", 30.0),
-                            ("time", 4.0),
-                            ("damping", 0.4),
+                            ("time", 5.0),
+                            ("damping", 0.7),
                             ("mix", p.get("mix")),
+                            ("pre_delay", 0.04),
+                            ("low_cut", 200.0),
                         ],
                     )],
                 )
@@ -318,20 +361,45 @@ fn builtins() -> Vec<BuiltinPreset> {
         ),
         preset(
             "8d",
-            "Circles from side to side in a small room (\"8D audio\"); best on headphones.",
-            [param("frequency", "Rounds per second.", 0.125, 0.01..=2.0)],
-            |p| {
-                chain(
-                    None,
-                    vec![
-                        node("pan", "auto_pan", &[("frequency", p.get("frequency"))]),
-                        node(
-                            "room",
-                            "reverb",
-                            &[("room_size", 15.0), ("time", 1.5), ("mix", 0.15)],
-                        ),
-                    ],
-                )
+            "Circles around your head (\"8D audio\") in a small room; best on headphones.",
+            [
+                param("frequency", "Rounds per second.", 0.15, 0.01..=2.0),
+                param(
+                    "depth",
+                    "How far towards each side it goes.",
+                    0.8,
+                    0.0..=1.0,
+                ),
+            ],
+            |p| GraphSpec {
+                rate: None,
+                nodes: vec![
+                    node(
+                        "orbit",
+                        "orbit",
+                        &[("frequency", p.get("frequency")), ("depth", p.get("depth"))],
+                    ),
+                    // the room stays around the listener while the sound moves through it
+                    node(
+                        "room",
+                        "reverb",
+                        &[
+                            ("room_size", 15.0),
+                            ("time", 1.2),
+                            ("mix", 1.0),
+                            ("pre_delay", 0.02),
+                            ("low_cut", 200.0),
+                        ],
+                    ),
+                    node("room_level", "volume", &[("gain", 0.3)]),
+                ],
+                edges: vec![
+                    edge(GRAPH_INPUT, "orbit"),
+                    edge("orbit", GRAPH_OUTPUT),
+                    edge(GRAPH_INPUT, "room"),
+                    edge("room", "room_level"),
+                    edge("room_level", GRAPH_OUTPUT),
+                ],
             },
         ),
         preset(
@@ -375,50 +443,80 @@ fn builtins() -> Vec<BuiltinPreset> {
         ),
         preset(
             "lofi",
-            "Warm, narrow and slightly wobbly, like a worn tape.",
-            [param("wow", "How much the pitch wobbles.", 0.15, 0.0..=1.0)],
+            "Warm, muffled and wobbly, with the hiss and crackle of a worn record.",
+            [
+                param(
+                    "wow",
+                    "How far the pitch wobbles, in semitones.",
+                    0.15,
+                    0.0..=1.0,
+                ),
+                param(
+                    "noise",
+                    "How loud the hiss and crackle are.",
+                    0.3,
+                    0.0..=1.0,
+                ),
+            ],
             |p| {
                 chain(
                     None,
                     vec![
-                        node("thin", "highpass", &[("cutoff", 150.0)]),
-                        node("muffle", "lowpass", &[("cutoff", 3500.0)]),
+                        node("thin", "highpass", &[("cutoff", 120.0)]),
+                        node("muffle", "lowpass", &[("cutoff", 4500.0), ("q", 0.6)]),
                         node(
                             "wow",
                             "vibrato",
-                            &[("frequency", 0.6), ("depth", p.get("wow"))],
+                            &[("frequency", 0.5), ("depth", p.get("wow"))],
                         ),
                         node("warmth", "drive", &[("drive", 2.0), ("mix", 0.5)]),
+                        node("level", "volume", &[("gain", db_to_gain(-1.5))]),
+                        node(
+                            "vinyl",
+                            "vinyl",
+                            &[("amount", p.get("noise")), ("density", 6.0)],
+                        ),
                     ],
                 )
             },
         ),
         preset(
             "phonograph",
-            "An old record player: mono, band-limited, with a slow wobble.",
-            [param("wow", "How much the pitch wobbles.", 0.25, 0.0..=1.0)],
+            "An old record player: mono, through a small horn, wobbling and crackling.",
+            [
+                param(
+                    "wow",
+                    "How far the pitch wobbles, in semitones.",
+                    0.1,
+                    0.0..=1.0,
+                ),
+                param(
+                    "noise",
+                    "How loud the hiss and crackle are.",
+                    0.8,
+                    0.0..=1.0,
+                ),
+            ],
             |p| {
                 chain(
                     None,
                     vec![
-                        node(
-                            "mono",
-                            "channel_mix",
-                            &[
-                                ("left_to_left", 0.5),
-                                ("right_to_left", 0.5),
-                                ("left_to_right", 0.5),
-                                ("right_to_right", 0.5),
-                            ],
-                        ),
-                        node("low_cut", "highpass", &[("cutoff", 300.0)]),
-                        node("high_cut", "lowpass", &[("cutoff", 4500.0)]),
+                        mono("mono"),
+                        // resonant edges, like a horn's
+                        node("low_cut", "highpass", &[("cutoff", 250.0), ("q", 1.2)]),
+                        node("high_cut", "lowpass", &[("cutoff", 5000.0), ("q", 1.2)]),
                         node(
                             "wow",
                             "vibrato",
-                            &[("frequency", 0.5), ("depth", p.get("wow"))],
+                            &[("frequency", 0.55), ("depth", p.get("wow"))],
                         ),
-                        node("horn", "drive", &[("drive", 1.5), ("mix", 0.6)]),
+                        node("horn", "drive", &[("drive", 2.0), ("mix", 0.6)]),
+                        node("level", "volume", &[("gain", db_to_gain(-1.7))]),
+                        node(
+                            "vinyl",
+                            "vinyl",
+                            &[("amount", p.get("noise")), ("density", 15.0)],
+                        ),
                     ],
                 )
             },
@@ -431,19 +529,19 @@ fn builtins() -> Vec<BuiltinPreset> {
                 chain(
                     None,
                     vec![
+                        mono("mono"),
+                        // two filters each side, for the steep edges of a phone line's band
+                        node("low_cut", "highpass", &[("cutoff", 350.0), ("q", 1.0)]),
+                        node("low_cut2", "highpass", &[("cutoff", 350.0)]),
+                        node("high_cut", "lowpass", &[("cutoff", 3200.0), ("q", 1.0)]),
+                        node("high_cut2", "lowpass", &[("cutoff", 3200.0)]),
                         node(
-                            "mono",
-                            "channel_mix",
-                            &[
-                                ("left_to_left", 0.5),
-                                ("right_to_left", 0.5),
-                                ("left_to_right", 0.5),
-                                ("right_to_right", 0.5),
-                            ],
+                            "honk",
+                            "bell",
+                            &[("center", 1500.0), ("q", 1.0), ("gain_db", 3.0)],
                         ),
-                        node("low_cut", "highpass", &[("cutoff", 400.0)]),
-                        node("high_cut", "lowpass", &[("cutoff", 3000.0)]),
-                        node("line", "drive", &[("drive", 3.0), ("mix", 0.4)]),
+                        node("line", "drive", &[("drive", 4.0), ("mix", 0.4)]),
+                        node("level", "volume", &[("gain", db_to_gain(-2.4))]),
                     ],
                 )
             },
@@ -486,8 +584,8 @@ fn builtins() -> Vec<BuiltinPreset> {
         ),
         preset(
             "concert_hall",
-            "In a large hall.",
-            [param("mix", "How much reverb.", 0.35, 0.0..=1.0)],
+            "In a large concert hall.",
+            [param("mix", "How much reverb.", 0.4, 0.0..=1.0)],
             |p| {
                 chain(
                     None,
@@ -495,10 +593,12 @@ fn builtins() -> Vec<BuiltinPreset> {
                         "hall",
                         "reverb",
                         &[
-                            ("room_size", 40.0),
-                            ("time", 3.5),
-                            ("damping", 0.3),
+                            ("room_size", 30.0),
+                            ("time", 3.0),
+                            ("damping", 0.4),
                             ("mix", p.get("mix")),
+                            ("pre_delay", 0.03),
+                            ("low_cut", 150.0),
                         ],
                     )],
                 )
@@ -509,6 +609,8 @@ fn builtins() -> Vec<BuiltinPreset> {
 
 #[cfg(test)]
 mod tests {
+    use std::f32::consts::TAU;
+
     use serde_json::json;
 
     use super::*;
@@ -550,8 +652,6 @@ mod tests {
     /// The peak, and the amplitudes at 60 and 1000 Hz, of a test mix (a 60 Hz bass under a
     /// 1 kHz tone) through `graph`.
     fn measure(graph: &GraphSpec) -> (f32, f32, f32) {
-        use std::f32::consts::TAU;
-
         let mut effects = NodeRegistry::with_builtins()
             .compile(graph, 48_000.0)
             .unwrap();
@@ -595,11 +695,111 @@ mod tests {
             "the limiter keeps peaks within full scale, got {peak}"
         );
         let lift_db = 20.0 * ((bass / tone) / (dry_bass / dry_tone)).log10();
-        // 60 Hz is below the shelf's 100 Hz midpoint, so it gets most of the 12 dB
+        // the mix already peaks at 0.9, so the bass's peaks are compressed: not all 12 dB fit
         assert!(
-            (8.0..=12.5).contains(&lift_db),
+            (7.0..=12.5).contains(&lift_db),
             "the bass rose {lift_db:.1} dB over the 1 kHz tone"
         );
+    }
+
+    /// Deterministic noise with the falling spectrum of most music, at about -20 dBFS: pink noise
+    /// that falls faster above a few kHz, as mixes do. Some is common to both channels and some
+    /// each channel's own, for a mix's stereo image: the sides 6.5 dB under the middle.
+    fn music_like() -> impl FnMut() -> [f32; 2] {
+        const WIDTH: f32 = 0.75;
+        // a one-pole low-pass at 5 kHz
+        let smoothing = 1.0 - (-TAU * 5000.0 / 48_000.0).exp();
+        let mut state = 0x2545_f491_u32;
+        let mut filters = [[0.0f32; 4]; 3];
+        move || {
+            let mut pink = [0.0; 3];
+            for (pink, b) in pink.iter_mut().zip(&mut filters) {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                let white = state as f32 / u32::MAX as f32 * 2.0 - 1.0;
+                // Paul Kellet's economy pinking filter
+                b[0] = 0.99765 * b[0] + white * 0.099_046;
+                b[1] = 0.963 * b[1] + white * 0.296_516_4;
+                b[2] = 0.57 * b[2] + white * 1.052_691_3;
+                let raw = (b[0] + b[1] + b[2] + white * 0.1848) * 0.05;
+                b[3] += (raw - b[3]) * smoothing;
+                *pink = b[3];
+            }
+            [pink[0] + WIDTH * pink[1], pink[0] + WIDTH * pink[2]]
+        }
+    }
+
+    /// Loudness in dB as meters measure it (BS.1770's K-weighting at 48 kHz, without gating) of
+    /// interleaved stereo.
+    fn loudness(audio: &[f32]) -> f64 {
+        const STAGES: [([f64; 3], [f64; 2]); 2] = [
+            (
+                [
+                    1.535_124_859_586_97,
+                    -2.691_696_189_406_38,
+                    1.198_392_810_852_85,
+                ],
+                [-1.690_659_293_182_41, 0.732_480_774_215_85],
+            ),
+            (
+                [1.0, -2.0, 1.0],
+                [-1.990_047_454_833_98, 0.990_072_250_366_21],
+            ),
+        ];
+        let mut power = 0.0;
+        for channel in 0..2 {
+            let mut signal: Vec<f64> = audio
+                .iter()
+                .skip(channel)
+                .step_by(2)
+                .map(|&s| f64::from(s))
+                .collect();
+            for (b, a) in STAGES {
+                let (mut x1, mut x2, mut y1, mut y2) = (0.0, 0.0, 0.0, 0.0);
+                for sample in &mut signal {
+                    let y = b[0] * *sample + b[1] * x1 + b[2] * x2 - a[0] * y1 - a[1] * y2;
+                    (x2, x1, y2, y1) = (x1, *sample, y1, y);
+                    *sample = y;
+                }
+            }
+            power += signal.iter().map(|s| s * s).sum::<f64>() / signal.len() as f64;
+        }
+        10.0 * power.log10()
+    }
+
+    #[test]
+    fn presets_keep_the_loudness_of_what_they_play() {
+        let presets = PresetRegistry::with_builtins();
+        let nodes = NodeRegistry::with_builtins();
+        let play = |graph: &GraphSpec| {
+            let mut effects = nodes.compile(graph, 48_000.0).unwrap();
+            let mut music = music_like();
+            let mut out = vec![0.0; 48_000 * 2 * 6];
+            effects.render(&mut out, |input| {
+                for frame in input.as_chunks_mut::<2>().0 {
+                    *frame = music();
+                }
+            });
+            // once the reverberations have built up
+            loudness(&out[48_000 * 2 * 2..])
+        };
+        let dry = play(&GraphSpec::default());
+        for descriptor in presets.descriptors() {
+            let change = play(&descriptor.graph) - dry;
+            // noise only approximates music: on songs, they are within about 1.5 dB; bass_boost
+            // adds its bass on top
+            let allowed = if descriptor.name == "bass_boost" {
+                0.0..=8.0
+            } else {
+                -2.5..=2.5
+            };
+            assert!(
+                allowed.contains(&change),
+                "{} changes the loudness by {change:+.1} dB",
+                descriptor.name
+            );
+        }
     }
 
     #[test]
@@ -609,12 +809,12 @@ mod tests {
             .build(&selection("bass_boost", json!({ "gain_db": 12 })))
             .unwrap();
         let node = |id: &str| graph.nodes.iter().find(|n| n.id == id).unwrap();
-        assert_eq!(node("bass").params["gain_db"], 12.0);
-        assert_eq!(node("mud").params["gain_db"], -3.0);
-        let headroom = node("headroom").params["gain"].as_f64().unwrap();
+        assert_eq!(node("bass").params["makeup"], 12.0);
+        assert_eq!(node("bass").params["threshold"], -18.0);
+        let rest = node("rest").params["gain"].as_f64().unwrap();
         assert!(
-            (headroom - 0.5).abs() < 0.01,
-            "half the boost: -6 dB, got {headroom}"
+            (rest - 0.708).abs() < 0.01,
+            "a quarter of the boost: -3 dB, got {rest}"
         );
 
         let sped_up = presets
