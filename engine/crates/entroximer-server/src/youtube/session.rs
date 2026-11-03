@@ -2,10 +2,14 @@
 //! the data directory and shared safely by every yt-dlp process.
 //!
 //! yt-dlp writes its cookie file back when it exits, including cookies YouTube rotated. Each
-//! process therefore gets its own copy ([`SessionCopy`]); when the copy is dropped, whatever
-//! changed in it is merged into the stored session. Concurrent processes never overwrite each
-//! other, and rotations keep the session alive. A copy of a session that has since been
-//! replaced (re-imported or removed) is discarded instead.
+//! process therefore gets its own copy ([`SessionCopy`]), dropped as soon as the process has
+//! exited: whatever changed in it is merged into the stored session. Concurrent processes never
+//! overwrite each other, and rotations keep the session alive. A copy of a session that has
+//! since been replaced (re-imported or removed) is discarded instead.
+//!
+//! Copies must be short-lived: sending cookies YouTube has since rotated looks like a stolen
+//! session, which YouTube ends. A track keeps a [`Session`] instead, which hands each of its downloads a fresh
+//! copy.
 //!
 //! Files, readable by the engine's user only:
 //! - `cookies.txt`: the session, in the Netscape format yt-dlp uses;
@@ -192,7 +196,7 @@ impl SessionStore {
         self: &Arc<Self>,
         work_dir: &Path,
     ) -> Result<Option<SessionCopy>, SessionError> {
-        self.checkout_if(work_dir, SessionState::usable)
+        self.checkout_if(work_dir, |meta| meta.state.usable())
     }
 
     /// Like [`checkout`](Self::checkout), but also for a session considered expired, to check
@@ -201,19 +205,19 @@ impl SessionStore {
         self: &Arc<Self>,
         work_dir: &Path,
     ) -> Result<Option<SessionCopy>, SessionError> {
-        self.checkout_if(work_dir, |state| state != SessionState::None)
+        self.checkout_if(work_dir, |meta| meta.state != SessionState::None)
     }
 
     fn checkout_if(
         self: &Arc<Self>,
         work_dir: &Path,
-        accept: impl FnOnce(SessionState) -> bool,
+        accept: impl FnOnce(&Meta) -> bool,
     ) -> Result<Option<SessionCopy>, SessionError> {
         let (meta, jar) = {
             let _lock = self.lock()?;
             (self.read_meta()?, self.read_jar()?)
         };
-        let Some(jar) = jar.filter(|_| accept(meta.state)) else {
+        let Some(jar) = jar.filter(|_| accept(&meta)) else {
             return Ok(None);
         };
         // created readable by the engine's user only
@@ -321,6 +325,22 @@ impl SessionStore {
     }
 }
 
+/// The session a track was resolved with, kept for its downloads.
+#[derive(Clone, Debug)]
+pub struct Session {
+    store: Arc<SessionStore>,
+    generation: u64,
+}
+
+impl Session {
+    /// A copy of the stored cookies, as rotated so far, for one yt-dlp process; `None` once the
+    /// session has been replaced or removed.
+    pub fn checkout(&self, work_dir: &Path) -> Result<Option<SessionCopy>, SessionError> {
+        self.store
+            .checkout_if(work_dir, |meta| meta.generation == self.generation)
+    }
+}
+
 /// A private copy of the session handed to one yt-dlp process (`--cookies <path>`).
 pub struct SessionCopy {
     store: Arc<SessionStore>,
@@ -338,11 +358,24 @@ impl SessionCopy {
         self.generation
     }
 
+    /// The session this is a copy of, to check out again for later processes.
+    pub fn session(&self) -> Session {
+        Session {
+            store: Arc::clone(&self.store),
+            generation: self.generation,
+        }
+    }
+
     /// Applies what yt-dlp changed in the copy to the stored session; returns how many cookies
     /// changed.
     fn merge_back(&self) -> Result<usize, SessionError> {
         let text = fs::read_to_string(self.path()).map_err(io_error(self.path()))?;
-        let changes = text.parse::<CookieJar>()?.changes_since(&self.base);
+        let written: CookieJar = text.parse()?;
+        // yt-dlp killed while writing the file back leaves it truncated, not signed out
+        if written.is_empty() {
+            return Ok(0);
+        }
+        let changes = written.changes_since(&self.base);
         if changes.is_empty() {
             return Ok(0);
         }
@@ -480,6 +513,47 @@ mod tests {
         drop(stale);
         let stored = fs::read_to_string(store.path(COOKIES_FILE)).unwrap();
         assert!(!stored.contains("stale"));
+    }
+
+    #[test]
+    fn later_copies_carry_the_rotated_cookies() {
+        let (dir, store) = store();
+        store.import(SIGNED_IN).unwrap();
+        let copy = store.checkout(dir.path()).unwrap().unwrap();
+        let session = copy.session();
+        let rotated = fs::read_to_string(copy.path())
+            .unwrap()
+            .replace("psid-secret", "rotated");
+        fs::write(copy.path(), rotated).unwrap();
+        drop(copy);
+
+        // even an expired session's cookies go to the downloads of tracks resolved with it
+        store.record(1, SessionState::Expired, true).unwrap();
+        let again = session.checkout(dir.path()).unwrap().unwrap();
+        let text = fs::read_to_string(again.path()).unwrap();
+        assert!(text.contains("rotated") && !text.contains("psid-secret"));
+        drop(again);
+
+        store.import(SIGNED_IN).unwrap();
+        assert!(
+            session.checkout(dir.path()).unwrap().is_none(),
+            "a replaced session is not handed out"
+        );
+    }
+
+    #[test]
+    fn truncated_write_backs_are_ignored() {
+        let (dir, store) = store();
+        store.import(SIGNED_IN).unwrap();
+        let copy = store.checkout(dir.path()).unwrap().unwrap();
+        fs::write(copy.path(), "").unwrap();
+        drop(copy);
+        assert_eq!(store.status().unwrap().state, SessionState::Unverified);
+        assert!(
+            fs::read_to_string(store.path(COOKIES_FILE))
+                .unwrap()
+                .contains("LOGIN_INFO")
+        );
     }
 
     #[test]

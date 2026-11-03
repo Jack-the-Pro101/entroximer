@@ -18,13 +18,13 @@ use entroximer_core::error::display_chain;
 use tokio::sync::{Notify, broadcast};
 
 pub use session::{
-    ImportReport, SessionCopy, SessionError, SessionState, SessionStatus, SessionStore,
+    ImportReport, Session, SessionCopy, SessionError, SessionState, SessionStatus, SessionStore,
 };
 
 use crate::config::MediaContext;
 use crate::expiring::Expiring;
 use crate::sources::ResolveError;
-use crate::sources::ytdlp::{self, Failure, SESSION_ENDED_WARNING};
+use crate::sources::ytdlp::{self, Failure, Restriction, SESSION_ENDED_WARNING};
 
 /// When the YouTube session is sent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -193,10 +193,14 @@ pub async fn check_session(
     let outcome = match ytdlp::probe(ctx, &youtube.check_video, &copy).await {
         Ok(stderr) if stderr.contains(SESSION_ENDED_WARNING) => CheckOutcome::Expired,
         Ok(_) => CheckOutcome::Valid,
+        // a bot check targets the server's address, which a working session does not always
+        // get past; a session YouTube ended is reported by yt-dlp's warning instead
         Err(ResolveError::Extraction {
             failure: Failure::Restricted(restriction),
             ..
-        }) if restriction.implicates_session() => CheckOutcome::Expired,
+        }) if restriction.implicates_session() && restriction != Restriction::BotCheck => {
+            CheckOutcome::Expired
+        }
         Err(e) => CheckOutcome::Inconclusive(display_chain(&e)),
     };
     match outcome {
@@ -210,10 +214,11 @@ pub async fn check_session(
 }
 
 /// Checks the session now, every `interval`, and soon after YouTube refuses it (but not more
-/// often than every few minutes). Runs forever.
+/// often than every few minutes). A session considered expired is checked too, so that one
+/// misleading check does not sign the engine out for good. Runs forever.
 pub async fn maintain_session(ctx: Arc<MediaContext>, interval: Duration) {
     loop {
-        match check_session(&ctx, false).await {
+        match check_session(&ctx, true).await {
             Ok(CheckOutcome::NoSession) => {}
             Ok(CheckOutcome::Valid) => tracing::debug!("the YouTube session works"),
             Ok(CheckOutcome::Expired) => {}

@@ -23,6 +23,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use entroximer_core::error::display_chain;
 use entroximer_core::producer::ffmpeg::FfmpegProducer;
 use entroximer_core::producer::growing_file::GrowingFileProducer;
 use entroximer_core::producer::process::{ProcessProducer, ProcessSpec};
@@ -39,7 +40,7 @@ pub use failure::{Failure, Restriction, SESSION_ENDED_WARNING, classify};
 use super::provider::{MAX_SEARCH_RESULTS, Provider, ProviderDescriptor};
 use super::{FoundTrack, LoadOutcome, PlaylistInfo, ResolveError, ResolvedTrack, artwork, net};
 use crate::config::MediaContext;
-use crate::youtube::{SessionCopy, SignInUnavailable};
+use crate::youtube::{Session, SessionCopy, SignInUnavailable};
 
 mod activation;
 mod entry;
@@ -111,13 +112,13 @@ impl YtDlpProvider {
     }
 
     /// Extracts `target`, signed in to YouTube only as the auth policy allows. Returns the info
-    /// JSON and the session copy it used, which the track's downloads keep using.
+    /// JSON and the session it used, which the track's downloads keep using.
     async fn extract_with_policy(
         &self,
         target: &str,
         ctx: &MediaContext,
         args: &[&str],
-    ) -> Result<(Value, Option<SessionCopy>), ResolveError> {
+    ) -> Result<(Value, Option<Session>), ResolveError> {
         // the session holds YouTube cookies only
         if !std::ptr::eq(self.site, &profiles::YOUTUBE) {
             return Ok((extract(ctx, target, None, args).await?, None));
@@ -129,7 +130,7 @@ impl YtDlpProvider {
             None
         };
         let restriction = match extract(ctx, target, first.as_ref(), args).await {
-            Ok(json) => return Ok((json, first)),
+            Ok(json) => return Ok((json, first.as_ref().map(SessionCopy::session))),
             Err(ResolveError::Extraction {
                 failure: Failure::Restricted(restriction),
                 ..
@@ -150,7 +151,7 @@ impl YtDlpProvider {
         };
         tracing::debug!(target, ?restriction, "retrying signed in to YouTube");
         match extract(ctx, target, Some(&session), args).await {
-            Ok(json) => Ok((json, Some(session))),
+            Ok(json) => Ok((json, Some(session.session()))),
             Err(ResolveError::Extraction {
                 failure: Failure::Restricted(restriction),
                 ..
@@ -210,7 +211,7 @@ impl YtDlpProvider {
     async fn resolved(
         &self,
         mut json: Value,
-        session: Option<SessionCopy>,
+        session: Option<Session>,
         requested: &str,
         ctx: &MediaContext,
     ) -> Result<ResolvedTrack, ResolveError> {
@@ -601,9 +602,6 @@ struct YtDlpProducer {
     live: bool,
     /// Downloads wait for YouTube to accept the format's freshly issued URL.
     activation: Option<Arc<UrlActivation>>,
-    /// The YouTube session the track was resolved with; its downloads use it too. Rotated
-    /// cookies are merged back when the track is dropped.
-    _session: Option<SessionCopy>,
 }
 
 impl YtDlpProducer {
@@ -613,7 +611,7 @@ impl YtDlpProducer {
         format: &Format,
         live: bool,
         await_url: bool,
-        session: Option<SessionCopy>,
+        session: Option<Session>,
     ) -> Self {
         let media = &ctx.config;
         let transport = format
@@ -648,14 +646,9 @@ impl YtDlpProducer {
             if let Some(id) = &format.format_id {
                 args.extend(["-f".to_owned(), id.clone()]);
             }
-            if let Some(session) = &session {
-                args.extend([
-                    "--cookies".to_owned(),
-                    session.path().to_string_lossy().into_owned(),
-                ]);
-            }
             args
         };
+        let work_dir = ctx.work_dir().to_owned();
 
         let download: Arc<dyn Producer> = match transport {
             Transport::Stdout => {
@@ -664,7 +657,8 @@ impl YtDlpProducer {
                     .args(["-o", "-"])
                     .stdin(info_json);
                 Arc::new(ProcessProducer::new(caps, hint, move |_| {
-                    (spec.clone(), TimestampMode::Absolute)
+                    let spec = signed_in(spec.clone(), session.as_ref(), &work_dir);
+                    (spec, TimestampMode::Absolute)
                 }))
             }
             Transport::GrowingFile => {
@@ -680,6 +674,7 @@ impl YtDlpProducer {
                             .arg("-o")
                             .arg(template.to_string_lossy())
                             .stdin(info_json.clone());
+                        let spec = signed_in(spec, session.as_ref(), &work_dir);
                         (spec, TimestampMode::Absolute)
                     },
                 ))
@@ -708,7 +703,29 @@ impl YtDlpProducer {
             seek,
             live,
             activation,
-            _session: session,
+        }
+    }
+}
+
+/// Signs one download into the session its track was resolved with: a fresh copy of the
+/// stored cookies, merged back once the process has exited.
+fn signed_in(spec: ProcessSpec, session: Option<&Session>, work_dir: &Path) -> ProcessSpec {
+    let Some(session) = session else {
+        return spec;
+    };
+    match session.checkout(work_dir) {
+        Ok(Some(copy)) => spec
+            .arg("--cookies")
+            .arg(copy.path().to_string_lossy())
+            .guard(copy),
+        // replaced or removed since the track was resolved
+        Ok(None) => spec,
+        Err(e) => {
+            tracing::warn!(
+                error = %display_chain(&e),
+                "cannot copy the YouTube session for a download"
+            );
+            spec
         }
     }
 }

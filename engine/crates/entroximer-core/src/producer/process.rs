@@ -23,6 +23,17 @@ pub struct ProcessSpec {
     pub args: Vec<String>,
     /// Written to the child's stdin, which is then closed.
     pub stdin: Option<Bytes>,
+    /// Kept alive until the child has exited, e.g. a file it reads and writes back.
+    pub guard: Option<ProcessGuard>,
+}
+
+#[derive(Clone)]
+pub struct ProcessGuard(#[allow(dead_code)] Arc<dyn Send + Sync>);
+
+impl std::fmt::Debug for ProcessGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProcessGuard")
+    }
 }
 
 impl ProcessSpec {
@@ -31,6 +42,7 @@ impl ProcessSpec {
             program: program.into(),
             args: Vec::new(),
             stdin: None,
+            guard: None,
         }
     }
 
@@ -46,6 +58,12 @@ impl ProcessSpec {
 
     pub fn stdin(mut self, data: Bytes) -> Self {
         self.stdin = Some(data);
+        self
+    }
+
+    /// Keeps `guard` alive until each process spawned from this spec has exited.
+    pub fn guard(mut self, guard: impl Send + Sync + 'static) -> Self {
+        self.guard = Some(ProcessGuard(Arc::new(guard)));
         self
     }
 
@@ -78,6 +96,7 @@ impl ProcessSpec {
             child,
             stderr,
             program,
+            _guard: self.guard.clone(),
         })
     }
 }
@@ -87,6 +106,8 @@ pub(crate) struct RunningProcess {
     pub(crate) child: Child,
     stderr: Option<JoinHandle<String>>,
     program: Arc<str>,
+    /// Declared after `child`, so it outlives the child being killed.
+    _guard: Option<ProcessGuard>,
 }
 
 impl RunningProcess {
