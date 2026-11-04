@@ -95,7 +95,11 @@ fi
 }
 
 async fn resolve(engine: &Engine, query: &str) -> Result<ResolvedTrack, ResolveError> {
-    engine.ctx.sources.resolve_query(query, &engine.ctx).await
+    engine
+        .ctx
+        .sources
+        .resolve_query(query, None, &engine.ctx)
+        .await
 }
 
 /// Succeeds with cookies, rotating one of them like YouTube does.

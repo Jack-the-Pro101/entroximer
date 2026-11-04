@@ -1,5 +1,6 @@
 //! The engine's runtime state: client sessions, their players, and recently loaded tracks.
 
+mod backoff;
 mod output;
 pub mod player;
 pub mod queue;
@@ -20,12 +21,15 @@ use tokio_util::task::TaskTracker;
 pub use session::Session;
 
 use crate::api::protocol::{
-    ApiError, ErrorCode, Event, LoadResult, Millis, NodeInfo, PROTOCOL_VERSION, Snowflake, Stats,
-    Track, TrackSelector, UploadsInfo,
+    ApiError, ErrorCode, Event, Millis, NodeInfo, PROTOCOL_VERSION, Snowflake, Stats, Track,
+    TrackSelector, UploadsInfo, as_index,
 };
 use crate::config::{MediaContext, Secret};
 use crate::managed_ytdlp::YtDlpBinary;
-use tracks::{Loaded, TrackCache, decode_track, with_user_data};
+use crate::sources::QUERY_SOURCE;
+use backoff::Backoff;
+use queue::{Pending, QueueItem};
+use tracks::{Loaded, TrackCache, decode, stand_in, with_user_data};
 
 #[derive(Clone, Debug)]
 pub struct NodeSettings {
@@ -51,6 +55,8 @@ pub struct Node {
     /// Clips loading at once, engine-wide: a burst of them must not start a burst of
     /// downloads.
     pub clip_loads: Semaphore,
+    /// Whether queues' background loads wait out rate limiting.
+    pub(crate) load_backoff: Backoff,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     system_ytdlp_version: OnceCell<Option<String>>,
     started: Instant,
@@ -74,6 +80,7 @@ impl Node {
             presets: PresetRegistry::with_builtins(),
             tracks: TrackCache::default(),
             clip_loads: Semaphore::new(Self::CLIP_LOADS),
+            load_backoff: Backoff::default(),
             sessions: Mutex::new(HashMap::new()),
             system_ytdlp_version: OnceCell::new(),
             started: Instant::now(),
@@ -168,44 +175,60 @@ impl Node {
     pub async fn load(&self, selector: &TrackSelector) -> Result<Loaded, ApiError> {
         let loaded = match selector {
             TrackSelector::Encoded { encoded, .. } => self.tracks.get(&self.ctx, encoded).await?,
-            TrackSelector::Query { query, .. } => {
-                self.tracks.resolve_query(&self.ctx, query).await?
+            TrackSelector::Query {
+                query, start_index, ..
+            } => {
+                self.tracks
+                    .resolve_query(&self.ctx, query, as_index(*start_index))
+                    .await?
             }
         };
         Ok(with_user_data(loaded, selector.user_data()))
     }
 
-    /// The tracks a selector adds to a queue: an encoded track as it is (it is resolved when it
-    /// comes up), or what a query loads: its track, a playlist's tracks or a search's first
-    /// result.
-    pub async fn queue_tracks(&self, selector: &TrackSelector) -> Result<Vec<Track>, ApiError> {
-        let tracks = match selector {
-            TrackSelector::Encoded { encoded, .. } => vec![decode_track(encoded)?],
-            TrackSelector::Query { query, .. } => match self.tracks.load(&self.ctx, query).await? {
-                LoadResult::Track { track } => vec![track],
-                LoadResult::Playlist { tracks, .. } => tracks,
-                LoadResult::Search { tracks } => tracks.into_iter().take(1).collect(),
-                LoadResult::Empty => Vec::new(),
-            },
-        };
-        if tracks.is_empty() {
-            let query = match selector {
-                TrackSelector::Encoded { encoded, .. } => encoded,
-                TrackSelector::Query { query, .. } => query,
-            };
-            return Err(ApiError::new(
-                ErrorCode::NoResults,
-                format!("nothing found for `{query}`"),
-            ));
-        }
-        let user_data = selector.user_data();
-        Ok(tracks
-            .into_iter()
-            .map(|track| Track {
-                user_data: user_data.cloned(),
-                ..track
-            })
-            .collect())
+    /// The item a selector adds to a queue: an encoded track ready to queue (it is resolved
+    /// when it comes up), a query (or a stand-in for one) as a loading item, which the player
+    /// loads in the background.
+    pub fn queue_item(&self, selector: &TrackSelector) -> Result<QueueItem, ApiError> {
+        Ok(match selector {
+            TrackSelector::Encoded { encoded, user_data } => {
+                let found = decode(encoded)?;
+                let track = Track {
+                    encoded: encoded.clone(),
+                    info: found.info,
+                    user_data: user_data.clone(),
+                };
+                if found.reference.source == QUERY_SOURCE {
+                    let query = found.reference.uri;
+                    let pending = Pending {
+                        query,
+                        start_index: None,
+                        now: false,
+                    };
+                    QueueItem::loading(track, pending)
+                } else {
+                    QueueItem::new(track)
+                }
+            }
+            TrackSelector::Query {
+                query,
+                start_index,
+                user_data,
+            } => {
+                let query = query.trim();
+                if query.is_empty() {
+                    return Err(ApiError::new(ErrorCode::BadRequest, "a query is empty"));
+                }
+                QueueItem::loading(
+                    stand_in(query, user_data.as_ref()),
+                    Pending {
+                        query: query.to_owned(),
+                        start_index: as_index(*start_index),
+                        now: false,
+                    },
+                )
+            }
+        })
     }
 
     pub fn stats(&self) -> Stats {

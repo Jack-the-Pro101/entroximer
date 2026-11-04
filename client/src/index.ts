@@ -12,7 +12,8 @@ export type { JoinOptions, PlayOptions, VoiceClosedInfo } from "./player.js";
 export { Layer } from "./layer.js";
 export type { ClipOptions, LayerChanges, LayerEvents, LayerHost } from "./layer.js";
 export { Queue } from "./queue.js";
-export type { AddOptions } from "./queue.js";
+export type { AddOptions, LoadedItems } from "./queue.js";
+export { parseQueries } from "./lists.js";
 export type { Playable } from "./tracks.js";
 export { Connection, PROTOCOL_VERSION } from "./connection.js";
 export type {

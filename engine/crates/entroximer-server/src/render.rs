@@ -65,7 +65,7 @@ pub async fn run(args: RenderArgs, ctx: &MediaContext) -> anyhow::Result<()> {
     }
     let track = ctx
         .sources
-        .resolve_query(&args.input, ctx)
+        .resolve_query(&args.input, None, ctx)
         .await
         .with_context(|| format!("cannot load `{}`", args.input))?;
     let info = &track.track.info;

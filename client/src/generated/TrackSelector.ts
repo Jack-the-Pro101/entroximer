@@ -3,10 +3,16 @@ import type { JsonValue } from "./serde_json/JsonValue.js";
 
 /**
  * A track by its `encoded` form (from `tracks.load` or `tracks.search`), or by a query to load
- * first: a search plays its first result, a playlist link the track it points at.
+ * first: a search plays its first result, a playlist link the track it points at (or the one at
+ * `startIndex`).
  */
 export type TrackSelector = { encoded: string, 
 /**
  * Arbitrary data echoed in this track's events, e.g. who requested it.
  */
-userData?: JsonValue, } | { query: string, userData?: JsonValue, };
+userData?: JsonValue, } | { query: string, 
+/**
+ * For a playlist: the index of the track to start from, counted from 0, in place of the
+ * one its link points at. The tracks before it are left out.
+ */
+startIndex?: number, userData?: JsonValue, };

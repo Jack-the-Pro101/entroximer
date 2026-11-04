@@ -6,8 +6,8 @@
 //! events it caused arrive before its response. Events are emitted with the player's state
 //! locked, so clients see queue changes in the order of their versions.
 //!
-//! The queue's scheduling is in [`queue_flow`], the other layers and their clips in [`layers`],
-//! the voice connection in [`connection`].
+//! The queue's scheduling is in [`queue_flow`], loading its queries in [`loading`], the other
+//! layers and their clips in [`layers`], the voice connection in [`connection`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU64;
@@ -94,6 +94,8 @@ struct State {
     /// The deck's next track, and the id of its item.
     prepared: Option<(TrackId, String)>,
     preparing: Option<Preparation>,
+    /// Loads of the queue's loading items, by item id.
+    loads: HashMap<String, loading::Load>,
     /// The item that last played to its end, until another starts: repeating it works even if
     /// the deck went idle meanwhile.
     finished: Option<QueueItem>,
@@ -125,7 +127,16 @@ struct Preparation {
     /// For a skip: the item replaces the current track as soon as it is ready, instead of
     /// following it.
     skip: bool,
-    task: AbortHandle,
+    /// `None` for a skip waiting for its item to load, which prepares it then.
+    task: Option<AbortHandle>,
+}
+
+impl Preparation {
+    fn cancel(&self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
 }
 
 impl GuildPlayer {
@@ -228,7 +239,7 @@ impl GuildPlayer {
                 state.halted = false;
                 // it also takes the place of an item a skip is waiting for
                 if let Some(skip) = state.preparing.take_if(|p| p.skip) {
-                    skip.task.abort();
+                    skip.cancel();
                 }
                 state.items.insert(track.id, item);
                 self.deck().play(track);
@@ -259,15 +270,21 @@ impl GuildPlayer {
         }
     }
 
-    /// Adds tracks to the queue at `index` (the end if `None` or past it). With nothing
-    /// playing, the first item starts.
+    /// Adds items to the queue at `index` (the end if `None` or past it). With nothing
+    /// playing, the first item starts. Loading items load in the background, in queue order,
+    /// unless they are the only one added: that one loads at once.
     pub async fn queue_add(
         &self,
-        tracks: Vec<Track>,
+        mut items: Vec<QueueItem>,
         index: Option<u32>,
     ) -> Result<QueueAdded, ApiError> {
         let _in_order = self.updating.lock().await;
-        let items: Vec<QueueItem> = tracks.into_iter().map(QueueItem::new).collect();
+        let mut queries = items
+            .iter_mut()
+            .filter_map(|item| item.pending.as_deref_mut());
+        if let (Some(only), None) = (queries.next(), queries.next()) {
+            only.now = true;
+        }
         let added = {
             let mut state = self.state();
             let length = state.queue.len();
@@ -359,6 +376,7 @@ impl GuildPlayer {
             let mut state = self.state();
             state.destroying = true;
             self.drop_prepared(&mut state);
+            self.cancel_loads(&mut state);
             self.end_clips(&mut state);
         }
         self.deck().stop();
@@ -715,6 +733,7 @@ fn bad_request(message: impl Into<String>) -> ApiError {
 
 mod connection;
 mod layers;
+mod loading;
 mod queue_flow;
 #[cfg(test)]
 mod tests;

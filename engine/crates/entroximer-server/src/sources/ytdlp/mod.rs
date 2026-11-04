@@ -2,8 +2,8 @@
 //! any other site yt-dlp supports.
 //!
 //! Links are loaded with `yt-dlp -J --flat-playlist`: a playlist comes back as a list of entries
-//! with metadata only, a single track fully extracted, ready to play. Searches list results the
-//! same way. A track is fully extracted when it is resolved for playback, and the resulting info
+//! with metadata only, a single track fully extracted, ready to play. For a queue, a playlist is
+//! listed from its start track (see [`Listing::Queue`]). Searches list results the same way. A track is fully extracted when it is resolved for playback, and the resulting info
 //! JSON is fed back with `--load-info-json -` for every download, so a page is never extracted
 //! twice. The chosen audio format's protocol decides how its bytes arrive:
 //!
@@ -41,7 +41,10 @@ use tokio::sync::Semaphore;
 pub use failure::{Failure, Restriction, SESSION_ENDED_WARNING, classify};
 
 use super::provider::{MAX_SEARCH_RESULTS, Provider, ProviderDescriptor};
-use super::{FoundTrack, LoadOutcome, PlaylistInfo, ResolveError, ResolvedTrack, artwork, net};
+use super::{
+    FoundTrack, Listing, LoadOutcome, PlaylistInfo, ResolveError, ResolvedTrack, artwork,
+    background, net,
+};
 use crate::config::MediaContext;
 use crate::youtube::{Session, SessionCopy, SignInUnavailable};
 
@@ -170,10 +173,18 @@ impl YtDlpProvider {
         &self,
         json: &Value,
         url: &Url,
+        window: Window,
         ctx: &MediaContext,
     ) -> Result<LoadOutcome, ResolveError> {
         let Some((mut playlist, mut tracks)) = self.listing(json, url)? else {
-            return Ok(LoadOutcome::Empty);
+            return match (window, listed_count(json)) {
+                (Window::From { start, .. }, Some(total))
+                    if start > 0 && start >= total as usize =>
+                {
+                    Err(ResolveError::PastEnd { total })
+                }
+                _ => Ok(LoadOutcome::Empty),
+            };
         };
         if playlist.artwork_url.is_none()
             && let Some(page) = &playlist.uri
@@ -181,6 +192,7 @@ impl YtDlpProvider {
             playlist.artwork_url = ctx.artwork.page_image(page, ctx).await;
         }
         artwork::inherit(&mut tracks, playlist.artwork_url.as_deref());
+        window.fit(&mut playlist, &mut tracks);
         Ok(LoadOutcome::Playlist { playlist, tracks })
     }
 
@@ -287,11 +299,14 @@ impl Provider for YtDlpProvider {
     async fn load_url(
         &self,
         url: &Url,
+        listing: Listing,
         ctx: &MediaContext,
     ) -> Result<Option<LoadOutcome>, ResolveError> {
         self.guard(url, ctx).await?;
         ytdlp_ready(ctx).await?;
-        let items = format!("1:{}", ctx.config.sources.playlist_limit.max(1));
+        let limit = ctx.config.sources.playlist_limit.max(1) as usize;
+        let window = Window::new(listing, url, limit);
+        let items = window.items(limit);
         let (json, session) = self
             .extract_with_policy(
                 url.as_str(),
@@ -300,7 +315,7 @@ impl Provider for YtDlpProvider {
             )
             .await?;
         let outcome = match json.get("_type").and_then(Value::as_str) {
-            Some("playlist") => self.playlist(&json, url, ctx).await?,
+            Some("playlist") => self.playlist(&json, url, window, ctx).await?,
             // a link standing for another one, e.g. a short link
             Some("url" | "url_transparent") => {
                 let target = json
@@ -362,6 +377,78 @@ impl Provider for YtDlpProvider {
     ) -> Result<ResolvedTrack, ResolveError> {
         self.resolve_uri(&track.reference.uri, ctx).await
     }
+}
+
+/// Which entries of a playlist yt-dlp is asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Window {
+    /// Up to the limit from the first: for [`Listing::Whole`], and for a queue's listing of a
+    /// link that names its track by ID only (`v=`), whose index only the listing tells.
+    Whole { from_selected: bool },
+    /// `count` entries from index `start`, for a queue.
+    From { start: usize, count: usize },
+}
+
+impl Window {
+    /// The start comes from the queue, else the link's 1-based `index=`, else its `v=`. The
+    /// engine's `limit` counts from the start.
+    fn new(listing: Listing, url: &Url, limit: usize) -> Self {
+        let Listing::Queue {
+            start_index,
+            limit: wanted,
+        } = listing
+        else {
+            return Self::Whole {
+                from_selected: false,
+            };
+        };
+        let query: HashMap<_, _> = url.query_pairs().collect();
+        let index = query
+            .get("index")
+            .and_then(|index| index.parse::<usize>().ok())
+            .and_then(|index| index.checked_sub(1));
+        let count = wanted.unwrap_or(limit).clamp(1, limit);
+        match start_index.or(index) {
+            Some(start) => Self::From { start, count },
+            None if query.contains_key("v") => Self::Whole {
+                from_selected: true,
+            },
+            None => Self::From { start: 0, count },
+        }
+    }
+
+    /// yt-dlp's `--playlist-items`, which counts from 1.
+    fn items(self, limit: usize) -> String {
+        match self {
+            Self::Whole { .. } => format!("1:{limit}"),
+            Self::From { start, count } => format!("{}:{}", start + 1, start + count),
+        }
+    }
+
+    /// Cuts a queue's listing of the whole playlist to start at the linked track.
+    fn fit(self, playlist: &mut PlaylistInfo, tracks: &mut Vec<FoundTrack>) {
+        match self {
+            Self::Whole {
+                from_selected: false,
+            } => {}
+            Self::Whole {
+                from_selected: true,
+            } => {
+                let selected = playlist.selected_track.take().unwrap_or(0) as usize;
+                tracks.drain(..selected.min(tracks.len()));
+            }
+            // the tracks start at the start track
+            Self::From { .. } => playlist.selected_track = None,
+        }
+    }
+}
+
+/// How many tracks yt-dlp says a playlist has.
+fn listed_count(json: &Value) -> Option<u32> {
+    Entry::deserialize(json)
+        .ok()?
+        .playlist_count
+        .and_then(|count| u32::try_from(count).ok())
 }
 
 /// Waits for the managed yt-dlp's first install, if it is still running.
@@ -466,8 +553,8 @@ impl Purpose {
     }
 }
 
-/// Runs yt-dlp on `target` once its purpose's turn comes. Warnings stay on so that yt-dlp can
-/// report a session YouTube ended.
+/// Runs yt-dlp on `target` once its purpose's turn comes (a background turn for a background
+/// load). Warnings stay on so that yt-dlp can report a session YouTube ended.
 async fn run(
     ctx: &MediaContext,
     purpose: Purpose,
@@ -475,11 +562,7 @@ async fn run(
     session: Option<&SessionCopy>,
     args: &[&str],
 ) -> Result<Output, ResolveError> {
-    let _turn = purpose
-        .turns(ctx)
-        .acquire()
-        .await
-        .expect("the semaphore is never closed");
+    let _turn = background::turn(purpose.turns(ctx), &ctx.ytdlp_runs.background).await;
     let mut command = tokio::process::Command::new(ctx.ytdlp.program());
     command.args(&ctx.config.ytdlp.args.0).args(args);
     if let Some(proxy) = ctx.youtube.proxy().filter(|_| is_youtube_target(target)) {
@@ -967,6 +1050,114 @@ mod tests {
                 .iter()
                 .all(|t| t.reference.source == "youtube" && t.info.length.is_some())
         );
+    }
+
+    #[test]
+    fn queues_list_from_their_start_track() {
+        let url = |u: &str| Url::parse(u).unwrap();
+        let queue = |start_index| Listing::Queue {
+            start_index,
+            limit: None,
+        };
+        let list = url("https://www.youtube.com/playlist?list=PL1");
+        assert_eq!(Window::new(Listing::Whole, &list, 500).items(500), "1:500");
+        assert_eq!(Window::new(queue(None), &list, 500).items(500), "1:500");
+        assert_eq!(
+            Window::new(queue(Some(199)), &list, 500).items(500),
+            "200:699",
+            "the limit counts from the start"
+        );
+        let one = Listing::Queue {
+            start_index: Some(199),
+            limit: Some(1),
+        };
+        assert_eq!(Window::new(one, &list, 500).items(500), "200:200");
+
+        // a link's own index, unless the queue gives a start
+        let indexed = url("https://www.youtube.com/watch?v=b&list=PL1&index=7");
+        assert_eq!(Window::new(queue(None), &indexed, 500).items(500), "7:506");
+        assert_eq!(
+            Window::new(queue(Some(0)), &indexed, 500).items(500),
+            "1:500"
+        );
+        // a video ID alone tells no index: everything is listed, from that video on
+        let by_id = url("https://www.youtube.com/watch?v=b&list=PL1");
+        assert_eq!(
+            Window::new(queue(None), &by_id, 500),
+            Window::Whole {
+                from_selected: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_queue_listing_starts_at_the_linked_video() {
+        let json: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/ytdlp/youtube_playlist.json"
+        ))
+        .unwrap();
+        let url =
+            Url::parse("https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI")
+                .unwrap();
+        let provider = YtDlpProvider::new(&profiles::YOUTUBE);
+        let second = provider.listing(&json, &url).unwrap().unwrap().1[1]
+            .info
+            .identifier
+            .clone();
+        let by_id = Url::parse(&format!("{url}&v={second}")).unwrap();
+        let (mut playlist, mut tracks) = provider.listing(&json, &by_id).unwrap().unwrap();
+        Window::Whole {
+            from_selected: true,
+        }
+        .fit(&mut playlist, &mut tracks);
+        assert_eq!(
+            tracks[0].info.identifier, second,
+            "from the linked video on"
+        );
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(playlist.selected_track, None);
+    }
+
+    /// Lists a real YouTube playlist for a queue, from a start track. Needs the network and
+    /// yt-dlp, so it only runs when asked: `cargo test -- --ignored from_a_start`.
+    #[tokio::test]
+    #[ignore = "lists a YouTube playlist"]
+    async fn lists_a_youtube_playlist_from_a_start() {
+        use clap::Parser;
+
+        use crate::config::MediaConfig;
+
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            media: MediaConfig,
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+        let cli = Cli::parse_from([
+            "entroximer",
+            "--data-dir",
+            &path("data"),
+            "--cache-dir",
+            &path("cache"),
+        ]);
+        let ctx = MediaContext::new(cli.media).unwrap();
+        let provider = YtDlpProvider::new(&profiles::YOUTUBE);
+        let url =
+            Url::parse("https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI")
+                .unwrap();
+        let listing = Listing::Queue {
+            start_index: Some(100),
+            limit: None,
+        };
+        let Some(LoadOutcome::Playlist { playlist, tracks }) =
+            provider.load_url(&url, listing, &ctx).await.unwrap()
+        else {
+            panic!("a playlist");
+        };
+        let total = playlist.total_tracks.expect("YouTube tells how many") as usize;
+        assert!(total > 150, "{total} tracks");
+        assert_eq!(tracks.len(), total - 100, "from the 101st on");
     }
 
     #[test]

@@ -421,7 +421,8 @@ async fn queues_over_the_protocol() {
         .exchange("tracks.load", json!({ "query": fixture() }))
         .await;
     let encoded = loaded["result"]["track"]["encoded"].clone();
-    // a query adds what it loads; an encoded track is taken as it is
+    // a query is queued as a loading item, which it loads into; an encoded track is taken as it
+    // is
     let (events, response) = client
         .exchange(
             "queue.add",
@@ -447,20 +448,40 @@ async fn queues_over_the_protocol() {
         .map(|item| item["id"].clone())
         .collect();
     assert_eq!(added["items"][2]["track"]["userData"], json!({ "n": 3 }));
-
-    // with nothing playing, the first item starts (maybe before the response, as it is cached)
-    // and leaves the queue
-    let mut events = events[1..].to_vec();
-    if events.is_empty() {
-        events = client.events_until("trackStart").await;
-    }
-    assert_eq!(kinds(&events), ["queue advanced", "trackStart"]);
+    let loading = &added["items"][0];
+    assert_eq!(loading["loading"], true);
+    assert_eq!(loading["track"]["info"]["sourceName"], "query");
     assert_eq!(
-        events[0]["change"],
+        loading["track"]["info"]["title"],
+        fixture().to_str().unwrap()
+    );
+    assert_eq!(added["items"][1]["loading"], false);
+
+    // with nothing playing, the first item loads, starts and leaves the queue (maybe before the
+    // response)
+    let mut events = events[1..].to_vec();
+    if !events.iter().any(|e| e["event"] == "trackStart") {
+        events.extend(client.events_until("trackStart").await);
+    }
+    assert_eq!(
+        kinds(&events),
+        ["queue loaded", "queue advanced", "trackStart"]
+    );
+    let loaded = &events[0]["change"];
+    assert_eq!(loaded["id"], ids[0]);
+    assert_eq!(loaded["playlist"], Value::Null);
+    assert_eq!(
+        loaded["items"][0]["id"], ids[0],
+        "the track keeps the item's id"
+    );
+    assert_eq!(loaded["items"][0]["loading"], false);
+    assert_eq!(loaded["items"][0]["track"]["info"]["title"], "tone");
+    assert_eq!(
+        events[1]["change"],
         json!({ "type": "advanced", "id": ids[0] })
     );
-    assert_eq!(events[0]["version"], 2);
-    assert_eq!(events[1]["itemId"], ids[0]);
+    assert_eq!(events[1]["version"], 3);
+    assert_eq!(events[2]["itemId"], ids[0]);
 
     let (_, page) = client
         .exchange("queue.get", guild(json!({ "offset": 1, "limit": 1 })))
@@ -478,7 +499,7 @@ async fn queues_over_the_protocol() {
         events[0]["change"],
         json!({ "type": "moved", "id": ids[2], "index": 0 })
     );
-    assert_eq!(response["result"]["version"], 3);
+    assert_eq!(response["result"]["version"], 4);
     let (_, response) = client
         .exchange("queue.move", guild(json!({ "id": "nope", "index": 0 })))
         .await;
@@ -542,13 +563,13 @@ async fn queues_over_the_protocol() {
     }
     assert_eq!(kinds(&events), ["trackEnd", "queue advanced", "trackStart"]);
     assert_eq!(events[0]["reason"], "replaced");
-    assert_eq!(events[1]["version"], 6);
+    assert_eq!(events[1]["version"], 7);
     assert_eq!(events[2]["itemId"], ids[2]);
 
     for op in ["queue.clear", "queue.shuffle"] {
         let (events, response) = client.exchange(op, guild(json!({}))).await;
         assert!(events.is_empty(), "nothing to {op}: {events:?}");
-        assert_eq!(response["result"]["version"], 6);
+        assert_eq!(response["result"]["version"], 7);
     }
 
     let (events, _) = client.exchange("queue.skip", guild(json!({}))).await;
@@ -559,7 +580,7 @@ async fn queues_over_the_protocol() {
     assert!(player["itemId"].is_null());
     assert_eq!(
         player["queue"],
-        json!({ "version": 6, "length": 0, "repeat": "track", "crossfade": 3000 })
+        json!({ "version": 7, "length": 0, "repeat": "track", "crossfade": 3000 })
     );
 }
 

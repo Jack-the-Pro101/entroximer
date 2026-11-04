@@ -1,6 +1,7 @@
 // What a slash command is, and what the commands share.
 import { InteractionContextType, SlashCommandBuilder } from "discord.js";
 import type { AutocompleteInteraction, ChatInputCommandInteraction, SharedSlashCommand } from "discord.js";
+import { EntroximerError } from "entroximer-client";
 
 import type { Engine } from "../engine";
 
@@ -16,6 +17,18 @@ export interface Command {
 
 /** A failure to explain to the user. */
 export class UserError extends Error {}
+
+/** What to tell the user about a failure; failures that are no fault of theirs are also logged. */
+export function failureText(error: unknown, what: string): string {
+  if (error instanceof UserError || error instanceof EntroximerError) {
+    if (!(error instanceof UserError)) {
+      console.error(`${what} failed:`, error);
+    }
+    return error.message;
+  }
+  console.error(`${what} failed:`, error);
+  return "Something went wrong; see the bot's log.";
+}
 
 /** A command used in guilds only. */
 export function command(

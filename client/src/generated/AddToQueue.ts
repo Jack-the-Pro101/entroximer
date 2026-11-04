@@ -4,8 +4,11 @@ import type { TrackSelector } from "./TrackSelector.js";
 
 export type AddToQueue = { guildId: Snowflake, 
 /**
- * Added in this order. A query adds the track it loads, all tracks of a playlist, or a
- * search's first result. Encoded tracks are resolved when they come up.
+ * Added in this order. A query is loaded in the background into the track it loads, the
+ * tracks of a playlist (from `startIndex`), or a search's first result; one that finds nothing is
+ * reported with `trackError` and removed.
+ * Encoded tracks are queued as they are (all or nothing: an invalid one adds none) and
+ * resolved when they come up.
  */
 tracks: Array<TrackSelector>, 
 /**

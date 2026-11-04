@@ -131,9 +131,13 @@ pub enum Call {
     /// Part of a player's queue. Result: [`QueuePage`].
     #[serde(rename = "queue.get")]
     GetQueue(GetQueue),
-    /// Adds tracks to a player's queue, creating the player if needed. With nothing playing,
-    /// the first item starts, unless playback was stopped and nothing has played since. A queue
-    /// holds at most 10 000 items. Result: [`QueueAdded`].
+    /// Adds tracks to a player's queue, creating the player if needed, and answers at once:
+    /// each query is queued as a loading item, which the engine loads in the background in
+    /// queue order (the first item ahead of the others) and replaces with what it finds (a
+    /// `loaded` change). A query added on its own loads at once instead, as `tracks.load` would
+    /// load it. With nothing playing, the first item starts once it is ready, unless
+    /// playback was stopped and nothing has played since. A queue holds at most 10 000 items.
+    /// Result: [`QueueAdded`].
     #[serde(rename = "queue.add")]
     AddToQueue(AddToQueue),
     /// Removes items; ids not in the queue are ignored. Result: [`QueueState`].
@@ -291,7 +295,8 @@ pub struct PlayerUpdate {
 }
 
 /// A track by its `encoded` form (from `tracks.load` or `tracks.search`), or by a query to load
-/// first: a search plays its first result, a playlist link the track it points at.
+/// first: a search plays its first result, a playlist link the track it points at (or the one at
+/// `startIndex`).
 #[derive(Clone, Debug, Deserialize, TS)]
 #[serde(untagged)]
 pub enum TrackSelector {
@@ -304,6 +309,11 @@ pub enum TrackSelector {
     },
     Query {
         query: String,
+        /// For a playlist: the index of the track to start from, counted from 0, in place of the
+        /// one its link points at. The tracks before it are left out.
+        #[serde(default, rename = "startIndex")]
+        #[ts(optional)]
+        start_index: Option<u32>,
         #[serde(default, rename = "userData")]
         #[ts(optional)]
         user_data: Option<Value>,
@@ -316,6 +326,11 @@ impl TrackSelector {
             Self::Encoded { user_data, .. } | Self::Query { user_data, .. } => user_data.as_ref(),
         }
     }
+}
+
+/// A `startIndex` as an index.
+pub fn as_index(start_index: Option<u32>) -> Option<usize> {
+    start_index.map(|index| index as usize)
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -335,8 +350,11 @@ pub struct GetQueue {
 #[serde(rename_all = "camelCase")]
 pub struct AddToQueue {
     pub guild_id: Snowflake,
-    /// Added in this order. A query adds the track it loads, all tracks of a playlist, or a
-    /// search's first result. Encoded tracks are resolved when they come up.
+    /// Added in this order. A query is loaded in the background into the track it loads, the
+    /// tracks of a playlist (from `startIndex`), or a search's first result; one that finds nothing is
+    /// reported with `trackError` and removed.
+    /// Encoded tracks are queued as they are (all or nothing: an invalid one adds none) and
+    /// resolved when they come up.
     pub tracks: Vec<TrackSelector>,
     /// Where the tracks go; the end if absent or past it.
     #[serde(default)]
@@ -582,8 +600,8 @@ pub enum Event {
         reason: TrackEndReason,
     },
     /// Followed by `trackEnd` with reason `failed` if the track was playing. A queue item that
-    /// fails to load is removed from the queue instead (see `queueChanged`), and the queue goes
-    /// on with the next one.
+    /// fails to load, or whose query does (`track` is then its stand-in), is removed from the
+    /// queue instead (see `queueChanged`), and the queue goes on with the next one.
     #[serde(rename_all = "camelCase")]
     TrackError {
         guild_id: Snowflake,
@@ -935,7 +953,7 @@ mod tests {
 
         let call: Call = serde_json::from_value(json!({
             "op": "queue.add",
-            "params": { "guildId": "123", "tracks": [{ "query": "ytsearch:x", "userData": { "by": "me" } }, { "encoded": "abc" }] }
+            "params": { "guildId": "123", "tracks": [{ "query": "ytsearch:x", "userData": { "by": "me" } }, { "encoded": "abc" }, { "query": "https://example.com/list", "startIndex": 4 }] }
         }))
         .unwrap();
         let Call::AddToQueue(add) = call else {
@@ -946,6 +964,13 @@ mod tests {
         );
         assert_eq!(add.tracks[0].user_data(), Some(&json!({ "by": "me" })));
         assert!(matches!(&add.tracks[1], TrackSelector::Encoded { .. }));
+        assert!(matches!(
+            &add.tracks[2],
+            TrackSelector::Query {
+                start_index: Some(4),
+                ..
+            }
+        ));
         assert_eq!(add.index, None);
 
         let call: Call = serde_json::from_value(

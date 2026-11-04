@@ -10,7 +10,7 @@ use clap::Parser;
 use serde_json::Value;
 
 use super::*;
-use crate::api::protocol::{ServerMessage, TrackSelector};
+use crate::api::protocol::{LoadResult, ServerMessage, TrackSelector};
 use crate::config::{MediaConfig, MediaContext};
 use crate::node::NodeSettings;
 use crate::node::output::MixerSource;
@@ -56,7 +56,71 @@ struct Harness {
     /// The last queue version seen.
     version: u64,
     dir: tempfile::TempDir,
+    media: MediaServer,
     _session: Arc<Session>,
+}
+
+/// Serves the harness's tones over HTTP, as links to media files. Requests for a file held back
+/// wait until it is let go; files that do not exist answer 404.
+struct MediaServer {
+    base: String,
+    held: Arc<Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>>,
+}
+
+type MediaState = (
+    std::path::PathBuf,
+    Arc<Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>>,
+);
+
+impl MediaServer {
+    async fn start(dir: std::path::PathBuf) -> Self {
+        use axum::extract::{Path, State};
+        use axum::response::IntoResponse;
+
+        async fn serve(
+            State((dir, held)): State<MediaState>,
+            Path(file): Path<String>,
+        ) -> axum::response::Response {
+            let gate = held.lock().unwrap().get(&file).cloned();
+            if let Some(gate) = gate {
+                let _passed = gate.acquire().await;
+            }
+            match tokio::fs::read(dir.join(&file)).await {
+                Ok(bytes) => {
+                    ([(axum::http::header::CONTENT_TYPE, "audio/webm")], bytes).into_response()
+                }
+                Err(_) => axum::http::StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+
+        let held = Arc::default();
+        let app = axum::Router::new()
+            .route("/{file}", axum::routing::get(serve))
+            .with_state((dir, Arc::clone(&held)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        Self { base, held }
+    }
+
+    /// The link to the tone `name`.
+    fn link(&self, name: &str) -> String {
+        format!("{}/{name}.webm", self.base)
+    }
+
+    fn hold(&self, name: &str) {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        self.held
+            .lock()
+            .unwrap()
+            .insert(format!("{name}.webm"), gate);
+    }
+
+    fn release(&self, name: &str) {
+        if let Some(gate) = self.held.lock().unwrap().remove(&format!("{name}.webm")) {
+            gate.add_permits(tokio::sync::Semaphore::MAX_PERMITS);
+        }
+    }
 }
 
 impl Harness {
@@ -92,6 +156,7 @@ impl Harness {
         session.attach(out, false);
         let player = session.player_or_create(&node, Snowflake(2));
         let output = MixerSource::new(Arc::clone(&player.mixer), player.signals.clone());
+        let media = MediaServer::start(dir.path().to_owned()).await;
         Self {
             node,
             player,
@@ -101,6 +166,7 @@ impl Harness {
             names: HashMap::new(),
             version: 0,
             dir,
+            media,
             _session: session,
         }
     }
@@ -110,11 +176,10 @@ impl Harness {
         let mut tracks = Vec::new();
         for name in names {
             let path = self.tone_file(name).await;
-            let selector = TrackSelector::Query {
-                query: path,
-                user_data: None,
-            };
-            tracks.extend(self.node.queue_tracks(&selector).await.unwrap());
+            match self.node.tracks.load(&self.node.ctx, &path).await.unwrap() {
+                LoadResult::Track { track } => tracks.push(track),
+                other => panic!("a tone loads as a track, not {other:?}"),
+            }
         }
         tracks
     }
@@ -139,8 +204,31 @@ impl Harness {
         path.to_string_lossy().into_owned()
     }
 
+    /// Queues links to tones as queries, which the player loads itself; a name starting with
+    /// `missing` has no tone, so its link answers 404. Returns the items' ids.
+    async fn add_links(&mut self, names: &[&str], index: Option<u32>) -> Vec<String> {
+        let mut items = Vec::new();
+        for name in names {
+            if !name.starts_with("missing") {
+                self.tone_file(name).await;
+            }
+            let selector = TrackSelector::Query {
+                query: self.media.link(name),
+                start_index: None,
+                user_data: None,
+            };
+            let item = self.node.queue_item(&selector).unwrap();
+            assert!(item.is_loading());
+            self.names.insert(item.id.clone(), (*name).to_owned());
+            items.push(item);
+        }
+        let added = self.player.queue_add(items, index).await.unwrap();
+        added.items.into_iter().map(|item| item.id).collect()
+    }
+
     async fn add(&mut self, tracks: Vec<Track>, index: Option<u32>) {
-        let added = self.player.queue_add(tracks, index).await.unwrap();
+        let items = tracks.into_iter().map(QueueItem::new).collect();
+        let added = self.player.queue_add(items, index).await.unwrap();
         for item in added.items {
             self.names.insert(item.id, item.track.info.title);
         }
@@ -186,9 +274,13 @@ impl Harness {
                 fills -= 1;
             }
             self.tick();
-            // in real time, a preparation has many seconds to finish
+            // in real time, a preparation has many seconds to finish (but not a skip waiting
+            // for its item to load)
             self.until("the preparation finishes", |p| {
-                p.state().preparing.is_none()
+                p.state()
+                    .preparing
+                    .as_ref()
+                    .is_none_or(|p| p.task.is_none())
             })
             .await;
             let batch = self.events().await;
@@ -248,6 +340,14 @@ impl Harness {
             return None;
         };
         let event = serde_json::to_value(event).unwrap();
+        // items a load added are named by their titles
+        if event["change"]["type"] == "loaded" {
+            for item in event["change"]["items"].as_array().unwrap() {
+                let id = item["id"].as_str().unwrap().to_owned();
+                let title = item["track"]["info"]["title"].as_str().unwrap().to_owned();
+                self.names.entry(id).or_insert(title);
+            }
+        }
         let name = |id: &Value| {
             self.names
                 .get(id.as_str().unwrap())
@@ -283,6 +383,15 @@ impl Harness {
                         names(&Value::from(ids))
                     }
                     "removed" => names(&change["ids"]),
+                    "loaded" => {
+                        let ids: Vec<Value> = change["items"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|item| item["id"].clone())
+                            .collect();
+                        format!("{} as {}", name(&change["id"]), names(&Value::from(ids)))
+                    }
                     "moved" | "advanced" => name(&change["id"]),
                     "updated" => text(&change["item"]["track"]["info"]["title"]),
                     "repeat" => text(&change["repeat"]),
@@ -722,3 +831,4 @@ async fn the_prepared_item_follows_the_head_of_the_queue() {
 }
 
 mod layers;
+mod loading;

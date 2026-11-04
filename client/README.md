@@ -169,7 +169,8 @@ other without a gap.
 
 | Method | Does |
 |---|---|
-| `add(tracks, { index, userData })` | Adds tracks or queries: a search adds its first result, a playlist link all its tracks |
+| `add(tracks, { index, userData, startIndex })` | Adds loaded tracks, or queries, which load in the background: a search adds its first result, a playlist link its tracks (from the one at `startIndex`, counted from 0, if given) |
+| `whenLoaded(id)` | Resolves once a loading item has loaded, with the items in its place (and the `playlist` they came from); rejects with its error |
 | `remove(...ids)`, `move(id, index)`, `clear()`, `shuffle()` | Edit the queue |
 | `setRepeat("off" \| "track" \| "queue")` | Repeat the current track, or send finished tracks to the end |
 | `setCrossfade(ms)` | Fade each track into the next over `ms` (up to 12 000; `queue.crossfade`); 0 plays them back to back |
@@ -179,6 +180,23 @@ missed, the queue fetches itself again (`sync`). Search results and playlist tra
 metadata their listing had; once the engine loads one to play it, fuller metadata (e.g. a
 YouTube Music result's artist) arrives as an `updated` change. A queued track that fails to
 load is reported with `trackError` and removed, and the queue goes on.
+
+`add` answers at once, also for a long list of links: each query becomes a *loading* item in
+its place (`item.loading`; `queue.loading` counts them), whose `track` stands in for it with the
+link or search as its title and `uri` and `sourceName` `query`. The engine loads them in queue
+order, the first ahead of the rest, so playing starts as soon as the first is ready, and
+replaces each with what it found (a `loaded` change); the first of those keeps the item's id. A
+query added on its own loads at once, as `load` would load it, so `add` then `whenLoaded` takes
+no longer than `load` then `add` did.
+Loading items can be moved, removed and skipped to like any other; a skip to one waits until it
+has loaded. A query that finds nothing is reported with `trackError`
+and removed.
+
+```ts
+// links from several sites, one per line; blank lines and `#` comments are left out
+const added = await player.queue.add(parseQueries(text), { userData: { by: user.id } });
+const { items, playlist } = await player.queue.whenLoaded(added.items[0]!.id);
+```
 
 With a crossfade, the next track's `trackStart` comes when the fade starts, right after the
 current track's `trackEnd` (`finished`), so `player.track` shows the incoming track while the

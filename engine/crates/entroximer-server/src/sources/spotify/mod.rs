@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Url;
+use serde::de::DeserializeOwned;
 
 pub use api::SpotifyError;
 pub(crate) use mirror::DEFAULT_SEARCHES as DEFAULT_MIRROR_SEARCHES;
@@ -21,8 +22,8 @@ pub(crate) use mirror::DEFAULT_SEARCHES as DEFAULT_MIRROR_SEARCHES;
 use self::api::{Image, Paging, SpotifyApi, Track};
 use super::provider::{MAX_SEARCH_RESULTS, Provider, ProviderDescriptor};
 use super::{
-    FoundTrack, LoadOutcome, PlaylistInfo, ResolveError, ResolvedTrack, TrackInfo, TrackRef,
-    artwork,
+    FoundTrack, Listing, LoadOutcome, PlaylistInfo, ResolveError, ResolvedTrack, TrackInfo,
+    TrackRef, artwork,
 };
 use crate::api::protocol::Millis;
 use crate::config::{MediaContext, SpotifyConfig};
@@ -75,68 +76,43 @@ impl SpotifyProvider {
         self.api.check().await
     }
 
-    async fn load_album(&self, id: &str, ctx: &MediaContext) -> Result<LoadOutcome, ResolveError> {
+    async fn load_album(
+        &self,
+        id: &str,
+        listing: Listing,
+        ctx: &MediaContext,
+    ) -> Result<LoadOutcome, ResolveError> {
         let album = self.api.album(id).await?;
-        let limit = ctx.config.sources.playlist_limit as usize;
-        let mut tracks = Vec::new();
-        let mut page = Some(album.tracks);
-        let artwork = largest(&album.images);
-        while let Some(Paging { items, next, .. }) = page {
-            // an album's listing leaves out the album itself
-            tracks.extend(
-                items
-                    .iter()
-                    .filter_map(|track| found_track(track, Some((&album.name, artwork)))),
-            );
-            page = if tracks.len() < limit {
-                self.api.next_page(next.as_deref()).await?
-            } else {
-                None
-            };
-        }
-        tracks.truncate(limit);
+        let span = Span::new(listing, ctx);
+        let artwork = largest(&album.images).map(str::to_owned);
+        // an album's listing leaves out the album itself
+        let tracks = self
+            .page_through(album.tracks, span, |track: Track| {
+                Ok(found_track(&track, Some((&album.name, artwork.as_deref()))))
+            })
+            .await?;
         let playlist = PlaylistInfo {
             name: album.name.clone(),
             author: artists(&album.artists),
             uri: spotify_url(album.external_urls.as_ref()),
-            artwork_url: artwork.map(str::to_owned),
+            artwork_url: artwork,
             selected_track: None,
             total_tracks: album.total_tracks,
         };
-        Ok(listing(playlist, tracks))
+        listed(playlist, tracks, span)
     }
 
     async fn load_playlist(
         &self,
         id: &str,
+        listing: Listing,
         ctx: &MediaContext,
     ) -> Result<LoadOutcome, ResolveError> {
         let playlist = self.api.playlist(id).await?;
-        let Some(first) = playlist.items else {
-            return Err(
-                SpotifyError::Restricted("the tracks of playlists their users do not own").into(),
-            );
-        };
-        let limit = ctx.config.sources.playlist_limit as usize;
+        let first = playlist_items(playlist.items)?;
         let total = first.total;
-        let mut tracks = Vec::new();
-        let mut page = Some(first);
-        while let Some(Paging { items, next, .. }) = page {
-            for item in items.into_iter().filter_map(|i| i.item) {
-                // podcast episodes and removed tracks are left out
-                if item.get("type").and_then(|t| t.as_str()) != Some("track") {
-                    continue;
-                }
-                let track: Track = serde_json::from_value(item).map_err(SpotifyError::Json)?;
-                tracks.extend(found_track(&track, None));
-            }
-            page = if tracks.len() < limit {
-                self.api.next_page(next.as_deref()).await?
-            } else {
-                None
-            };
-        }
-        tracks.truncate(limit);
+        let span = Span::new(listing, ctx);
+        let mut tracks = self.page_through(first, span, playlist_track).await?;
         let artwork = largest(&playlist.images).map(str::to_owned);
         artwork::inherit(&mut tracks, artwork.as_deref());
         let info = PlaylistInfo {
@@ -147,12 +123,47 @@ impl SpotifyProvider {
             selected_track: None,
             total_tracks: total,
         };
-        Ok(listing(info, tracks))
+        listed(info, tracks, span)
+    }
+
+    /// The tracks of a paged listing from item `start` on, up to the span's limit; the listing
+    /// jumps to the page holding the start.
+    async fn page_through<T: DeserializeOwned>(
+        &self,
+        mut page: Paging<T>,
+        span: Span,
+        mut keep: impl FnMut(T) -> Result<Option<FoundTrack>, SpotifyError>,
+    ) -> Result<Vec<FoundTrack>, SpotifyError> {
+        // the offset of the page's first item
+        let mut offset = 0;
+        if span.start > 0 && span.start >= page.items.len() {
+            let Some(next) = page.next.as_deref() else {
+                return Ok(Vec::new());
+            };
+            page = self.api.page_at(next, span.start).await?;
+            offset = span.start;
+        }
+        let mut tracks = Vec::new();
+        loop {
+            let skip = span.start.saturating_sub(offset);
+            offset += page.items.len();
+            for item in page.items.into_iter().skip(skip) {
+                tracks.extend(keep(item)?);
+            }
+            if tracks.len() >= span.limit {
+                tracks.truncate(span.limit);
+                return Ok(tracks);
+            }
+            page = match self.api.next_page(page.next.as_deref()).await? {
+                Some(page) => page,
+                None => return Ok(tracks),
+            };
+        }
     }
 
     /// The artist's top tracks or, for apps without access to them, what a search for the
     /// artist finds.
-    async fn load_artist(&self, id: &str) -> Result<LoadOutcome, ResolveError> {
+    async fn load_artist(&self, id: &str, listing: Listing) -> Result<LoadOutcome, ResolveError> {
         let artist = self.api.artist(id).await?;
         let tracks = match self.api.top_tracks(id).await {
             Ok(top) => top,
@@ -162,7 +173,14 @@ impl SpotifyProvider {
             }
             Err(e) => return Err(e.into()),
         };
-        let tracks = tracks.iter().filter_map(|t| found_track(t, None)).collect();
+        let mut tracks: Vec<_> = tracks.iter().filter_map(|t| found_track(t, None)).collect();
+        if let Listing::Queue {
+            start_index: Some(start),
+            ..
+        } = listing
+        {
+            tracks.drain(..start.min(tracks.len()));
+        }
         let playlist = PlaylistInfo {
             name: format!("{}: popular tracks", artist.name),
             author: Some(artist.name.clone()),
@@ -171,7 +189,11 @@ impl SpotifyProvider {
             selected_track: None,
             total_tracks: None,
         };
-        Ok(listing(playlist, tracks))
+        Ok(if tracks.is_empty() {
+            LoadOutcome::Empty
+        } else {
+            LoadOutcome::Playlist { playlist, tracks }
+        })
     }
 
     /// Plays `track` from its recording on YouTube, keeping Spotify's metadata.
@@ -274,6 +296,7 @@ impl Provider for SpotifyProvider {
     async fn load_url(
         &self,
         url: &Url,
+        listing: Listing,
         ctx: &MediaContext,
     ) -> Result<Option<LoadOutcome>, ResolveError> {
         let Some(link) = Link::parse(url) else {
@@ -284,11 +307,15 @@ impl Provider for SpotifyProvider {
                 let track = self.api.track(&id).await?;
                 let found = found_track(&track, None)
                     .ok_or_else(|| ResolveError::NoAudio(url.to_string()))?;
-                LoadOutcome::Track(self.mirror(&found, ctx).await?)
+                match listing {
+                    // Spotify describes it fully; it is mirrored once it plays
+                    Listing::Queue { .. } => LoadOutcome::Described(found),
+                    Listing::Whole => LoadOutcome::Track(self.mirror(&found, ctx).await?),
+                }
             }
-            Link::Album(id) => self.load_album(&id, ctx).await?,
-            Link::Playlist(id) => self.load_playlist(&id, ctx).await?,
-            Link::Artist(id) => self.load_artist(&id).await?,
+            Link::Album(id) => self.load_album(&id, listing, ctx).await?,
+            Link::Playlist(id) => self.load_playlist(&id, listing, ctx).await?,
+            Link::Artist(id) => self.load_artist(&id, listing).await?,
         };
         Ok(Some(outcome))
     }
@@ -426,12 +453,66 @@ fn as_spotify(track: &FoundTrack, mirror: ResolvedTrack) -> ResolvedTrack {
     }
 }
 
-fn listing(playlist: PlaylistInfo, tracks: Vec<FoundTrack>) -> LoadOutcome {
-    if tracks.is_empty() {
-        LoadOutcome::Empty
-    } else {
-        LoadOutcome::Playlist { playlist, tracks }
+/// Where a listing starts and how far it goes.
+#[derive(Clone, Copy, Debug)]
+struct Span {
+    start: usize,
+    /// Most tracks listed.
+    limit: usize,
+}
+
+impl Span {
+    fn new(listing: Listing, ctx: &MediaContext) -> Self {
+        let most = ctx.config.sources.playlist_limit.max(1) as usize;
+        match listing {
+            Listing::Whole => Self {
+                start: 0,
+                limit: most,
+            },
+            Listing::Queue { start_index, limit } => Self {
+                start: start_index.unwrap_or(0),
+                limit: limit.map_or(most, |limit| limit.clamp(1, most)),
+            },
+        }
     }
+}
+
+/// A collection's listing.
+fn listed(
+    playlist: PlaylistInfo,
+    tracks: Vec<FoundTrack>,
+    span: Span,
+) -> Result<LoadOutcome, ResolveError> {
+    if tracks.is_empty() {
+        return match playlist.total_tracks {
+            Some(total) if span.start > 0 && span.start >= total as usize => {
+                Err(ResolveError::PastEnd { total })
+            }
+            _ => Ok(LoadOutcome::Empty),
+        };
+    }
+    Ok(LoadOutcome::Playlist { playlist, tracks })
+}
+
+/// A playlist's listing of its items, unless the app may not read them.
+fn playlist_items(
+    items: Option<Paging<api::PlaylistItem>>,
+) -> Result<Paging<api::PlaylistItem>, SpotifyError> {
+    items.ok_or(SpotifyError::Restricted(
+        "the tracks of playlists their users do not own",
+    ))
+}
+
+/// A playlist item as a track; podcast episodes and removed tracks are left out.
+fn playlist_track(item: api::PlaylistItem) -> Result<Option<FoundTrack>, SpotifyError> {
+    let Some(item) = item.item else {
+        return Ok(None);
+    };
+    if item.get("type").and_then(|t| t.as_str()) != Some("track") {
+        return Ok(None);
+    }
+    let track: Track = serde_json::from_value(item).map_err(SpotifyError::Json)?;
+    Ok(found_track(&track, None))
 }
 
 fn artists(artists: &[api::ArtistRef]) -> Option<String> {

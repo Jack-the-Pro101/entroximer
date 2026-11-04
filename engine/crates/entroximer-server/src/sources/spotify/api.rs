@@ -145,6 +145,28 @@ impl SpotifyApi {
         self.get(&url, "page").await.map(Some)
     }
 
+    /// The page of a listing that starts at item `offset`, from the link to another of its pages.
+    pub(super) async fn page_at<T: DeserializeOwned>(
+        &self,
+        page: &str,
+        offset: usize,
+    ) -> Result<Paging<T>, SpotifyError> {
+        let mut url = Url::parse(page).map_err(|_| SpotifyError::Status {
+            status: 200,
+            message: format!("invalid page `{page}`"),
+        })?;
+        let params: Vec<(String, String)> = url
+            .query_pairs()
+            .filter(|(key, _)| key != "offset")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        url.query_pairs_mut()
+            .clear()
+            .extend_pairs(params)
+            .append_pair("offset", &offset.to_string());
+        self.get(&url, "page").await
+    }
+
     fn url(&self, path: &str, params: &[(&str, &str)]) -> Url {
         let mut url = Url::parse(&format!("{API}/{path}")).expect("API paths are valid");
         url.query_pairs_mut()

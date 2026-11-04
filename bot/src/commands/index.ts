@@ -1,10 +1,9 @@
 // The slash commands, and running them.
 import { DiscordAPIError, MessageFlags, RESTJSONErrorCodes } from "discord.js";
-import { EntroximerError } from "entroximer-client";
 
 import type { Engine } from "../engine";
 import { channelCommands } from "./channels";
-import { UserError } from "./command";
+import { failureText } from "./command";
 import type { Command, GuildAutocomplete, GuildInteraction } from "./command";
 import { infoCommands } from "./info";
 import { playCommands } from "./play";
@@ -36,13 +35,7 @@ export async function run(interaction: GuildInteraction, engine: Engine): Promis
       warnAnsweredElsewhere();
       return;
     }
-    const message =
-      error instanceof UserError || error instanceof EntroximerError
-        ? error.message
-        : "Something went wrong; see the bot's log.";
-    if (!(error instanceof UserError)) {
-      console.error(`/${interaction.commandName} failed:`, error);
-    }
+    const message = failureText(error, `/${interaction.commandName}`);
     const reply = { content: `❌ ${message}`, embeds: [], components: [], allowedMentions: { parse: [] } };
     if (interaction.deferred || interaction.replied) {
       await interaction.editReply({ ...reply, attachments: [] });

@@ -4,4 +4,10 @@ import type { Track } from "./Track.js";
 /**
  * A track in the queue, or playing. Its id stays the same while it moves around.
  */
-export type QueueItem = { id: string, track: Track, };
+export type QueueItem = { id: string, track: Track, 
+/**
+ * Whether the engine is still loading the item's query. Its `track` then only stands in
+ * for what it finds: the title and `uri` are the link or search as given, the `sourceName`
+ * is `query`. A `loaded` change replaces the item with the tracks it found.
+ */
+loading: boolean, };

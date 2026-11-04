@@ -1,15 +1,17 @@
 //! A player's queue: the tracks that play after the current one.
 //!
-//! This is plain data. The player decides when to prepare the next item and starts it, and sends
-//! items that finish back to the end when repeating the queue (see `player`). Every change here returns a [`QueueChange`] for clients to mirror, numbered by
-//! [`Queue::version`] so that a client noticing a gap can fetch the whole queue again.
+//! This is plain data. The player decides when to prepare the next item and starts it, loads
+//! the queries of loading items, and sends items that finish back to the end when repeating the
+//! queue (see `player`). Every change here returns a [`QueueChange`] for clients to mirror,
+//! numbered by [`Queue::version`] so that a client noticing a gap can fetch the whole queue again.
 
 use std::collections::{HashSet, VecDeque};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use ts_rs::TS;
 
 use crate::api::protocol::{Millis, Track};
+use crate::sources::PlaylistInfo;
 
 /// A track in the queue, or playing. Its id stays the same while it moves around.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
@@ -18,15 +20,57 @@ use crate::api::protocol::{Millis, Track};
 pub struct QueueItem {
     pub id: String,
     pub track: Track,
+    /// Whether the engine is still loading the item's query. Its `track` then only stands in
+    /// for what it finds: the title and `uri` are the link or search as given, the `sourceName`
+    /// is `query`. A `loaded` change replaces the item with the tracks it found.
+    #[serde(rename = "loading", serialize_with = "is_pending")]
+    #[ts(rename = "loading", type = "boolean")]
+    pub(crate) pending: Option<Box<Pending>>,
+}
+
+/// What a loading item stands for: a query, from `start_index` if it is a playlist.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pending {
+    pub query: String,
+    pub start_index: Option<usize>,
+    /// Loads at once, as `tracks.load` would, rather than in queue order: a client is waiting
+    /// for it, e.g. a bot's `/play`.
+    pub now: bool,
 }
 
 impl QueueItem {
     pub fn new(track: Track) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().simple().to_string(),
+            id: new_id(),
             track,
+            pending: None,
         }
     }
+
+    /// An item for something not loaded yet, shown as `stand_in` meanwhile.
+    pub fn loading(stand_in: Track, pending: Pending) -> Self {
+        Self {
+            id: new_id(),
+            track: stand_in,
+            pending: Some(Box::new(pending)),
+        }
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    pub fn pending(&self) -> Option<&Pending> {
+        self.pending.as_deref()
+    }
+}
+
+fn new_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+fn is_pending<S: Serializer>(pending: &Option<Box<Pending>>, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_bool(pending.is_some())
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -64,6 +108,13 @@ pub enum QueueChange {
     /// An item's track got fuller metadata, e.g. once resolved for playback.
     Updated {
         item: Box<QueueItem>,
+    },
+    /// The loading item `id` loaded: it is replaced, in place, by `items`, the first of which
+    /// keeps its id. `playlist` describes the playlist the items came from.
+    Loaded {
+        id: String,
+        items: Vec<QueueItem>,
+        playlist: Option<PlaylistInfo>,
     },
     /// The first item is starting and leaves the queue; its `trackStart` follows.
     Advanced {
@@ -128,6 +179,10 @@ impl Queue {
 
     pub fn position(&self, id: &str) -> Option<usize> {
         self.items.iter().position(|item| item.id == id)
+    }
+
+    pub fn get(&self, id: &str) -> Option<&QueueItem> {
+        self.items.iter().find(|item| item.id == id)
     }
 
     /// The item to play after `current` ends on its own: `current` again when repeating it (or
@@ -222,6 +277,26 @@ impl Queue {
         }))
     }
 
+    /// Replaces the loading item `id`, in place, by `items`. The first of them should have its
+    /// id.
+    pub fn replace(
+        &mut self,
+        id: &str,
+        items: Vec<QueueItem>,
+        playlist: Option<PlaylistInfo>,
+    ) -> Option<QueueChange> {
+        let position = self.position(id)?;
+        let mut after = self.items.split_off(position);
+        after.pop_front();
+        self.items.extend(items.iter().cloned());
+        self.items.append(&mut after);
+        Some(self.changed(QueueChange::Loaded {
+            id: id.to_owned(),
+            items,
+            playlist,
+        }))
+    }
+
     /// `started` began playing: if it is the first item, it leaves the queue.
     pub fn advance(&mut self, started: &QueueItem) -> Option<QueueChange> {
         if self.head()?.id != started.id {
@@ -251,6 +326,7 @@ mod tests {
     fn item(name: &str) -> QueueItem {
         QueueItem {
             id: name.to_owned(),
+            pending: None,
             track: Track {
                 encoded: name.to_owned(),
                 info: TrackInfo {
@@ -367,6 +443,47 @@ mod tests {
         );
         assert_eq!(ids(&queue), ["c"]);
         assert_eq!(queue.version(), 2);
+    }
+
+    #[test]
+    fn loaded_items_take_the_place_of_the_loading_one() {
+        let mut queue = Queue::default();
+        let loading = QueueItem {
+            id: "q".into(),
+            pending: Some(Box::new(Pending {
+                query: "ytsearch:x".into(),
+                start_index: None,
+                now: false,
+            })),
+            ..item("q")
+        };
+        queue.add(vec![item("a"), loading, item("b")], None);
+        let change = queue
+            .replace("q", vec![item("q"), item("q2")], None)
+            .unwrap();
+        assert!(
+            matches!(change, QueueChange::Loaded { ref id, ref items, .. } if id == "q" && items.len() == 2)
+        );
+        assert_eq!(ids(&queue), ["a", "q", "q2", "b"]);
+        assert!(queue.iter().all(|item| !item.is_loading()));
+        assert_eq!(queue.version(), 2);
+
+        queue.replace("q2", Vec::new(), None).unwrap();
+        assert_eq!(ids(&queue), ["a", "q", "b"]);
+        assert_eq!(queue.replace("gone", Vec::new(), None), None);
+    }
+
+    #[test]
+    fn items_tell_clients_whether_they_are_loading() {
+        let mut loading = item("q");
+        loading.pending = Some(Box::new(Pending {
+            query: "x".into(),
+            start_index: Some(3),
+            now: false,
+        }));
+        let json = serde_json::to_value(&loading).unwrap();
+        assert_eq!(json["loading"], true);
+        assert_eq!(serde_json::to_value(item("a")).unwrap()["loading"], false);
     }
 
     #[test]

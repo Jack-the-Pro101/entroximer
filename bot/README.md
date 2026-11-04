@@ -21,10 +21,11 @@ guild, permission to view, connect to and speak in voice channels.
 | Command | Does |
 |---|---|
 | `/join [channel]` | Joins your voice channel, or the one given |
-| `/play query` | Plays a URL (Spotify links too, if the engine has a Spotify app), playlist or YouTube search, or queues it if something is playing; joins your channel if needed. Suggests search results as you type |
-| `/next query` | Queues a track to play right after the current one |
+| `/play query [start_index]` | Plays a URL (Spotify links too, if the engine has a Spotify app), playlist (from track `start_index`) or YouTube search, or queues it if something is playing; joins your channel if needed. Suggests search results as you type |
+| `/next query [start_index]` | Queues a track or playlist to play right after the current one |
+| `/bulk [file] [start_index]` | Queues a list of links or searches from anywhere, one per line, from a form (without `file`) or an attached `.txt`, from line `start_index` on; the engine loads them in the background, in order, and the reply ends with what was queued and which lines failed |
 | `/search query [source]` | Searches YouTube, YouTube Music, SoundCloud or Spotify (if the engine has a Spotify app), shows the results with their artwork, and queues the ones you pick |
-| `/queue [page]` | Shows the queue, each track with its artwork |
+| `/queue [page]` | Shows the queue, each track with its artwork; items still loading show their link, marked ⏳ |
 | `/skip [to]` | Skips to the next track, or to a position in the queue |
 | `/remove position`, `/move from to`, `/shuffle`, `/clear` | Edit the queue |
 | `/repeat mode` | Repeats nothing, the current track, or the queue |
@@ -42,7 +43,8 @@ guild, permission to view, connect to and speak in voice channels.
 | `/engine` | The engine's versions, sources, YouTube session state and load |
 
 The bot posts track starts, failures and the end of the queue in the player's text channel, and
-DMs its owner when the engine's YouTube session expires. A player's text channel is the channel
+DMs its owner when the engine's YouTube session expires. A queued link or search that fails to
+load is not posted there: the reply of the command that queued it says so. A player's text channel is the channel
 of the command that made the bot join voice (or, if the bot cannot post there, the voice
 channel's chat), and only `/channel` moves it; other commands, wherever they are used, leave it
 alone. If the bot can no longer post there (the channel is deleted, or the bot loses access),

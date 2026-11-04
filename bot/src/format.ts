@@ -1,4 +1,4 @@
-import type { Track } from "entroximer-client";
+import type { QueueItem, Track } from "entroximer-client";
 
 /** `m:ss`, or `h:mm:ss` from an hour. */
 export function formatTime(ms: number): string {
@@ -29,6 +29,16 @@ export function describeTrack(track: Track): string {
   const { title, uri, author } = track.info;
   const linked = /^https?:\/\//.test(uri) ? `[${escape(title)}](<${uri}>)` : escape(title);
   return `**${linked}**${author ? ` by ${escape(author)}` : ""} (${trackLength(track)})`;
+}
+
+/** A queue item: its track, or for one still loading, its link (or search) marked as loading. */
+export function describeItem(item: QueueItem): string {
+  if (!item.loading) {
+    return describeTrack(item.track);
+  }
+  // until it loads, it stands for its link or search
+  const { uri } = item.track.info;
+  return `⏳ ${/^https?:\/\//.test(uri) ? `<${uri}>` : escape(uri)} (loading)`;
 }
 
 /** A track in plain text, for menus and suggestions, which show no Markdown. */

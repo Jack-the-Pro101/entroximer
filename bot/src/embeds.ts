@@ -2,7 +2,7 @@
 import { AttachmentBuilder, EmbedBuilder } from "discord.js";
 import type { Entroximer, Player, Track } from "entroximer-client";
 
-import { describeTrack, escape, formatTime, truncate } from "./format";
+import { describeItem, describeTrack, escape, formatTime, truncate } from "./format";
 
 const COLOR = 0x2bb3a0;
 /** Queue items per page of `/queue`: a message holds ten embeds, one of them the header. */
@@ -78,7 +78,7 @@ export async function nowPlayingMessage(manager: Entroximer, player: Player, tra
   const next = player.queue.items[0];
   embed.addFields({
     name: "Up next",
-    value: next ? truncate(describeTrack(next.track), 1024) : "Nothing queued",
+    value: next ? truncate(describeItem(next), 1024) : "Nothing queued",
   });
   const buffered = player.state?.buffered ?? [];
   const details = [
@@ -114,14 +114,17 @@ export async function queueMessage(manager: Entroximer, player: Player, page: nu
   const known = items.filter((item) => item.track.info.length !== null);
   const total = known.reduce((sum, item) => sum + (item.track.info.length ?? 0), 0);
   const duration = `${formatTime(total)}${known.length < items.length ? "+" : ""}`;
+  const loading = player.queue.loading;
+  const count = `${items.length} tracks${loading > 0 ? ` (${loading} loading)` : ""}`;
   header.setFooter({
-    text: `Page ${shown} of ${pages} · ${items.length} tracks · ${duration} · repeat ${player.queue.repeat}`,
+    text: `Page ${shown} of ${pages} · ${count} · ${duration} · repeat ${player.queue.repeat}`,
   });
 
+  // loading items have no artwork yet, so nothing is fetched for them
   const cards = await trackCards(
     manager,
     onPage.map((item) => item.track),
-    (track, index) => `${first + index + 1}. ${describeTrack(track)}`,
+    (_, index) => `${first + index + 1}. ${onPage[index] ? describeItem(onPage[index]) : ""}`,
   );
   return { embeds: [header, ...cards.embeds], files: [...files, ...cards.files] };
 }

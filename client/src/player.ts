@@ -39,8 +39,9 @@ type PlayerEvents = {
   trackStart: [track: Track, itemId: string];
   trackEnd: [track: Track, reason: TrackEndReason, itemId: string];
   /**
-   * A playing track failed, and `trackEnd` with reason `failed` follows; or a queued track
-   * failed to load, and was removed from the queue, which goes on with the next one.
+   * A playing track failed, and `trackEnd` with reason `failed` follows; or a queued track, or
+   * a loading item's query (`track` is then its stand-in), failed to load, and was removed from
+   * the queue, which goes on with the next one.
    */
   trackError: [track: Track, error: EntroximerError, itemId: string];
   trackStuck: [track: Track, waitingMs: number, itemId: string];
@@ -306,9 +307,12 @@ export class Player extends Emitter<PlayerEvents> {
         }
         this.emit("trackEnd", event.track, event.reason, event.itemId);
         break;
-      case "trackError":
-        this.emit("trackError", event.track, EntroximerError.fromApi(event.error), event.itemId);
+      case "trackError": {
+        const error = EntroximerError.fromApi(event.error);
+        this.queue._handleTrackError(event.itemId, event.track, error);
+        this.emit("trackError", event.track, error, event.itemId);
         break;
+      }
       case "trackStuck":
         this.emit("trackStuck", event.track, event.waiting, event.itemId);
         break;

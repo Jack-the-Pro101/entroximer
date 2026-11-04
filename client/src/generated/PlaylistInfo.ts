@@ -6,6 +6,7 @@
 export type PlaylistInfo = { name: string, author: string | null, uri: string | null, artworkUrl: string | null, 
 /**
  * The track the link pointed at, as an index into the tracks, e.g. from YouTube's `v=`.
+ * `null` for a queue's listing, whose tracks start at its start track.
  */
 selectedTrack: number | null, 
 /**

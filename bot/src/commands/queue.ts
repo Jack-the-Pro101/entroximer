@@ -2,7 +2,7 @@
 import type { Player, QueueItem, Repeat } from "entroximer-client";
 
 import { queueMessage } from "../embeds";
-import { describeTrack } from "../format";
+import { describeItem, describeTrack } from "../format";
 import { UserError, command } from "./command";
 import type { Command } from "./command";
 import { existingPlayer } from "./players";
@@ -40,7 +40,7 @@ export const queueCommands: Command[] = [
       const next = target ?? player.queue.items[0];
       await player.skip(target?.id);
       const what = skipped ? `Skipped ${describeTrack(skipped)}` : "Skipped";
-      await interaction.reply(next ? `${what}; up now: ${describeTrack(next.track)}` : `${what}. The queue is empty.`);
+      await interaction.reply(next ? `${what}; up now: ${describeItem(next)}` : `${what}. The queue is empty.`);
     },
   ),
   command(
@@ -55,7 +55,7 @@ export const queueCommands: Command[] = [
       const player = existingPlayer(interaction, engine);
       const item = itemAt(player, interaction.options.getInteger("position", true));
       await player.queue.remove(item.id);
-      await interaction.reply(`Removed ${describeTrack(item.track)}.`);
+      await interaction.reply(`Removed ${describeItem(item)}.`);
     },
   ),
   command(
@@ -74,7 +74,7 @@ export const queueCommands: Command[] = [
       const item = itemAt(player, interaction.options.getInteger("from", true));
       const to = Math.min(interaction.options.getInteger("to", true), player.queue.length);
       await player.queue.move(item.id, to - 1);
-      await interaction.reply(`Moved ${describeTrack(item.track)} to position ${to}.`);
+      await interaction.reply(`Moved ${describeItem(item)} to position ${to}.`);
     },
   ),
   command(

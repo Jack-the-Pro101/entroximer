@@ -13,7 +13,7 @@ use futures_util::future::BoxFuture;
 use reqwest::Url;
 
 use super::provider::{Provider, ProviderDescriptor};
-use super::{FoundTrack, LoadOutcome, ResolveError, ResolvedTrack, TrackInfo, TrackRef};
+use super::{FoundTrack, Listing, LoadOutcome, ResolveError, ResolvedTrack, TrackInfo, TrackRef};
 use crate::api::protocol::Millis;
 use crate::config::MediaContext;
 use crate::uploads::{Lease, UploadFile, UploadStore};
@@ -66,6 +66,7 @@ impl Provider for UploadProvider {
     async fn load_url(
         &self,
         url: &Url,
+        _listing: Listing,
         _ctx: &MediaContext,
     ) -> Result<Option<LoadOutcome>, ResolveError> {
         self.play(url.path()).map(|t| Some(LoadOutcome::Track(t)))

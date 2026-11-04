@@ -46,6 +46,7 @@ pub struct PlaylistInfo {
     pub uri: Option<String>,
     pub artwork_url: Option<String>,
     /// The track the link pointed at, as an index into the tracks, e.g. from YouTube's `v=`.
+    /// `null` for a queue's listing, whose tracks start at its start track.
     pub selected_track: Option<u32>,
     /// How many tracks the playlist has; more than were loaded if it exceeded the engine's limit.
     pub total_tracks: Option<u32>,

@@ -18,7 +18,9 @@ use crate::expiring::Expiring;
 use crate::sources::spotify::SpotifyError;
 use crate::sources::upload;
 use crate::sources::ytdlp::{Failure, Restriction};
-use crate::sources::{FoundTrack, LoadOutcome, ResolveError, ResolvedTrack, TrackInfo, TrackRef};
+use crate::sources::{
+    FoundTrack, LoadOutcome, QUERY_SOURCE, ResolveError, ResolvedTrack, TrackInfo, TrackRef,
+};
 
 /// Version of the `encoded` form.
 const ENCODING_VERSION: u8 = 2;
@@ -86,6 +88,35 @@ pub fn to_track(found: FoundTrack) -> Track {
     }
 }
 
+/// A queue's stand-in for a query it has not loaded yet, shown as the query. Played, or queued
+/// again, it loads the query.
+pub fn stand_in(query: &str, user_data: Option<&Value>) -> Track {
+    let found = FoundTrack {
+        reference: TrackRef {
+            source: QUERY_SOURCE.to_owned(),
+            uri: query.to_owned(),
+        },
+        info: TrackInfo {
+            identifier: query.to_owned(),
+            title: query.to_owned(),
+            author: None,
+            author_url: None,
+            album: None,
+            length: None,
+            is_stream: false,
+            is_seekable: true,
+            uri: query.to_owned(),
+            artwork_url: None,
+            isrc: None,
+            source_name: QUERY_SOURCE.to_owned(),
+        },
+    };
+    Track {
+        user_data: user_data.cloned(),
+        ..to_track(found)
+    }
+}
+
 /// A track ready to play.
 #[derive(Clone)]
 pub struct Loaded {
@@ -145,9 +176,13 @@ impl TrackCache {
                     track: loaded.track,
                 }
             }
+            LoadOutcome::Described(found) => LoadResult::Track {
+                track: to_track(found),
+            },
             LoadOutcome::Playlist {
                 playlist,
                 tracks: found,
+                ..
             } => LoadResult::Playlist {
                 playlist,
                 tracks: tracks(found),
@@ -204,12 +239,17 @@ impl TrackCache {
         Ok(loaded)
     }
 
-    /// A query's track ready to play: a search's first result, or the track a playlist link
-    /// points at.
-    pub async fn resolve_query(&self, ctx: &MediaContext, query: &str) -> Result<Loaded, ApiError> {
+    /// A query's track ready to play: a search's first result, or a playlist's track at `start_index`
+    /// (else the one its link points at).
+    pub async fn resolve_query(
+        &self,
+        ctx: &MediaContext,
+        query: &str,
+        start_index: Option<usize>,
+    ) -> Result<Loaded, ApiError> {
         let loaded = Loaded::from(
             ctx.sources
-                .resolve_query(query, ctx)
+                .resolve_query(query, start_index, ctx)
                 .await
                 .map_err(|e| load_error(&e))?,
         );
@@ -219,7 +259,7 @@ impl TrackCache {
 
     /// Keeps a resolved track for playing soon, unless it is an upload: a kept upload would keep
     /// its file from expiring or being deleted, and finding one again costs nothing.
-    fn keep(&self, encoded: &str, loaded: &Loaded) {
+    pub(crate) fn keep(&self, encoded: &str, loaded: &Loaded) {
         if loaded.track.info.source_name != upload::SOURCE {
             self.resolved.insert(encoded.to_owned(), loaded.clone());
         }
@@ -243,6 +283,7 @@ pub fn load_error(e: &ResolveError) -> ApiError {
             Failure::Other => ErrorCode::LoadFailed,
         },
         ResolveError::NoResults(_) | ResolveError::NoMirror(_) => ErrorCode::NoResults,
+        ResolveError::PastEnd { .. } => ErrorCode::BadRequest,
         ResolveError::Spotify(error) => match error {
             SpotifyError::RateLimited(_) => ErrorCode::RateLimited,
             SpotifyError::NotFound(_) | SpotifyError::Restricted(_) => ErrorCode::Unavailable,

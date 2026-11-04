@@ -149,6 +149,17 @@ pub struct YtDlpConfig {
         default_value_t = 2
     )]
     pub max_runs: usize,
+
+    /// yt-dlp runs at once for loading in the background, e.g. a list of links added to a queue
+    /// at once, which load one by one while the first plays. Separate from `max_runs`, so that
+    /// playback never waits for them; the item that plays next always takes a normal turn. 0
+    /// loads only what plays next.
+    #[arg(
+        long = "ytdlp-background-runs",
+        env = "ENTROXIMER_YTDLP_BACKGROUND_RUNS",
+        default_value_t = 2
+    )]
+    pub background_runs: usize,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -372,6 +383,8 @@ pub struct YtDlpRuns {
     pub searches: Semaphore,
     /// Loading links, resolving tracks to play, and checking the YouTube session.
     pub extractions: Semaphore,
+    /// Background loads; see [`YtDlpConfig::background_runs`].
+    pub background: Semaphore,
 }
 
 impl MediaContext {
@@ -386,6 +399,7 @@ impl MediaContext {
         let ytdlp_runs = YtDlpRuns {
             searches: Semaphore::new(runs),
             extractions: Semaphore::new(runs),
+            background: Semaphore::new(config.ytdlp.background_runs),
         };
         let youtube = YouTube::new(
             config.data_root().join("youtube"),

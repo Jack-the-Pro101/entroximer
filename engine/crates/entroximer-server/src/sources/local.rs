@@ -19,7 +19,9 @@ use reqwest::Url;
 
 use super::direct::{describe_file, descriptor, title_from};
 use super::provider::{Provider, ProviderDescriptor};
-use super::{FoundTrack, LoadOutcome, ResolveError, ResolvedTrack, TrackInfo, TrackRef, artwork};
+use super::{
+    FoundTrack, Listing, LoadOutcome, ResolveError, ResolvedTrack, TrackInfo, TrackRef, artwork,
+};
 use crate::api::protocol::Millis;
 use crate::config::{MediaContext, SourcesConfig};
 use crate::expiring::Expiring;
@@ -159,6 +161,7 @@ impl Provider for LocalProvider {
     async fn load_url(
         &self,
         url: &Url,
+        _listing: Listing,
         ctx: &MediaContext,
     ) -> Result<Option<LoadOutcome>, ResolveError> {
         let path = url

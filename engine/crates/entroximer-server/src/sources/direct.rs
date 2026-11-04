@@ -17,7 +17,8 @@ use serde::Deserialize;
 
 use super::provider::{Provider, ProviderDescriptor};
 use super::{
-    FoundTrack, LoadOutcome, ResolveError, ResolvedTrack, TrackInfo, TrackRef, artwork, local, net,
+    FoundTrack, Listing, LoadOutcome, ResolveError, ResolvedTrack, TrackInfo, TrackRef, artwork,
+    local, net,
 };
 use crate::api::protocol::Millis;
 use crate::config::MediaContext;
@@ -55,6 +56,7 @@ impl Provider for HttpProvider {
     async fn load_url(
         &self,
         url: &Url,
+        _listing: Listing,
         ctx: &MediaContext,
     ) -> Result<Option<LoadOutcome>, ResolveError> {
         if !ctx.config.sources.allow_private_urls {

@@ -22,7 +22,7 @@ use super::local::{LocalFiles, LocalProvider};
 use super::spotify::SpotifyProvider;
 use super::upload::UploadProvider;
 use super::ytdlp::YtDlpProvider;
-use super::{FoundTrack, LoadOutcome, ResolveError, ResolvedTrack};
+use super::{FoundTrack, Listing, LoadOutcome, QUERY_SOURCE, ResolveError, ResolvedTrack};
 use crate::config::{MediaContext, SourcesConfig, SpotifyConfig};
 use crate::uploads::UploadStore;
 
@@ -52,11 +52,12 @@ pub trait Provider: Send + Sync {
     /// Whether `url` is worth offering to this provider.
     fn accepts(&self, url: &Url) -> bool;
 
-    /// Loads a track or playlist. `None` passes the URL on to the next provider, e.g. a page
-    /// that is not a media file.
+    /// Loads a track or playlist, listing as much as `listing` asks. `None` passes the URL on to
+    /// the next provider, e.g. a page that is not a media file.
     async fn load_url(
         &self,
         url: &Url,
+        listing: Listing,
         ctx: &MediaContext,
     ) -> Result<Option<LoadOutcome>, ResolveError>;
 
@@ -174,10 +175,20 @@ impl Sources {
 
     /// Loads a URL, a path, or a search (`prefix:terms`, or plain text with the default search).
     pub async fn load(&self, query: &str, ctx: &MediaContext) -> Result<LoadOutcome, ResolveError> {
+        self.load_with(query, Listing::Whole, ctx).await
+    }
+
+    /// Like [`Self::load`], listing as much as `listing` asks.
+    pub async fn load_with(
+        &self,
+        query: &str,
+        listing: Listing,
+        ctx: &MediaContext,
+    ) -> Result<LoadOutcome, ResolveError> {
         let query = query.trim();
         if let Some(url) = self.as_url(query)? {
             for provider in self.providers.iter().filter(|p| p.accepts(&url)) {
-                if let Some(outcome) = provider.load_url(&url, ctx).await? {
+                if let Some(outcome) = provider.load_url(&url, listing, ctx).await? {
                     return Ok(outcome);
                 }
             }
@@ -215,39 +226,51 @@ impl Sources {
         })
     }
 
-    /// Makes a track loaded earlier playable.
+    /// Makes a track loaded earlier playable. A queue's stand-in for a query (see
+    /// [`QUERY_SOURCE`]) loads its query.
     pub async fn resolve(
         &self,
         track: &FoundTrack,
         ctx: &MediaContext,
     ) -> Result<ResolvedTrack, ResolveError> {
-        let source = &track.reference.source;
-        let provider = self
-            .providers
-            .iter()
-            .find(|p| &p.descriptor().name == source)
-            .ok_or_else(|| ResolveError::UnknownSource(source.clone()))?;
-        provider.resolve(track, ctx).await
+        if track.reference.source == QUERY_SOURCE {
+            // boxed: resolving the query's track comes back here
+            return Box::pin(self.resolve_query(&track.reference.uri, None, ctx)).await;
+        }
+        self.provider(&track.reference.source)?
+            .resolve(track, ctx)
+            .await
     }
 
-    /// Loads `query` and makes one track of it playable: a search's first result, or the track a
-    /// playlist link pointed at (else its first).
+    /// Loads `query` and makes one track of it playable: a search's first result, or a
+    /// playlist's track at `start_index` (else the one its link points at, else its first).
     pub async fn resolve_query(
         &self,
         query: &str,
+        start_index: Option<usize>,
         ctx: &MediaContext,
     ) -> Result<ResolvedTrack, ResolveError> {
-        let found = match self.load(query, ctx).await? {
+        let listing = Listing::Queue {
+            start_index,
+            limit: Some(1),
+        };
+        let found = match self.load_with(query, listing, ctx).await? {
             LoadOutcome::Track(resolved) => return Ok(resolved),
-            LoadOutcome::Playlist { playlist, tracks } => {
-                let selected = playlist.selected_track.unwrap_or(0) as usize;
-                tracks.into_iter().nth(selected)
+            LoadOutcome::Described(found) => Some(found),
+            LoadOutcome::Playlist { tracks, .. } | LoadOutcome::Search(tracks) => {
+                tracks.into_iter().next()
             }
-            LoadOutcome::Search(tracks) => tracks.into_iter().next(),
             LoadOutcome::Empty => None,
         };
         let found = found.ok_or_else(|| ResolveError::NoResults(query.to_owned()))?;
         self.resolve(&found, ctx).await
+    }
+
+    fn provider(&self, name: &str) -> Result<&Arc<dyn Provider>, ResolveError> {
+        self.providers
+            .iter()
+            .find(|p| p.descriptor().name == name)
+            .ok_or_else(|| ResolveError::UnknownSource(name.to_owned()))
     }
 
     /// Web links, URIs a provider takes (e.g. `spotify:track:...`), and paths of files on the

@@ -10,7 +10,8 @@
 //! track) is not loaded again: it plays again from what the current track downloaded.
 //!
 //! A queue item that cannot be loaded is reported with `trackError` and removed, and the queue
-//! goes on; after [`MAX_FAILURES`] in a row it waits for the client to change something.
+//! goes on; after [`MAX_FAILURES`] in a row it waits for the client to change something. A
+//! loading item (see `loading`) is prepared once it has loaded; a skip to one waits for that.
 
 use super::*;
 
@@ -40,7 +41,7 @@ impl GuildPlayer {
                 return Ok(());
             }
             Some(pending) => {
-                pending.task.abort();
+                pending.cancel();
                 let change = if repeat_queue {
                     state.queue.move_item(&pending.item_id, usize::MAX)
                 } else {
@@ -75,6 +76,8 @@ impl GuildPlayer {
                 self.deck().skip();
             }
         }
+        // the skip's target loads first, and the items skipped stop loading
+        self.plan_loads(state);
         Ok(())
     }
 
@@ -91,6 +94,7 @@ impl GuildPlayer {
     /// prepared or preparing item that no longer comes next. Called with the state locked,
     /// right after it changed.
     pub(super) fn plan_next(&self, state: &mut State) {
+        self.plan_loads(state);
         if state.destroying || state.halted || !self.caught_up(state) {
             return;
         }
@@ -151,13 +155,26 @@ impl GuildPlayer {
         end.is_some_and(|end| end - playing.player.position() <= lead)
     }
 
-    /// Resolves `item` in the background; see [`Self::finish_preparation`].
-    fn start_preparation(&self, state: &mut State, item: QueueItem, skip: bool) {
+    /// Resolves `item` in the background; see [`Self::finish_preparation`]. A loading item is
+    /// prepared once it has loaded: a skip waits for that, and otherwise planning the next item
+    /// does again then.
+    pub(super) fn start_preparation(&self, state: &mut State, item: QueueItem, skip: bool) {
         let Some(node) = self.node.upgrade() else {
             return;
         };
         if let Some(previous) = state.preparing.take() {
-            previous.task.abort();
+            previous.cancel();
+        }
+        if item.is_loading() {
+            if skip {
+                state.preparing = Some(Preparation {
+                    item_id: item.id,
+                    attempt: self.next_attempt.fetch_add(1, Ordering::Relaxed),
+                    skip,
+                    task: None,
+                });
+            }
+            return;
         }
         if let Some(replay) = self.replay(state, &item) {
             tracing::debug!(
@@ -190,7 +207,7 @@ impl GuildPlayer {
             item_id,
             attempt,
             skip,
-            task: task.abort_handle(),
+            task: Some(task.abort_handle()),
         });
     }
 
@@ -284,7 +301,7 @@ impl GuildPlayer {
     }
 
     /// The item a skip waited for failed: skip to the next one, or stop.
-    fn continue_skip(&self, state: &mut State) {
+    pub(super) fn continue_skip(&self, state: &mut State) {
         match state.queue.head().cloned() {
             Some(head) if state.failures < MAX_FAILURES => {
                 self.start_preparation(state, head, true);
@@ -298,7 +315,7 @@ impl GuildPlayer {
     /// Forgets the prepared next track, cancelling its download, and stops any preparation.
     pub(super) fn drop_prepared(&self, state: &mut State) {
         if let Some(preparing) = state.preparing.take() {
-            preparing.task.abort();
+            preparing.cancel();
         }
         let Some(track_id) = state.prepared.as_ref().map(|(id, _)| *id) else {
             return;

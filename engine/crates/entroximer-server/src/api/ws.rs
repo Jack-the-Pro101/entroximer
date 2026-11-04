@@ -12,7 +12,6 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use bytes::Bytes;
 use entroximer_core::error::display_chain;
-use futures_util::future::try_join_all;
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
@@ -284,14 +283,14 @@ async fn dispatch(
             to_value(player(session, params.guild_id)?.queue_page(offset, limit))
         }
         Call::AddToQueue(params) => {
-            // all or nothing: a query that finds nothing adds none of the tracks
-            let tracks = try_join_all(params.tracks.iter().map(|s| node.queue_tracks(s))).await?;
+            // all or nothing: an invalid track adds none; queries load once they are queued
+            let items = params
+                .tracks
+                .iter()
+                .map(|selector| node.queue_item(selector))
+                .collect::<Result<Vec<_>, ApiError>>()?;
             let player = session.player_or_create(node, params.guild_id);
-            to_value(
-                player
-                    .queue_add(tracks.into_iter().flatten().collect(), params.index)
-                    .await?,
-            )
+            to_value(player.queue_add(items, params.index).await?)
         }
         Call::RemoveFromQueue(params) => to_value(
             player(session, params.guild_id)?

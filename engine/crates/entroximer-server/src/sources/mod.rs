@@ -2,9 +2,12 @@
 //! and tracks into playable media. See [`provider`] for how input is routed.
 //!
 //! Loading is lazy: searches and playlists come back with metadata only, and a track is
-//! resolved into something playable when it is played or preloaded.
+//! resolved into something playable when it is played or preloaded. Loading for a queue is lazier
+//! still (see [`Listing`]): a track a provider can describe without resolving it (a Spotify link)
+//! is only described.
 
 pub mod artwork;
+pub mod background;
 mod direct;
 pub mod local;
 pub mod metadata;
@@ -39,6 +42,27 @@ pub struct TrackRef {
     pub uri: String,
 }
 
+/// The source of a queue's stand-ins for queries it has not loaded yet (see `node::queue`).
+/// Resolving one loads its query and plays what that finds.
+pub const QUERY_SOURCE: &str = "query";
+
+/// How much of a playlist to list, and whether single tracks are resolved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Listing {
+    /// As `tracks.load` lists: a link to one track resolved, a playlist's every track (up to the
+    /// engine's limit).
+    #[default]
+    Whole,
+    /// For a queue: a playlist's tracks from `start_index` (else from the one its link points at, else
+    /// from its first), at most `limit` of them (else the engine's limit); tracks before the
+    /// start are left out. A provider that can describe a single track without resolving it
+    /// does so.
+    Queue {
+        start_index: Option<usize>,
+        limit: Option<usize>,
+    },
+}
+
 /// A track known by its metadata, e.g. a search result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FoundTrack {
@@ -66,6 +90,8 @@ impl std::fmt::Debug for ResolvedTrack {
 pub enum LoadOutcome {
     /// A link to one track, already resolved.
     Track(ResolvedTrack),
+    /// A link to one track, described but not resolved; only for [`Listing::Queue`].
+    Described(FoundTrack),
     Playlist {
         playlist: PlaylistInfo,
         tracks: Vec<FoundTrack>,
@@ -98,6 +124,8 @@ pub enum ResolveError {
     Json(&'static str, #[source] serde_json::Error),
     #[error("no results for `{0}`")]
     NoResults(String),
+    #[error("the playlist has only {total} tracks")]
+    PastEnd { total: u32 },
     #[error("`{0}` has no playable audio")]
     NoAudio(String),
     #[error("no source can play `{0}`")]

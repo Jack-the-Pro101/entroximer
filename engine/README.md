@@ -103,7 +103,7 @@ order: the events a request causes always arrive before its response.
 | `player.update` | Creates or changes a guild's player: `track` (plays now; `null` stops), `position`, `endTime`, `paused`, `volume`, `graph` or `preset` (effects), `voice`. These are the music's; a refused update changes nothing |
 | `player.get` / `player.destroy` | Reads a player, or stops it and leaves the voice channel |
 | `queue.get` | A page of a player's queue |
-| `queue.add` | Adds tracks (encoded, or queries to load) at an index; with nothing playing, the first item starts |
+| `queue.add` | Adds tracks at an index and answers at once: encoded tracks as they are, queries (with an optional playlist `startIndex`) as loading items that load in the background; with nothing playing, the first item starts once it is ready |
 | `queue.remove` / `queue.move` / `queue.clear` / `queue.shuffle` | Edit the queue |
 | `queue.skip` | Plays the next item (or `toItem`), instantly if it is prepared |
 | `queue.configure` | Sets `repeat` (`off`, `track` or `queue`) and `crossfade` (ms, up to 12 000) |
@@ -341,6 +341,34 @@ after five failures in a row it waits until the client changes something. Client
 queue from `queueChanged` events and fetch it again (`queue.get`) when a version is skipped.
 Queues live in memory: they survive client reconnects but not engine restarts.
 
+### Loading queries
+
+`queue.add` does not wait for the queries it is given: each is queued at once as a *loading*
+item (`loading: true`), whose track stands in for it (the link or search as its title and
+`uri`, `sourceName` `query`). The engine loads them in the background, in queue order, and
+replaces each in place with what it found, in one `loaded` change whose first item keeps the
+loading item's id: a link's track, a search's first result, or a playlist's tracks from its
+start (the selector's `startIndex`, else the one its link points at with `index=` or `v=`, else the
+first; earlier ones are left out). So a list of links plays as soon as its first has loaded,
+and keeps its order whichever finishes first. A playlist is one listing (one yt-dlp run, or
+Spotify's API), not a load per track: its tracks are resolved one by one as they come up, like
+any other. Spotify links load from Spotify's API alone; the track is found on YouTube once it
+plays.
+
+A query added on its own (a bot's `/play`) loads at once instead, as `tracks.load` would: a
+link resolved and kept for playing, a Spotify track found on YouTube right away, so that a client
+waiting for it hears soon whether it worked. The first item of the queue also loads ahead of the
+others, with a normal yt-dlp turn as playback uses; the rest take background turns (`ENTROXIMER_YTDLP_BACKGROUND_RUNS`, 2 at once across the
+engine, at most 3 loads per player), so that a long list never holds up playback or other
+guilds. Loading items can be moved, removed (which cancels their load) and skipped to; a skip
+to one plays on the current track until it has loaded, and skipping past ones cancels theirs.
+The queue does not end while items are loading. A query that finds nothing or fails is reported
+with `trackError` (with its stand-in track) and removed, without counting toward the five
+failures. One that the source refuses for too many requests, or with YouTube's bot check, stays:
+background loads wait 30 s (twice as long each time again, up to 5 minutes) and it is tried
+again, three times at most, since hammering a source that limits the engine's address only
+makes it worse.
+
 Plain HTTP serves `/health`, `GET /v1/info`, `GET /v1/artwork/<key>` (embedded covers, see
 [Artwork](#artwork)), `POST /v1/uploads` and `DELETE /v1/uploads/<id>` (see [Uploads](#uploads))
 and `GET|PUT|DELETE /v1/youtube/session` (the cookies.txt as the `PUT` body). The protocol's types are in
@@ -403,7 +431,9 @@ their share.
 
 yt-dlp runs as a separate process for every search and every track it loads; with YouTube's
 JavaScript challenges, one peaks at up to 350 MB. `ENTROXIMER_YTDLP_MAX_RUNS` bounds how many run
-at once, separately for searches, so that searching as users type never holds up playback.
+at once, separately for searches, so that searching as users type never holds up playback, and
+`ENTROXIMER_YTDLP_BACKGROUND_RUNS` how many load queued queries in the background (see
+[Loading queries](#loading-queries)): at most `2 × MAX_RUNS + BACKGROUND_RUNS` at once.
 
 glibc keeps memory the engine freed in one arena per thread, so without a limit the engine's
 memory grows with every track played. The container image, the Nix package and the dev shell
@@ -422,7 +452,7 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_RESUME_TIMEOUT_SECS` | `60` | How long a disconnected client's players wait, paused, before they are destroyed |
 | `ENTROXIMER_PRELOAD_SECS` | `30` | How long before a track ends the next item of the queue starts loading |
 | `ENTROXIMER_DEFAULT_SEARCH` | `ytsearch` | Search for queries that are neither links nor prefixed |
-| `ENTROXIMER_PLAYLIST_LIMIT` | `500` | Most tracks loaded from one playlist |
+| `ENTROXIMER_PLAYLIST_LIMIT` | `500` | Most tracks loaded from one playlist (for a queue, from its start track) |
 | `ENTROXIMER_LOCAL_FILES_DIR` | none | Let clients play the files within this directory; see [Local files](#local-files) |
 | `ENTROXIMER_ALLOW_LOCAL_FILES` | off | Let clients play any file on the engine's host that it can read |
 | `ENTROXIMER_ALLOW_PRIVATE_URLS` | off | Let clients play links to private networks, e.g. a media server on the LAN |
@@ -454,6 +484,7 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_YOUTUBE_PROXY` | | HTTP proxy for everything sent to YouTube; other sites go direct |
 | `ENTROXIMER_YTDLP_ARGS` | | Extra yt-dlp arguments, e.g. `--extractor-args youtube:formats=duplicate` |
 | `ENTROXIMER_YTDLP_MAX_RUNS` | `2` | yt-dlp runs at once, counted separately for searches; downloads do not count |
+| `ENTROXIMER_YTDLP_BACKGROUND_RUNS` | `2` | yt-dlp runs at once for queued queries loading in the background; `0` loads only what plays next |
 | `ENTROXIMER_LOG_FORMAT` | `pretty` | `json` for log collectors |
 | `RUST_LOG` | `info,songbird=warn` | Log verbosity, e.g. `info,entroximer_core=debug` |
 

@@ -1,6 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
-import { Entroximer, EntroximerError, PROTOCOL_VERSION, append, withParams } from "../src/index.js";
+import {
+  Entroximer,
+  EntroximerError,
+  PROTOCOL_VERSION,
+  append,
+  parseQueries,
+  withParams,
+} from "../src/index.js";
 import type {
   EntroximerOptions,
   GatewayVoiceStateUpdate,
@@ -220,12 +227,15 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
     expect((await started.called)[1]).toBe(first);
     expect(player.itemId).toBe(first);
     expect((await queueAtStart.called)[0]).toEqual([second, third]);
+    // the query loads in the background, keeping its item's id
+    expect(added.items[2]?.loading).toBe(true);
+    expect((await queue.whenLoaded(third)).items.map((item) => item.id)).toEqual([third]);
 
     await queue.move(third, 0);
     await queue.setRepeat("queue");
     expect(queue.items.map((item) => item.id)).toEqual([third, second]);
     expect(queue.repeat).toBe("queue");
-    expect(queue.version).toBe(4);
+    expect(queue.version).toBe(5);
 
     // a crossfade is no change to the queue's items, so no version counts it
     await queue.setCrossfade(3000);
@@ -233,7 +243,7 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
     expect((await failure(queue.setCrossfade(20_000))).code).toBe("bad_request");
     await player.refresh();
     expect(queue.crossfade).toBe(3000);
-    expect(queue.version).toBe(4);
+    expect(queue.version).toBe(5);
 
     // a change that skips a version shows that some were missed: the queue is fetched again
     const synced = nextCall<[]>();
@@ -246,7 +256,7 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
     });
     await synced.called;
     expect(queue.items.map((item) => item.id)).toEqual([third, second]);
-    expect(queue.version).toBe(4);
+    expect(queue.version).toBe(5);
 
     // the next item is loaded already, so skipping is instant; repeating the queue, the
     // skipped item goes to its end
@@ -262,6 +272,48 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
     await player.skip();
     await ended.called;
     expect(player.track).toBeNull();
+    await player.destroy();
+  });
+
+  test("queues a list of queries as loading items and tells when each has loaded", async () => {
+    const manager = client();
+    await manager.connect();
+    const player = manager.player("12");
+    const { queue } = player;
+    const missing = `${engine.tone}.missing.webm`;
+    const queries = parseQueries(`# links from anywhere\n${engine.tone}\n\n  ${missing}  \n${engine.tone}\n`);
+    expect(queries).toEqual([engine.tone, missing, engine.tone]);
+
+    const failed = nextCall<[Track, EntroximerError, string]>();
+    player.once("trackError", failed.listener);
+    const added = await queue.add(queries, { userData: { by: "list" } });
+    expect(added.items.map((item) => item.loading)).toEqual([true, true, true]);
+    expect(added.items[1]?.track.info).toMatchObject({ title: missing, sourceName: "query" });
+    const [first, dead, last] = added.items.map((item) => item.id);
+    if (first === undefined || dead === undefined || last === undefined) {
+      throw new Error("three items were added");
+    }
+
+    const loaded = await queue.whenLoaded(first);
+    expect(loaded.playlist).toBeNull();
+    expect(loaded.items.map((item) => [item.id, item.loading, item.track.info.title])).toEqual([
+      [first, false, "tone"],
+    ]);
+    expect(loaded.items[0]?.track.userData).toEqual({ by: "list" });
+
+    // a query that fails is reported, and removed by the time its wait ends
+    const error = await failure(queue.whenLoaded(dead));
+    expect(queue.items.some((item) => item.id === dead)).toBe(false);
+    const [track, reported, itemId] = await failed.called;
+    expect([track.info.title, itemId]).toEqual([missing, dead]);
+    expect(reported.message).toBe(error.message);
+    await queue.whenLoaded(last);
+    expect(queue.loading).toBe(0);
+    expect(queue.items.some((item) => item.id === dead)).toBe(false);
+
+    // asked again later, it still knows
+    expect((await queue.whenLoaded(first)).items[0]?.id).toBe(first);
+    expect((await failure(queue.whenLoaded("nope"))).code).toBe("not_found");
     await player.destroy();
   });
 

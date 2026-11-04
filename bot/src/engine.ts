@@ -93,6 +93,10 @@ function describeEvent(event: Event): { content: string; kind: PostKind } | null
     case "trackStart":
       return { content: `▶️ Now playing ${describeTrack(event.track)}`, kind: "routine" };
     case "trackError":
+      // a query that failed to load: the command that queued it says so in its reply
+      if (event.track.info.sourceName === "query") {
+        return null;
+      }
       return { content: `⚠️ ${describeTrack(event.track)} failed: ${event.error.message}`, kind: "problem" };
     case "trackStuck":
       return {
