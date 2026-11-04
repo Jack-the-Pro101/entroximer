@@ -38,7 +38,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Semaphore;
 
-pub use failure::{Failure, Restriction, SESSION_ENDED_WARNING, classify, token_fetch_failed};
+pub use failure::{Failure, Restriction, SESSION_ENDED_WARNING, classify};
 
 use super::provider::{MAX_SEARCH_RESULTS, Provider, ProviderDescriptor};
 use super::{FoundTrack, LoadOutcome, PlaylistInfo, ResolveError, ResolvedTrack, artwork, net};
@@ -466,13 +466,8 @@ impl Purpose {
     }
 }
 
-/// How long a run that failed for want of a PO token waits before its one retry: about as long
-/// as a provider server takes to restart.
-const TOKEN_RETRY_DELAY: Duration = Duration::from_secs(5);
-
 /// Runs yt-dlp on `target` once its purpose's turn comes. Warnings stay on so that yt-dlp can
-/// report a session YouTube ended, or a PO token provider it could not reach; a run that failed
-/// for the latter is retried once.
+/// report a session YouTube ended.
 async fn run(
     ctx: &MediaContext,
     purpose: Purpose,
@@ -480,40 +475,6 @@ async fn run(
     session: Option<&SessionCopy>,
     args: &[&str],
 ) -> Result<Output, ResolveError> {
-    let mut retried = false;
-    loop {
-        let (succeeded, output) = run_once(ctx, purpose, target, session, args).await?;
-        if succeeded {
-            return Ok(output);
-        }
-        let message = error_line(&output.stderr);
-        let failure = classify(&message);
-        if !retried && failure.may_need_token() && token_fetch_failed(&output.stderr) {
-            retried = true;
-            tracing::info!(
-                target,
-                %message,
-                "yt-dlp failed without a PO token from its provider; retrying"
-            );
-            tokio::time::sleep(TOKEN_RETRY_DELAY).await;
-            continue;
-        }
-        return Err(ResolveError::Extraction {
-            query: target.to_owned(),
-            failure,
-            message,
-        });
-    }
-}
-
-/// One yt-dlp run; returns whether it succeeded, and its output.
-async fn run_once(
-    ctx: &MediaContext,
-    purpose: Purpose,
-    target: &str,
-    session: Option<&SessionCopy>,
-    args: &[&str],
-) -> Result<(bool, Output), ResolveError> {
     let _turn = purpose
         .turns(ctx)
         .acquire()
@@ -540,13 +501,18 @@ async fn run_once(
     if let Some(session) = session {
         ctx.youtube.observe(session, &stderr);
     }
-    Ok((
-        output.status.success(),
-        Output {
-            stdout: output.stdout,
-            stderr,
-        },
-    ))
+    if !output.status.success() {
+        let message = error_line(&stderr);
+        return Err(ResolveError::Extraction {
+            query: target.to_owned(),
+            failure: classify(&message),
+            message,
+        });
+    }
+    Ok(Output {
+        stdout: output.stdout,
+        stderr,
+    })
 }
 
 /// The formats of a fully extracted track.

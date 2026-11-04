@@ -76,8 +76,9 @@ sends everything for YouTube through an HTTP proxy, e.g. one on a home connectio
 runs for YouTube links and searches (Spotify tracks included, since they play from YouTube), the
 downloads of YouTube tracks, and the engine's and ffmpeg's own requests for their streams, whose
 URLs only work from the address that extracted them. Other sites, direct links and Spotify's API
-are reached directly. The proxy must speak HTTP (`http://` or `https://`); ffmpeg cannot use
-SOCKS.
+are reached directly. The proxy must be `http://`: ffmpeg cannot use SOCKS, and it ignores an
+`https://` proxy and connects directly, where the stream URLs don't work. To reach a proxy over
+TLS, run a local `http://` one that forwards to it (e.g. gost).
 
 ## Client protocol
 

@@ -41,26 +41,8 @@ pub enum Failure {
     Other,
 }
 
-impl Failure {
-    /// Whether a missing PO token may explain it: formats skipped without one leave none to
-    /// pick ("Requested format is not available"), and YouTube distrusts requests without one.
-    pub fn may_need_token(self) -> bool {
-        matches!(self, Self::Other | Self::Restricted(Restriction::BotCheck))
-    }
-}
-
 /// yt-dlp's warning when YouTube ends a session it was given (cookies rotated or revoked).
 pub const SESSION_ENDED_WARNING: &str = "account cookies are no longer valid";
-
-/// Whether yt-dlp could not get a PO token from its provider, e.g. a provider server that is
-/// restarting. yt-dlp logs its PO token framework and every provider under `[pot]` or
-/// `[pot:<provider>]`, and only failures as warnings or errors.
-pub fn token_fetch_failed(stderr: &str) -> bool {
-    stderr.lines().any(|line| {
-        (line.starts_with("WARNING:") || line.starts_with("ERROR:"))
-            && (line.contains("[pot]") || line.contains("[pot:"))
-    })
-}
 
 /// Classifies yt-dlp's error output. Order matters: e.g. private videos also say "sign in".
 pub fn classify(message: &str) -> Failure {
@@ -153,22 +135,5 @@ mod tests {
         for (message, expected) in cases {
             assert_eq!(classify(message), expected, "{message}");
         }
-    }
-
-    #[test]
-    fn recognises_token_provider_failures() {
-        // the formats of yt-dlp 2026.10.26 with bgutil 2.0.2
-        let unreachable = "WARNING: [youtube] [pot:bgutil:http] Error reaching GET http://127.0.0.1:4416/ping (caused by TransportError). Please make sure that the server is reachable at http://127.0.0.1:4416.\nERROR: [youtube] x: Requested format is not available";
-        assert!(token_fetch_failed(unreachable));
-        let dropped = "WARNING: [youtube] [pot] Error fetching PO Token from \"bgutil:http\" provider: PoTokenProviderError('Error reaching POST /get_pot')";
-        assert!(token_fetch_failed(dropped));
-        assert!(!token_fetch_failed(
-            "[youtube] [pot] Generating a gvs PO Token for web client\nERROR: [youtube] x: Video unavailable"
-        ));
-
-        assert!(Failure::Other.may_need_token());
-        assert!(Failure::Restricted(Restriction::BotCheck).may_need_token());
-        assert!(!Failure::Unavailable.may_need_token());
-        assert!(!Failure::Restricted(Restriction::Private).may_need_token());
     }
 }
