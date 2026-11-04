@@ -6,10 +6,11 @@
 //! events it caused arrive before its response. Events are emitted with the player's state
 //! locked, so clients see queue changes in the order of their versions.
 //!
-//! The queue's scheduling is in [`queue_flow`], loading its queries in [`loading`], the other
-//! layers and their clips in [`layers`], the voice connection in [`connection`].
+//! The queue's scheduling is in [`queue_flow`], loading its queries in [`loading`], keeping a
+//! repeated queue's tracks for its next round in [`rounds`], the other layers and their clips in
+//! [`layers`], the voice connection in [`connection`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroU64;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,7 +22,7 @@ use entroximer_core::deck::{Deck, DeckEvent, DeckTrack, EndReason, TrackId};
 use entroximer_core::dsp::{Effects, GraphSpec, PresetSelection};
 use entroximer_core::error::display_chain;
 use entroximer_core::mixer::Mixer;
-use entroximer_core::player::{PlaybackError, Player, SAMPLE_RATE};
+use entroximer_core::player::{Kept, PlaybackError, Player, SAMPLE_RATE};
 use entroximer_core::timeline::{Ticks, TimelineStats, ticks};
 use songbird::events::context_data::DisconnectReason;
 use songbird::id::{ChannelId, GuildId, UserId};
@@ -96,6 +97,13 @@ struct State {
     preparing: Option<Preparation>,
     /// Loads of the queue's loading items, by item id.
     loads: HashMap<String, loading::Load>,
+    /// What each deck track playing a queue item downloads, to keep for a repeated queue's next
+    /// round (see `rounds`).
+    media: HashMap<TrackId, Kept>,
+    /// Tracks this player keeps in the engine's loop cache, by `encoded` form.
+    kept: HashSet<String>,
+    /// The queue's version when `kept` was last checked against it.
+    kept_version: u64,
     /// The item that last played to its end, until another starts: repeating it works even if
     /// the deck went idle meanwhile.
     finished: Option<QueueItem>,
@@ -241,6 +249,7 @@ impl GuildPlayer {
                 if let Some(skip) = state.preparing.take_if(|p| p.skip) {
                     skip.cancel();
                 }
+                state.media.insert(track.id, track.player.keep());
                 state.items.insert(track.id, item);
                 self.deck().play(track);
             }
@@ -377,6 +386,7 @@ impl GuildPlayer {
             state.destroying = true;
             self.drop_prepared(&mut state);
             self.cancel_loads(&mut state);
+            self.release_all_kept(&mut state);
             self.end_clips(&mut state);
         }
         self.deck().stop();
@@ -539,6 +549,9 @@ impl GuildPlayer {
                 DeckEvent::Ended(id, reason) => self.ended(&mut state, id, reason),
                 DeckEvent::Failed(id, error) => {
                     if let Some(item) = state.items.get(&id) {
+                        if let Some(node) = self.node.upgrade() {
+                            node.tracks.forget(&item.track.encoded);
+                        }
                         self.emit(Event::TrackError {
                             guild_id: self.guild_id,
                             track: item.track.clone(),
@@ -735,5 +748,6 @@ mod connection;
 mod layers;
 mod loading;
 mod queue_flow;
+mod rounds;
 #[cfg(test)]
 mod tests;

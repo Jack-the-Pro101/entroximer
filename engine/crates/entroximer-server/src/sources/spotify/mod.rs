@@ -450,6 +450,7 @@ fn as_spotify(track: &FoundTrack, mirror: ResolvedTrack) -> ResolvedTrack {
             info,
         },
         producer: mirror.producer,
+        valid_until: mirror.valid_until,
     }
 }
 

@@ -1,6 +1,7 @@
 //! The engine's runtime state: client sessions, their players, and recently loaded tracks.
 
 mod backoff;
+mod loop_cache;
 mod output;
 pub mod player;
 pub mod queue;
@@ -28,6 +29,7 @@ use crate::config::{MediaContext, Secret};
 use crate::managed_ytdlp::YtDlpBinary;
 use crate::sources::QUERY_SOURCE;
 use backoff::Backoff;
+use loop_cache::LoopCache;
 use queue::{Pending, QueueItem};
 use tracks::{Loaded, TrackCache, decode, stand_in, with_user_data};
 
@@ -57,6 +59,8 @@ pub struct Node {
     pub clip_loads: Semaphore,
     /// Whether queues' background loads wait out rate limiting.
     pub(crate) load_backoff: Backoff,
+    /// Tracks of repeated queues kept for their next round.
+    pub(crate) loop_cache: LoopCache,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     system_ytdlp_version: OnceCell<Option<String>>,
     started: Instant,
@@ -73,6 +77,7 @@ impl Node {
     const CLIP_LOADS: usize = 8;
 
     pub fn new(ctx: Arc<MediaContext>, settings: NodeSettings) -> Arc<Self> {
+        let loop_cache = LoopCache::new(ctx.config.loop_cache_bytes());
         let node = Arc::new(Self {
             ctx,
             settings,
@@ -81,6 +86,7 @@ impl Node {
             tracks: TrackCache::default(),
             clip_loads: Semaphore::new(Self::CLIP_LOADS),
             load_backoff: Backoff::default(),
+            loop_cache,
             sessions: Mutex::new(HashMap::new()),
             system_ytdlp_version: OnceCell::new(),
             started: Instant::now(),
@@ -247,6 +253,7 @@ impl Node {
             memory_bytes: resident_memory().unwrap_or(0),
             cache_memory_bytes,
             cache_disk_bytes,
+            loop_cache_bytes: self.loop_cache.bytes(),
         }
     }
 

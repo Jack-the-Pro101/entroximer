@@ -9,4 +9,8 @@ memoryBytes: number,
 /**
  * Cached audio held in RAM and on disk by all players, in bytes.
  */
-cacheMemoryBytes: number, cacheDiskBytes: number, };
+cacheMemoryBytes: number, cacheDiskBytes: number, 
+/**
+ * Tracks of repeated queues kept on disk for their next round, in bytes.
+ */
+loopCacheBytes: number, };

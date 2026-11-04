@@ -3,7 +3,7 @@
 //! types into an autocomplete field), does not ask the source again.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -26,9 +26,17 @@ use crate::sources::{
 const ENCODING_VERSION: u8 = 2;
 /// Results a search returns unless asked otherwise.
 const DEFAULT_SEARCH_RESULTS: u32 = 10;
-/// How long loaded tracks and search results are reused. Media URLs stay valid for hours, so
-/// minutes of reuse are safe.
-const KEEP_FOR: Duration = Duration::from_secs(10 * 60);
+/// How long resolved tracks are reused at most, which saves extracting them again (YouTube's
+/// most costly requests) when they play again, e.g. in a repeated queue. An entry is a few KiB (up
+/// to about 100 KiB for a video that only streams over SABR).
+const KEEP_RESOLVED_FOR: Duration = Duration::from_secs(4 * 60 * 60);
+/// How long a resolved track whose media URLs do not say when they stop working is reused.
+const KEEP_UNDATED_FOR: Duration = Duration::from_secs(60 * 60);
+/// Reuse ends this long before a track's media URLs stop working, so that one played just before
+/// still downloads, and seeks, while they work.
+const URL_MARGIN: Duration = Duration::from_secs(30 * 60);
+/// How long search results are reused, e.g. while a user types into an autocomplete field.
+const KEEP_SEARCHES_FOR: Duration = Duration::from_secs(10 * 60);
 const CACHE_CAPACITY: usize = 256;
 
 /// The `encoded` form: where to load the track again, plus its info for decoding.
@@ -122,6 +130,8 @@ pub fn stand_in(query: &str, user_data: Option<&Value>) -> Track {
 pub struct Loaded {
     pub track: Track,
     pub producer: Arc<dyn Producer>,
+    /// When its media URLs stop working, if known.
+    pub valid_until: Option<SystemTime>,
 }
 
 impl From<ResolvedTrack> for Loaded {
@@ -129,6 +139,7 @@ impl From<ResolvedTrack> for Loaded {
         Self {
             track: to_track(resolved.track),
             producer: resolved.producer,
+            valid_until: resolved.valid_until,
         }
     }
 }
@@ -152,8 +163,8 @@ pub struct TrackCache {
 impl Default for TrackCache {
     fn default() -> Self {
         Self {
-            resolved: Expiring::new(KEEP_FOR, CACHE_CAPACITY),
-            searches: Expiring::new(KEEP_FOR, CACHE_CAPACITY),
+            resolved: Expiring::new(KEEP_RESOLVED_FOR, CACHE_CAPACITY),
+            searches: Expiring::new(KEEP_SEARCHES_FOR, CACHE_CAPACITY),
         }
     }
 }
@@ -257,13 +268,38 @@ impl TrackCache {
         Ok(loaded)
     }
 
+    /// Forgets a resolved track that failed to play, so that it is resolved afresh next time:
+    /// its media URLs may no longer work, e.g. after the engine's address changed (YouTube's
+    /// only work from the address that extracted them).
+    pub fn forget(&self, encoded: &str) {
+        self.resolved.remove(encoded);
+    }
+
     /// Keeps a resolved track for playing soon, unless it is an upload: a kept upload would keep
     /// its file from expiring or being deleted, and finding one again costs nothing.
     pub(crate) fn keep(&self, encoded: &str, loaded: &Loaded) {
-        if loaded.track.info.source_name != upload::SOURCE {
-            self.resolved.insert(encoded.to_owned(), loaded.clone());
+        if loaded.track.info.source_name == upload::SOURCE {
+            return;
+        }
+        if let Some(keep_for) = reuse_for(loaded.valid_until, SystemTime::now()) {
+            self.resolved
+                .insert_for(encoded.to_owned(), loaded.clone(), keep_for);
         }
     }
+}
+
+/// How long a resolved track whose media URLs work `valid_until` is reused, from `now`: until
+/// shortly before they stop, for at most [`KEEP_RESOLVED_FOR`]. `None` if that is too soon.
+fn reuse_for(valid_until: Option<SystemTime>, now: SystemTime) -> Option<Duration> {
+    let Some(until) = valid_until else {
+        return Some(KEEP_UNDATED_FOR);
+    };
+    until
+        .duration_since(now)
+        .ok()?
+        .checked_sub(URL_MARGIN)
+        .filter(|left| !left.is_zero())
+        .map(|left| left.min(KEEP_RESOLVED_FOR))
 }
 
 /// Attaches the client's data to a loaded track.
@@ -348,6 +384,28 @@ mod tests {
                 source_name: "youtube".into(),
             },
         }
+    }
+
+    #[test]
+    fn resolved_tracks_are_reused_while_their_urls_work() {
+        let now = SystemTime::now();
+        let hours = |h: u64| Duration::from_secs(h * 3600);
+        assert_eq!(
+            reuse_for(Some(now + hours(6)), now),
+            Some(KEEP_RESOLVED_FOR),
+            "YouTube's"
+        );
+        assert_eq!(
+            reuse_for(Some(now + Duration::from_secs(125 * 60)), now),
+            Some(Duration::from_secs(95 * 60)),
+            "SoundCloud's"
+        );
+        assert_eq!(
+            reuse_for(Some(now + Duration::from_secs(20 * 60)), now),
+            None
+        );
+        assert_eq!(reuse_for(Some(now - hours(1)), now), None);
+        assert_eq!(reuse_for(None, now), Some(KEEP_UNDATED_FOR));
     }
 
     #[test]

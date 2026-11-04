@@ -324,8 +324,14 @@ Each player plays its queue by itself. Once the current track has less than
 it follows without a gap, whatever the client does meanwhile; if the queue changes so that
 another item comes next, that one is prepared instead. Items leave the queue when they start.
 Repeating a `track` plays it again from what was downloaded, without loading it again;
-repeating the `queue` sends finished tracks to its end, and each is loaded again when it
-comes back.
+repeating the `queue` sends finished (and skipped) tracks to its end. Those whose whole media is
+on disk are kept there for the next round (`ENTROXIMER_LOOP_CACHE_MB`, 1 GiB across the engine,
+besides `ENTROXIMER_DISK_TOTAL_MB`), so that it plays them without loading them again: no yt-dlp
+run, no download. A full loop cache keeps what it has rather than making room by age, since a
+queue played in a cycle would otherwise drop each track just before it comes round; only
+YouTube's tracks (Spotify's too, which play from YouTube) take the place of others. Kept tracks
+hold nothing in RAM, and go once their queue no longer repeats or no longer has them; others
+are loaded again when they come back.
 
 With a `crossfade`, the next track starts that long before the current one ends, fading in as
 the current one fades out (at equal power, so the overlap does not dip), and the next track is
@@ -465,7 +471,8 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_MEMORY_BEHIND_SECS` | `15` | Seconds kept in RAM behind the playhead |
 | `ENTROXIMER_FORWARD_BIAS` | `4` | How much more is kept ahead than behind |
 | `ENTROXIMER_MEMORY_MAX_MB` / `ENTROXIMER_DISK_MAX_MB` | `8` / `1024` | Per-track caps |
-| `ENTROXIMER_MEMORY_TOTAL_MB` / `ENTROXIMER_DISK_TOTAL_MB` | `128` / `4096` | Caps for all tracks together; each track playing, preparing or sounding as a clip may take an equal share, up to its own caps |
+| `ENTROXIMER_MEMORY_TOTAL_MB` / `ENTROXIMER_DISK_TOTAL_MB` | `128` / `3072` | Caps for all tracks together; each track playing, preparing or sounding as a clip may take an equal share, up to its own caps |
+| `ENTROXIMER_LOOP_CACHE_MB` | `1024` | Disk for repeated queues' tracks once they have played, besides `ENTROXIMER_DISK_TOTAL_MB`, so that their next round plays from disk; `0` keeps none (see [Queues](#queues)) |
 | `ENTROXIMER_DATA_DIR` | `$XDG_DATA_HOME/entroximer` | Persistent state: the managed yt-dlp and the YouTube session |
 | `ENTROXIMER_YTDLP_MANAGED` | off (on in the image) | Let the engine install and update yt-dlp |
 | `ENTROXIMER_YTDLP_PACKAGE` | `yt-dlp[default]` | pip requirement for the managed install |

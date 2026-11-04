@@ -95,6 +95,7 @@ impl GuildPlayer {
     /// right after it changed.
     pub(super) fn plan_next(&self, state: &mut State) {
         self.plan_loads(state);
+        self.release_kept(state);
         if state.destroying || state.halted || !self.caught_up(state) {
             return;
         }
@@ -185,6 +186,17 @@ impl GuildPlayer {
                 "replaying the current track"
             );
             self.set_prepared(state, item, replay, skip);
+            return;
+        }
+        if let Some(kept) = self.kept_track(&item) {
+            tracing::debug!(
+                guild_id = %self.guild_id,
+                item = %item.id,
+                title = %item.track.info.title,
+                skip,
+                "playing the next track from the loop cache"
+            );
+            self.set_prepared(state, item, kept, skip);
             return;
         }
         let attempt = self.next_attempt.fetch_add(1, Ordering::Relaxed);
@@ -291,6 +303,7 @@ impl GuildPlayer {
     fn set_prepared(&self, state: &mut State, item: QueueItem, track: DeckTrack, skip: bool) {
         state.failures = 0;
         state.prepared = Some((track.id, item.id.clone()));
+        state.media.insert(track.id, track.player.keep());
         state.items.insert(track.id, item);
         let mut deck = self.deck();
         if skip {
@@ -326,6 +339,7 @@ impl GuildPlayer {
             deck.set_next(None);
             state.prepared = None;
             state.items.remove(&track_id);
+            state.media.remove(&track_id);
         }
     }
 
@@ -363,6 +377,7 @@ impl GuildPlayer {
             EndReason::Replaced => TrackEndReason::Replaced,
             EndReason::Failed => TrackEndReason::Failed,
         };
+        let media = state.media.remove(&id);
         let Some(item) = state.items.remove(&id) else {
             return;
         };
@@ -378,6 +393,14 @@ impl GuildPlayer {
                 let change = state.queue.add(vec![item.clone()], None);
                 self.report(&state.queue, change);
             }
+        }
+        // what it downloaded plays the next round, unless it failed
+        if let Some(media) = media
+            && matches!(reason, TrackEndReason::Finished | TrackEndReason::Replaced)
+        {
+            self.keep_for_next_round(state, &item, &media);
+        }
+        if reason == TrackEndReason::Finished {
             state.finished = Some(item);
         }
         if reason != TrackEndReason::Replaced {

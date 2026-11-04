@@ -632,6 +632,56 @@ async fn a_repeated_track_plays_again_from_what_it_downloaded() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_repeated_queue_plays_its_next_round_from_what_it_kept() {
+    let mut h = Harness::new(Duration::from_secs(1)).await;
+    let tracks = h.tones(&["a", "b"]).await;
+    h.player
+        .configure_queue(Some(Repeat::Queue), None)
+        .await
+        .unwrap();
+    h.add(tracks, None).await;
+    h.events_until("start").await;
+    h.play(WHOLE_TONE).await;
+    h.play(WHOLE_TONE).await;
+    // both played to their end, and are kept on disk for the next round
+    assert_eq!(h.player.state().kept.len(), 2);
+    assert!(h.node.stats().loop_cache_bytes > 0);
+
+    // loading them again would fail now
+    for name in ["a", "b"] {
+        std::fs::remove_file(h.dir.path().join(format!("{name}.webm"))).unwrap();
+    }
+    let batches = h.play(WHOLE_TONE).await;
+    assert_eq!(
+        batches,
+        [strings([
+            "end a finished",
+            "added a",
+            "advanced b",
+            "start b"
+        ])]
+    );
+    let batches = h.play(WHOLE_TONE).await;
+    assert_eq!(
+        batches,
+        [strings([
+            "end b finished",
+            "added b",
+            "advanced a",
+            "start a"
+        ])]
+    );
+
+    // once the queue no longer repeats, they go
+    h.player
+        .configure_queue(Some(Repeat::Off), None)
+        .await
+        .unwrap();
+    assert!(h.player.state().kept.is_empty());
+    assert_eq!(h.node.loop_cache.bytes(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn repeating_the_queue_sends_finished_tracks_to_its_end() {
     let mut h = Harness::new(Duration::from_secs(1)).await;
     let tracks = h.tones(&["a", "b"]).await;

@@ -86,8 +86,22 @@ pub struct MediaConfig {
     pub memory_total_mb: u64,
 
     /// Disk cap for all tracks' cached audio together, in MiB, shared like `memory_total_mb`.
-    #[arg(long, env = "ENTROXIMER_DISK_TOTAL_MB", default_value_t = 4096)]
+    #[arg(long, env = "ENTROXIMER_DISK_TOTAL_MB", default_value_t = 3072)]
     pub disk_total_mb: u64,
+
+    /// Disk for the tracks of repeated queues once they have played, in MiB, besides
+    /// `disk_total_mb`: the next round plays them from disk rather than downloading (and, for
+    /// YouTube, extracting) them again. When it is full, YouTube's tracks take the place of
+    /// others. 0 keeps none.
+    #[arg(long, env = "ENTROXIMER_LOOP_CACHE_MB", default_value_t = 1024)]
+    pub loop_cache_mb: u64,
+}
+
+impl MediaConfig {
+    /// See [`Self::loop_cache_mb`].
+    pub fn loop_cache_bytes(&self) -> u64 {
+        self.loop_cache_mb * MIB
+    }
 }
 
 #[derive(Clone, Debug, Args)]

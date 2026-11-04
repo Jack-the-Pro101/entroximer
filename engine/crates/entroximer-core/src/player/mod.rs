@@ -167,6 +167,42 @@ impl Drop for Player {
     }
 }
 
+/// What a player downloads, held on after the player is gone: [`Player::from_kept`] plays it
+/// again from what was downloaded, loading only what is missing.
+#[derive(Clone)]
+pub struct Kept {
+    source: Arc<dyn Producer>,
+    cfg: PlayerConfig,
+    timeline: Arc<Timeline>,
+}
+
+impl Kept {
+    /// The bytes it takes on disk, if the whole media is there; see
+    /// [`Timeline::complete_on_disk`].
+    pub fn size(&self) -> Option<u64> {
+        self.timeline.complete_on_disk()
+    }
+
+    /// Keeps the media for playing later, out of the cache budget the tracks playing share; see
+    /// [`Timeline::park`]. `None` unless the whole media is on disk.
+    pub fn park(&self) -> Option<u64> {
+        self.timeline.park()
+    }
+
+    /// Where the media ends, once known.
+    pub fn length(&self) -> Option<Ticks> {
+        self.timeline.media_end()
+    }
+}
+
+impl std::fmt::Debug for Kept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Kept")
+            .field("timeline", &self.timeline)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Player {
     /// Starts loading `source` at `start` (the beginning if `None`), using the runtime `rt`.
     pub fn new(
@@ -187,6 +223,26 @@ impl Player {
             Arc::clone(&self.source),
             self.cfg.clone(),
             Arc::clone(self.timeline()),
+            0,
+        )
+    }
+
+    /// What this player downloads, to play again after it is gone.
+    pub fn keep(&self) -> Kept {
+        Kept {
+            source: Arc::clone(&self.source),
+            cfg: self.cfg.clone(),
+            timeline: Arc::clone(self.timeline()),
+        }
+    }
+
+    /// Plays kept media from the start, from what was downloaded.
+    pub fn from_kept(rt: Handle, kept: &Kept) -> Self {
+        Self::reading(
+            rt,
+            Arc::clone(&kept.source),
+            kept.cfg.clone(),
+            Arc::clone(&kept.timeline),
             0,
         )
     }

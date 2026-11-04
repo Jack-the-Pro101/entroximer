@@ -15,7 +15,7 @@ export const infoCommands: Command[] = [
           `Entroximer ${info.version}, protocol ${info.protocol}, yt-dlp ${info.ytdlp ?? "unknown"}`,
           `YouTube session: ${info.youtubeSession}`,
           `${stats.playingPlayers} of ${stats.players} players playing, up ${formatTime(stats.uptime)}`,
-          `memory ${mib(stats.memoryBytes)}, cache ${mib(stats.cacheMemoryBytes)} in RAM and ${mib(stats.cacheDiskBytes)} on disk`,
+          `memory ${mib(stats.memoryBytes)}, cache ${mib(stats.cacheMemoryBytes)} in RAM and ${mib(stats.cacheDiskBytes)} on disk, ${mib(stats.loopCacheBytes)} kept for repeated queues`,
           `sources: ${info.providers.map((provider) => provider.displayName).join(", ")}`,
           `searches: ${searches.join(", ")}`,
           `effects: ${info.nodes.map((node) => node.type).join(", ")}`,

@@ -828,6 +828,9 @@ pub struct Stats {
     pub cache_memory_bytes: u64,
     #[ts(type = "number")]
     pub cache_disk_bytes: u64,
+    /// Tracks of repeated queues kept on disk for their next round, in bytes.
+    #[ts(type = "number")]
+    pub loop_cache_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, TS)]

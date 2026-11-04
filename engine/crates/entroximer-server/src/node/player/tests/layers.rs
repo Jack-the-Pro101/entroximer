@@ -144,6 +144,7 @@ async fn a_stalled_clip_fails_so_that_the_ones_after_it_play() {
         producer: Arc::new(ProcessProducer::new(ProducerCaps::default(), None, |_| {
             (ProcessSpec::new("sleep").arg("30"), TimestampMode::Absolute)
         })),
+        valid_until: None,
     };
     h.player
         .play_loaded(&h.node, "voice", "c1", stalled)

@@ -224,6 +224,7 @@ async fn describe(
     Ok(ResolvedTrack {
         track: FoundTrack { reference, info },
         producer: Arc::new(producer),
+        valid_until: None,
     })
 }
 

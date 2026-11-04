@@ -49,6 +49,7 @@ impl UploadProvider {
         Ok(ResolvedTrack {
             track: found_track(&lease),
             producer: Arc::new(UploadProducer(lease)),
+            valid_until: None,
         })
     }
 }

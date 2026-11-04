@@ -111,6 +111,7 @@ impl LocalProvider {
         Ok(ResolvedTrack {
             track: found_track(&file, &facts),
             producer: Arc::new(FileProducer { path: file }),
+            valid_until: None,
         })
     }
 

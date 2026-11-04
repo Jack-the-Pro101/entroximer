@@ -19,7 +19,7 @@ pub mod ytdlp;
 
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use entroximer_core::producer::Producer;
 use serde::{Deserialize, Serialize};
@@ -74,6 +74,9 @@ pub struct FoundTrack {
 pub struct ResolvedTrack {
     pub track: FoundTrack,
     pub producer: Arc<dyn Producer>,
+    /// When the media URLs it plays from stop working, if the source says so (YouTube's work
+    /// for six hours, SoundCloud's for about two).
+    pub valid_until: Option<SystemTime>,
 }
 
 impl std::fmt::Debug for ResolvedTrack {

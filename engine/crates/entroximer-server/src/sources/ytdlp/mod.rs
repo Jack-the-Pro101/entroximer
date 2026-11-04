@@ -261,6 +261,7 @@ impl YtDlpProvider {
             .as_deref()
             .filter(|_| format.transport() == Some(Transport::Stdout));
         slim_info_json(&mut json, keep_format);
+        let valid_until = format.url.as_deref().and_then(net::url_expiry);
         let producer = YtDlpProducer::new(
             ctx,
             Bytes::from(json.to_string()),
@@ -273,6 +274,7 @@ impl YtDlpProvider {
         Ok(ResolvedTrack {
             track,
             producer: Arc::new(producer),
+            valid_until,
         })
     }
 }

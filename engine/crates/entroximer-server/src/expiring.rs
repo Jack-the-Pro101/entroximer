@@ -8,13 +8,15 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 pub(crate) struct Expiring<K, V> {
+    /// With the time each expires.
     entries: Mutex<HashMap<K, (V, Instant)>>,
     keep_for: Duration,
     capacity: usize,
 }
 
 impl<K: Eq + Hash + Clone, V: Clone> Expiring<K, V> {
-    /// Entries are kept for `keep_for`; beyond `capacity` the oldest make room.
+    /// Entries are kept for `keep_for` unless inserted for longer or shorter; beyond `capacity`
+    /// those that would expire first make room.
     pub(crate) fn new(keep_for: Duration, capacity: usize) -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
@@ -30,7 +32,7 @@ impl<K: Eq + Hash + Clone, V: Clone> Expiring<K, V> {
     {
         let mut entries = self.entries();
         match entries.get(key) {
-            Some((value, at)) if at.elapsed() < self.keep_for => Some(value.clone()),
+            Some((value, until)) if Instant::now() < *until => Some(value.clone()),
             Some(_) => {
                 entries.remove(key);
                 None
@@ -39,20 +41,34 @@ impl<K: Eq + Hash + Clone, V: Clone> Expiring<K, V> {
         }
     }
 
+    pub(crate) fn remove<Q>(&self, key: &Q)
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
+        self.entries().remove(key);
+    }
+
     pub(crate) fn insert(&self, key: K, value: V) {
+        self.insert_for(key, value, self.keep_for);
+    }
+
+    /// Inserts an entry kept for `keep_for` instead of the map's own time.
+    pub(crate) fn insert_for(&self, key: K, value: V, keep_for: Duration) {
+        let now = Instant::now();
         let mut entries = self.entries();
         if entries.len() >= self.capacity && !entries.contains_key(&key) {
-            entries.retain(|_, (_, at)| at.elapsed() < self.keep_for);
+            entries.retain(|_, (_, until)| now < *until);
             if entries.len() >= self.capacity
-                && let Some(oldest) = entries
+                && let Some(soonest) = entries
                     .iter()
-                    .min_by_key(|(_, (_, at))| *at)
+                    .min_by_key(|(_, (_, until))| *until)
                     .map(|(key, _)| key.clone())
             {
-                entries.remove(&oldest);
+                entries.remove(&soonest);
             }
         }
-        entries.insert(key, (value, Instant::now()));
+        entries.insert(key, (value, now + keep_for));
     }
 
     fn entries(&self) -> MutexGuard<'_, HashMap<K, (V, Instant)>> {
@@ -80,6 +96,24 @@ mod tests {
             cache.entries().len(),
             3,
             "replacing an entry evicts nothing"
+        );
+        cache.remove(&4);
+        assert_eq!(cache.get(&4), None);
+    }
+
+    #[test]
+    fn entries_can_be_kept_for_their_own_time() {
+        let cache = Expiring::new(Duration::from_secs(60), 2);
+        cache.insert_for(1, "long", Duration::from_secs(3600));
+        cache.insert_for(2, "gone", Duration::ZERO);
+        assert_eq!(cache.get(&1), Some("long"));
+        assert_eq!(cache.get(&2), None);
+        cache.insert(3, "default");
+        cache.insert(4, "full");
+        assert_eq!(
+            cache.get(&1),
+            Some("long"),
+            "those expiring first make room"
         );
     }
 
