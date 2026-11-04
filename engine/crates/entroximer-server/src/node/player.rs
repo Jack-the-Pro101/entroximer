@@ -549,8 +549,10 @@ impl GuildPlayer {
                 DeckEvent::Ended(id, reason) => self.ended(&mut state, id, reason),
                 DeckEvent::Failed(id, error) => {
                     if let Some(item) = state.items.get(&id) {
+                        // next time it loads afresh
                         if let Some(node) = self.node.upgrade() {
                             node.tracks.forget(&item.track.encoded);
+                            node.loop_cache.discard(&item.track.encoded);
                         }
                         self.emit(Event::TrackError {
                             guild_id: self.guild_id,

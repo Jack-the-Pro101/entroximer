@@ -138,11 +138,7 @@ impl SpotifyApi {
         let Some(next) = next else {
             return Ok(None);
         };
-        let url = Url::parse(next).map_err(|_| SpotifyError::Status {
-            status: 200,
-            message: format!("invalid next page `{next}`"),
-        })?;
-        self.get(&url, "page").await.map(Some)
+        self.get(&page_link(next)?, "page").await.map(Some)
     }
 
     /// The page of a listing that starts at item `offset`, from the link to another of its pages.
@@ -151,10 +147,7 @@ impl SpotifyApi {
         page: &str,
         offset: usize,
     ) -> Result<Paging<T>, SpotifyError> {
-        let mut url = Url::parse(page).map_err(|_| SpotifyError::Status {
-            status: 200,
-            message: format!("invalid page `{page}`"),
-        })?;
+        let mut url = page_link(page)?;
         let params: Vec<(String, String)> = url
             .query_pairs()
             .filter(|(key, _)| key != "offset")
@@ -411,6 +404,14 @@ where
     T: Deserialize<'de>,
 {
     Option::<Vec<T>>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+/// A link to a page of a listing, as a response gives it.
+fn page_link(link: &str) -> Result<Url, SpotifyError> {
+    Url::parse(link).map_err(|_| SpotifyError::Status {
+        status: 200,
+        message: format!("invalid page link `{link}`"),
+    })
 }
 
 #[cfg(test)]

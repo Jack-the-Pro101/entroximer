@@ -174,6 +174,8 @@ fn is_internal_v4(ip: Ipv4Addr) -> bool {
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
+    use super::*;
+
     #[test]
     fn signed_urls_tell_when_they_expire() {
         let at = |seconds| Some(UNIX_EPOCH + Duration::from_secs(seconds));
@@ -231,8 +233,6 @@ mod tests {
         assert_eq!(amz_date("20241301T000000Z"), None);
         assert_eq!(amz_date("2024-02-29T23:59:59Z"), None);
     }
-
-    use super::*;
 
     #[test]
     fn recognises_internal_addresses() {

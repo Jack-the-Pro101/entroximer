@@ -217,3 +217,27 @@ async fn a_playlist_loads_in_place() {
     );
     assert!(state.loads.is_empty(), "the list's own load was cancelled");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_skip_to_an_item_that_fails_to_load_ends_the_queue_once() {
+    let mut h = Harness::new(Duration::from_secs(1)).await;
+    let tracks = h.tones(&["x"]).await;
+    h.add(tracks, None).await;
+    h.events_until("start").await;
+    h.media.hold("missing");
+    h.add_links(&["missing"], None).await;
+    h.events().await;
+
+    h.player.skip(None).await.unwrap();
+    h.media.release("missing");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        h.events().await,
+        strings([
+            "error missing",
+            "removed missing",
+            "end x stopped",
+            "queueEnd"
+        ])
+    );
+}

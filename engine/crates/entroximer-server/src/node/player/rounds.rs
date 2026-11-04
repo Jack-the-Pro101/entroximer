@@ -1,7 +1,9 @@
 //! A repeated queue's next round: tracks that played (to their end, or skipped) are kept in the
 //! engine's loop cache (see `node::loop_cache`) if all of their media is on disk, and play from
 //! there when they come round again, without being loaded again. The player holds the tracks it
-//! kept while its queue repeats and has them, and lets go of the others.
+//! kept while its queue repeats and has them, and lets go of the others. Files on the engine's
+//! own disk (local files and uploads) are not kept: they load again for free, and a kept upload
+//! would keep its file from expiring.
 
 use std::collections::HashSet;
 
@@ -9,6 +11,7 @@ use entroximer_core::player::Kept;
 
 use super::*;
 use crate::node::loop_cache::Holder;
+use crate::sources::{local, upload};
 
 impl GuildPlayer {
     /// Who holds this player's kept tracks.
@@ -19,7 +22,9 @@ impl GuildPlayer {
     /// Keeps `media`, which `item` played, for the queue's next round, if it repeats and has
     /// the item again.
     pub(super) fn keep_for_next_round(&self, state: &mut State, item: &QueueItem, media: &Kept) {
-        if state.queue.repeat() != Repeat::Queue || state.queue.position(&item.id).is_none() {
+        let repeats =
+            state.queue.repeat() == Repeat::Queue && state.queue.position(&item.id).is_some();
+        if !repeats || plays_from_disk(&item.track) {
             return;
         }
         let Some(node) = self.node.upgrade() else {
@@ -93,4 +98,9 @@ impl GuildPlayer {
 /// Spotify track plays from its recording there.
 fn plays_from_youtube(track: &Track) -> bool {
     matches!(track.info.source_name.as_str(), "youtube" | "spotify")
+}
+
+/// Whether the track plays from a file on the engine's own disk.
+fn plays_from_disk(track: &Track) -> bool {
+    [local::SOURCE, upload::SOURCE].contains(&track.info.source_name.as_str())
 }

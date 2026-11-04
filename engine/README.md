@@ -329,9 +329,10 @@ on disk are kept there for the next round (`ENTROXIMER_LOOP_CACHE_MB`, 1 GiB acr
 besides `ENTROXIMER_DISK_TOTAL_MB`), so that it plays them without loading them again: no yt-dlp
 run, no download. A full loop cache keeps what it has rather than making room by age, since a
 queue played in a cycle would otherwise drop each track just before it comes round; only
-YouTube's tracks (Spotify's too, which play from YouTube) take the place of others. Kept tracks
-hold nothing in RAM, and go once their queue no longer repeats or no longer has them; others
-are loaded again when they come back.
+YouTube's tracks (Spotify's too, which play from YouTube) take the place of others. Local files
+and uploads are not kept, as they load again for free. Kept tracks hold nothing in RAM, and go
+once their queue no longer repeats or no longer has them, or if they fail to play; others are
+loaded again when they come back.
 
 With a `crossfade`, the next track starts that long before the current one ends, fading in as
 the current one fades out (at equal power, so the overlap does not dip), and the next track is

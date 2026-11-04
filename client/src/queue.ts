@@ -172,17 +172,24 @@ export class Queue extends Emitter<QueueEvents> {
    * failed with, or with a `not_found` error if it was removed (or was never queued) before it
    * loaded.
    */
-  whenLoaded(id: string): Promise<LoadedItems> {
+  async whenLoaded(id: string): Promise<LoadedItems> {
+    // an item added while the queue syncs shows in `items` once that is done
+    if (this.#syncing !== null) {
+      await this.#syncing.catch(() => undefined);
+    }
     const known = this.#outcomes.get(id);
     if (known !== undefined) {
-      return "loaded" in known ? Promise.resolve(known.loaded) : Promise.reject(known.error);
+      if ("error" in known) {
+        throw known.error;
+      }
+      return known.loaded;
     }
     const item = this.#items.find((candidate) => candidate.id === id);
     if (item === undefined) {
-      return Promise.reject(notQueued(id));
+      throw notQueued(id);
     }
     if (!item.loading) {
-      return Promise.resolve({ items: [item], playlist: null });
+      return { items: [item], playlist: null };
     }
     return new Promise((resolve, reject) => {
       const waiting = this.#waiting.get(id) ?? [];

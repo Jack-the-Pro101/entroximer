@@ -187,11 +187,12 @@ impl GuildPlayer {
             let refused = found
                 .as_ref()
                 .is_err_and(|e| matches!(e.code, ErrorCode::RateLimited | ErrorCode::BotCheck));
-            match found {
+            let skip_went_on = match found {
                 Ok(found) => {
                     state.loads.remove(item_id);
                     node.load_backoff.got_through();
                     self.loaded(&mut state, node, &item, found);
+                    false
                 }
                 Err(error) if refused && attempts < MAX_ATTEMPTS => {
                     if let Some(load) = state.loads.get_mut(item_id) {
@@ -206,6 +207,7 @@ impl GuildPlayer {
                         wait.as_secs(),
                         error.message
                     );
+                    false
                 }
                 Err(error) => {
                     state.loads.remove(item_id);
@@ -223,11 +225,14 @@ impl GuildPlayer {
                     });
                     let change = state.queue.remove(std::slice::from_ref(&item.id));
                     self.report(&state.queue, change);
-                    self.continue_waiting_skip(&mut state, item_id);
+                    self.continue_waiting_skip(&mut state, item_id)
                 }
-            }
+            };
             self.plan_next(&mut state);
-            self.end_if_ran_out(&state);
+            // a skip that went on reports the end of the queue itself, once its track ends
+            if !skip_went_on {
+                self.end_if_ran_out(&state);
+            }
         }
         self.drain_deck();
         self.sync_output();
@@ -278,21 +283,22 @@ impl GuildPlayer {
         self.continue_waiting_skip(state, &item.id);
     }
 
-    /// A skip waits for the item `id`, which has loaded (keeping its id) or failed: prepare it,
-    /// or skip on to the next one.
-    fn continue_waiting_skip(&self, state: &mut State, id: &str) {
+    /// If a skip waits for the item `id`, which has loaded (keeping its id) or failed: prepares
+    /// it, or skips on to the next one. Returns whether a skip waited.
+    fn continue_waiting_skip(&self, state: &mut State, id: &str) -> bool {
         let waiting = state
             .preparing
             .as_ref()
             .is_some_and(|p| p.skip && p.task.is_none() && p.item_id == id);
         if !waiting {
-            return;
+            return false;
         }
         state.preparing = None;
         match state.queue.head().cloned() {
             Some(head) if head.id == id => self.start_preparation(state, head, true),
             _ => self.continue_skip(state),
         }
+        true
     }
 }
 

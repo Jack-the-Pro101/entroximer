@@ -3,9 +3,9 @@
 //!
 //! Links are loaded with `yt-dlp -J --flat-playlist`: a playlist comes back as a list of entries
 //! with metadata only, a single track fully extracted, ready to play. For a queue, a playlist is
-//! listed from its start track (see [`Listing::Queue`]). Searches list results the same way. A track is fully extracted when it is resolved for playback, and the resulting info
-//! JSON is fed back with `--load-info-json -` for every download, so a page is never extracted
-//! twice. The chosen audio format's protocol decides how its bytes arrive:
+//! listed from its start track (see [`Listing::Queue`]). Searches list results the same way. A
+//! track is fully extracted when it is resolved for playback, and the resulting info JSON is fed
+//! back with `--load-info-json -` for every download, so a page is never extracted twice. The chosen audio format's protocol decides how its bytes arrive:
 //!
 //! - `https`: yt-dlp writes the file to stdout. Re-opening at an offset goes through ffmpeg,
 //!   which seeks the format's direct URL with range requests using the container index.

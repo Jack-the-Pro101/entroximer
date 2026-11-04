@@ -172,11 +172,29 @@ impl Harness {
     }
 
     /// Tracks for tones, loaded as clients load them.
+    /// Tones as local files.
     async fn tones(&self, names: &[&str]) -> Vec<Track> {
-        let mut tracks = Vec::new();
+        let mut paths = Vec::new();
         for name in names {
-            let path = self.tone_file(name).await;
-            match self.node.tracks.load(&self.node.ctx, &path).await.unwrap() {
+            paths.push(self.tone_file(name).await);
+        }
+        self.load_tracks(&paths).await
+    }
+
+    /// Tones from the media server, as tracks from the web.
+    async fn linked_tones(&self, names: &[&str]) -> Vec<Track> {
+        let mut links = Vec::new();
+        for name in names {
+            self.tone_file(name).await;
+            links.push(self.media.link(name));
+        }
+        self.load_tracks(&links).await
+    }
+
+    async fn load_tracks(&self, queries: &[String]) -> Vec<Track> {
+        let mut tracks = Vec::new();
+        for query in queries {
+            match self.node.tracks.load(&self.node.ctx, query).await.unwrap() {
                 LoadResult::Track { track } => tracks.push(track),
                 other => panic!("a tone loads as a track, not {other:?}"),
             }
@@ -634,7 +652,7 @@ async fn a_repeated_track_plays_again_from_what_it_downloaded() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_repeated_queue_plays_its_next_round_from_what_it_kept() {
     let mut h = Harness::new(Duration::from_secs(1)).await;
-    let tracks = h.tones(&["a", "b"]).await;
+    let tracks = h.linked_tones(&["a", "b"]).await;
     h.player
         .configure_queue(Some(Repeat::Queue), None)
         .await
@@ -679,6 +697,22 @@ async fn a_repeated_queue_plays_its_next_round_from_what_it_kept() {
         .unwrap();
     assert!(h.player.state().kept.is_empty());
     assert_eq!(h.node.loop_cache.bytes(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn files_on_the_engines_disk_are_not_kept_for_the_next_round() {
+    let mut h = Harness::new(Duration::from_secs(1)).await;
+    let tracks = h.tones(&["a"]).await;
+    h.player
+        .configure_queue(Some(Repeat::Queue), None)
+        .await
+        .unwrap();
+    h.add(tracks, None).await;
+    h.events_until("start").await;
+    h.play(WHOLE_TONE).await;
+    // a local file loads again for free
+    assert!(h.player.state().kept.is_empty());
+    assert_eq!(h.node.stats().loop_cache_bytes, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]

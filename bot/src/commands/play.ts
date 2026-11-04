@@ -2,7 +2,7 @@
 import { ActionRowBuilder, ComponentType, ModalBuilder, StringSelectMenuBuilder, TextInputStyle } from "discord.js";
 import type { Attachment } from "discord.js";
 import { EntroximerError, parseQueries } from "entroximer-client";
-import type { PlaylistInfo, Player, QueueAdded, QueueItem } from "entroximer-client";
+import type { PlaylistInfo, Player, QueueItem } from "entroximer-client";
 
 import { searchMessage } from "../embeds";
 import type { Engine } from "../engine";
@@ -36,8 +36,14 @@ const SEARCH_SOURCES = [
   { name: "Spotify", value: "spsearch" },
 ];
 
-/** Changes a command's reply; failures to (e.g. after Discord's 15 minutes) are only logged. */
-type Edit = (content: string) => Promise<void>;
+/**
+ * Changes a command's reply; returns whether it could. Failures to (e.g. after Discord's 15
+ * minutes) are only logged.
+ */
+type Edit = (content: string) => Promise<boolean>;
+
+/** How one of `/bulk`'s lines loaded: the tracks it queued, or why it did not. */
+type LineOutcome = { tracks: number } | { error: unknown };
 
 export const playCommands: Command[] = [
   command(
@@ -301,38 +307,60 @@ async function queueList(interaction: GuildInteraction, engine: Engine, text: st
     ...(idle ? { index: 0 } : {}),
     userData: requester(interaction),
   });
+  // waiting starts before the reply goes out, so that loads finishing meanwhile are not missed
+  const loads = added.items.map((item) =>
+    player.queue.whenLoaded(item.id).then(
+      (loaded): LineOutcome => ({ tracks: loaded.items.length }),
+      (error: unknown): LineOutcome => ({ error }),
+    ),
+  );
   const from = start > 1 ? ` from line ${start}` : "";
   await edit(`⏳ Queued ${plural(queries.length, "line")}${from}${idle ? ", playing the first" : ""}; loading them…`);
-  void summarize(edit, player, added, queries, start);
+  void summarize(engine, player, edit, loads, queries, start);
 }
 
-/** Edits `/bulk`'s reply as its lines load, ending with what was queued and what failed. */
-async function summarize(edit: Edit, player: Player, added: QueueAdded, queries: string[], firstLine: number): Promise<void> {
+/**
+ * Edits `/bulk`'s reply as its lines load, ending with what was queued and what failed. A long
+ * list can outlast the reply (Discord's 15 minutes): the summary then goes to the player's
+ * channel.
+ */
+async function summarize(
+  engine: Engine,
+  player: Player,
+  edit: Edit,
+  loads: Array<Promise<LineOutcome>>,
+  queries: string[],
+  firstLine: number,
+): Promise<void> {
   let done = 0;
   let tracks = 0;
   let shown = Date.now();
   const failures: Array<{ line: number; text: string }> = [];
   await Promise.all(
-    added.items.map(async (item, i) => {
+    loads.map(async (load, i) => {
+      const outcome = await load;
       const line = firstLine + i;
-      try {
-        tracks += (await player.queue.whenLoaded(item.id)).items.length;
-      } catch (error) {
+      if ("error" in outcome) {
         const query = queries[i] ?? "";
         const shownQuery = /^https?:\/\//.test(query) ? `<${query}>` : `\`${query.replaceAll("`", "'")}\``;
-        failures.push({ line, text: `${line}. ${shownQuery}: ${loadFailure(error)}` });
+        failures.push({ line, text: `${line}. ${shownQuery}: ${loadFailure(outcome.error)}` });
+      } else {
+        tracks += outcome.tracks;
       }
       done += 1;
-      if (done < added.items.length && Date.now() - shown >= PROGRESS_INTERVAL_MS) {
+      if (done < loads.length && Date.now() - shown >= PROGRESS_INTERVAL_MS) {
         shown = Date.now();
-        await edit(`⏳ Loading… ${done} of ${plural(added.items.length, "line")} done, ${plural(tracks, "track")} queued`);
+        await edit(`⏳ Loading… ${done} of ${plural(loads.length, "line")} done, ${plural(tracks, "track")} queued`);
       }
     }),
   );
   failures.sort((a, b) => a.line - b.line);
-  const summary = `✅ Queued ${plural(tracks, "track")} from ${plural(added.items.length, "line")}`;
+  const summary = `✅ Queued ${plural(tracks, "track")} from ${plural(loads.length, "line")}`;
   const failed = failures.length === 0 ? "." : `; ${failures.length} failed:\n${failures.map((f) => f.text).join("\n")}`;
-  await edit(truncate(`${summary}${failed}`, MAX_MESSAGE));
+  const content = truncate(`${summary}${failed}`, MAX_MESSAGE);
+  if (!(await edit(content))) {
+    engine.messages.post(player, content, failures.length === 0 ? "routine" : "problem");
+  }
 }
 
 /** Why a query did not load: the engine's reason, which is no fault of the bot's. */
@@ -345,8 +373,10 @@ function editor(editReply: (options: { content: string; allowedMentions: { parse
   return async (content) => {
     try {
       await editReply({ content, allowedMentions: { parse: [] } });
+      return true;
     } catch (error) {
       console.warn("cannot update a reply:", error);
+      return false;
     }
   };
 }

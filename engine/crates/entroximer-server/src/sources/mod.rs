@@ -53,10 +53,10 @@ pub enum Listing {
     /// engine's limit).
     #[default]
     Whole,
-    /// For a queue: a playlist's tracks from `start_index` (else from the one its link points at, else
-    /// from its first), at most `limit` of them (else the engine's limit); tracks before the
-    /// start are left out. A provider that can describe a single track without resolving it
-    /// does so.
+    /// For a queue: a playlist's tracks from `start_index` (else from the one its link points
+    /// at, else from its first), at most `limit` of them (else the engine's limit); tracks
+    /// before the start are left out. A provider that can describe a single track without
+    /// resolving it does so.
     Queue {
         start_index: Option<usize>,
         limit: Option<usize>,

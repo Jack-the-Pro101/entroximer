@@ -250,8 +250,8 @@ impl TrackCache {
         Ok(loaded)
     }
 
-    /// A query's track ready to play: a search's first result, or a playlist's track at `start_index`
-    /// (else the one its link points at).
+    /// A query's track ready to play: a search's first result, or a playlist's track at
+    /// `start_index` (else the one its link points at).
     pub async fn resolve_query(
         &self,
         ctx: &MediaContext,

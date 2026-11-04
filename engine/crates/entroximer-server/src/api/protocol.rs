@@ -350,11 +350,10 @@ pub struct GetQueue {
 #[serde(rename_all = "camelCase")]
 pub struct AddToQueue {
     pub guild_id: Snowflake,
-    /// Added in this order. A query is loaded in the background into the track it loads, the
-    /// tracks of a playlist (from `startIndex`), or a search's first result; one that finds nothing is
-    /// reported with `trackError` and removed.
-    /// Encoded tracks are queued as they are (all or nothing: an invalid one adds none) and
-    /// resolved when they come up.
+    /// Added in this order. A query is queued as a loading item, which loads into what it
+    /// finds: its track, a playlist's tracks (from `startIndex`), or a search's first result; one
+    /// that finds nothing is reported with `trackError` and removed. Encoded tracks are queued as
+    /// they are (all or nothing: an invalid one adds none) and resolved when they come up.
     pub tracks: Vec<TrackSelector>,
     /// Where the tracks go; the end if absent or past it.
     #[serde(default)]

@@ -126,6 +126,11 @@ impl<M: Keepable + Clone> LoopCache<M> {
         }
     }
 
+    /// Drops the track `key`, whoever holds it, e.g. after it failed to play from here.
+    pub(crate) fn discard(&self, key: &str) {
+        self.state().remove(key);
+    }
+
     /// The bytes the kept tracks take on disk.
     pub(crate) fn bytes(&self) -> u64 {
         self.state().bytes
@@ -264,6 +269,11 @@ mod tests {
         assert!(cache.get("one").is_none());
         assert_eq!(cache.bytes(), 0);
         cache.release("one", B);
+
+        assert!(cache.offer("two", &media(10), true, A));
+        cache.discard("two");
+        assert!(cache.get("two").is_none(), "dropped although held");
+        assert_eq!(cache.bytes(), 0);
 
         let off = LoopCache::new(0);
         assert!(!off.offer("one", &media(1), true, A), "0 keeps none");
