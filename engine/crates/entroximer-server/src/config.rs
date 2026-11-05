@@ -98,9 +98,27 @@ pub struct MediaConfig {
 }
 
 impl MediaConfig {
-    /// See [`Self::loop_cache_mb`].
+    /// See [`Self::memory_total_mb`].
+    pub fn memory_total_bytes(&self) -> u64 {
+        self.memory_total_mb * MIB
+    }
+
+    /// See [`Self::disk_total_mb`]; none without spill, which keeps nothing on disk.
+    pub fn disk_total_bytes(&self) -> u64 {
+        if self.no_spill {
+            0
+        } else {
+            self.disk_total_mb * MIB
+        }
+    }
+
+    /// See [`Self::loop_cache_mb`]; none without spill, as it only keeps what is on disk.
     pub fn loop_cache_bytes(&self) -> u64 {
-        self.loop_cache_mb * MIB
+        if self.no_spill {
+            0
+        } else {
+            self.loop_cache_mb * MIB
+        }
     }
 }
 
@@ -432,8 +450,8 @@ impl MediaContext {
         };
         let sources = Sources::new(&config.sources, &config.spotify, uploads.clone())?;
         let cache_budget = Arc::new(CacheBudget::new(
-            usize::try_from(config.memory_total_mb * MIB).unwrap_or(usize::MAX),
-            config.disk_total_mb * MIB,
+            usize::try_from(config.memory_total_bytes()).unwrap_or(usize::MAX),
+            config.disk_total_bytes(),
         ));
         Ok(Self {
             config,

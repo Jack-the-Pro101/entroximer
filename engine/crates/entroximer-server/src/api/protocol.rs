@@ -827,9 +827,19 @@ pub struct Stats {
     pub cache_memory_bytes: u64,
     #[ts(type = "number")]
     pub cache_disk_bytes: u64,
+    /// The most cached audio that all players may hold in RAM, in bytes.
+    #[ts(type = "number")]
+    pub cache_memory_limit_bytes: u64,
+    /// The most that all players may hold on disk, in bytes; 0 if the engine keeps cached audio
+    /// in RAM only.
+    #[ts(type = "number")]
+    pub cache_disk_limit_bytes: u64,
     /// Tracks of repeated queues kept on disk for their next round, in bytes.
     #[ts(type = "number")]
     pub loop_cache_bytes: u64,
+    /// The most that tracks kept for repeated queues may take on disk, in bytes; 0 keeps none.
+    #[ts(type = "number")]
+    pub loop_cache_limit_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, TS)]

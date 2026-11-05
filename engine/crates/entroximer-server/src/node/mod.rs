@@ -253,7 +253,10 @@ impl Node {
             memory_bytes: resident_memory().unwrap_or(0),
             cache_memory_bytes,
             cache_disk_bytes,
+            cache_memory_limit_bytes: self.ctx.config.memory_total_bytes(),
+            cache_disk_limit_bytes: self.ctx.config.disk_total_bytes(),
             loop_cache_bytes: self.loop_cache.bytes(),
+            loop_cache_limit_bytes: self.loop_cache.limit(),
         }
     }
 

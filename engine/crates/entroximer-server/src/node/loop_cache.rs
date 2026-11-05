@@ -136,6 +136,11 @@ impl<M: Keepable + Clone> LoopCache<M> {
         self.state().bytes
     }
 
+    /// The most bytes the kept tracks may take on disk.
+    pub(crate) fn limit(&self) -> u64 {
+        self.limit
+    }
+
     fn state(&self) -> MutexGuard<'_, State<M>> {
         self.state
             .lock()

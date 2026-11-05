@@ -349,6 +349,34 @@ async fn without_a_password_every_client_is_accepted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn stats_tell_the_caches_limits() {
+    let flags = [
+        "--memory-total-mb",
+        "64",
+        "--disk-total-mb",
+        "512",
+        "--loop-cache-mb",
+        "256",
+    ];
+    let engine = Engine::start_with(None, &flags).await;
+    let mut client = engine.connect(None, None).await.unwrap();
+    client.recv().await;
+    let stats = client.stats().await;
+    assert_eq!(stats["cacheMemoryLimitBytes"], 64 << 20);
+    assert_eq!(stats["cacheDiskLimitBytes"], 512 << 20);
+    assert_eq!(stats["loopCacheLimitBytes"], 256 << 20);
+    assert_eq!(stats["loopCacheBytes"], 0);
+
+    // without spill, nothing goes to disk
+    let engine = Engine::start_with(None, &["--no-spill", "--loop-cache-mb", "256"]).await;
+    let mut client = engine.connect(None, None).await.unwrap();
+    client.recv().await;
+    let stats = client.stats().await;
+    assert_eq!(stats["cacheDiskLimitBytes"], 0);
+    assert_eq!(stats["loopCacheLimitBytes"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn players_pause_while_their_client_is_away_and_continue_on_resume() {
     let engine = Engine::start(Some(PASSWORD)).await;
     let mut bot = engine.connect(Some(PASSWORD), None).await.unwrap();

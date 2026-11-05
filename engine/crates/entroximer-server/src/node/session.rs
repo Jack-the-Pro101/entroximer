@@ -263,7 +263,10 @@ mod tests {
             memory_bytes: 0,
             cache_memory_bytes: 0,
             cache_disk_bytes: 0,
+            cache_memory_limit_bytes: 0,
+            cache_disk_limit_bytes: 0,
             loop_cache_bytes: 0,
+            loop_cache_limit_bytes: 0,
         })
     }
 

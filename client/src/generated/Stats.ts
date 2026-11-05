@@ -11,6 +11,19 @@ memoryBytes: number,
  */
 cacheMemoryBytes: number, cacheDiskBytes: number, 
 /**
+ * The most cached audio that all players may hold in RAM, in bytes.
+ */
+cacheMemoryLimitBytes: number, 
+/**
+ * The most that all players may hold on disk, in bytes; 0 if the engine keeps cached audio
+ * in RAM only.
+ */
+cacheDiskLimitBytes: number, 
+/**
  * Tracks of repeated queues kept on disk for their next round, in bytes.
  */
-loopCacheBytes: number, };
+loopCacheBytes: number, 
+/**
+ * The most that tracks kept for repeated queues may take on disk, in bytes; 0 keeps none.
+ */
+loopCacheLimitBytes: number, };
