@@ -134,11 +134,13 @@ pub struct YtDlpConfig {
     pub program: String,
 
     /// What the managed install contains, as a pip requirement: pin with
-    /// `yt-dlp[default]==<version>`, or use `yt-dlp[default] @ git+https://...` for a test build.
+    /// `yt-dlp[default,curl-cffi]==<version>`, or use `yt-dlp[default,curl-cffi] @ git+https://...`
+    /// for a test build. `curl-cffi` lets yt-dlp impersonate a browser, which sites such as
+    /// Bandcamp demand when they answer with a bot check.
     #[arg(
         long = "ytdlp-package",
         env = "ENTROXIMER_YTDLP_PACKAGE",
-        default_value = "yt-dlp[default]"
+        default_value = "yt-dlp[default,curl-cffi]"
     )]
     pub package: String,
 

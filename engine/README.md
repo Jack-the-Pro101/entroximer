@@ -44,9 +44,12 @@ podman exec <container> entroximer ytdlp update
 ```
 
 Use `ENTROXIMER_YTDLP_NIGHTLY=true` to follow nightly builds, which get YouTube fixes first, pin
-with `ENTROXIMER_YTDLP_PACKAGE='yt-dlp[default]==<version>'`, or try a test build such as
-yt-dlp's SABR branch (PR #13515) with
-`ENTROXIMER_YTDLP_PACKAGE='yt-dlp[default] @ git+https://github.com/coletdjnz/yt-dlp-dev@feat/youtube/sabr'`.
+with `ENTROXIMER_YTDLP_PACKAGE='yt-dlp[default,curl-cffi]==<version>'`, or try a test build such
+as yt-dlp's SABR branch (PR #13515) with
+`ENTROXIMER_YTDLP_PACKAGE='yt-dlp[default,curl-cffi] @ git+https://github.com/coletdjnz/yt-dlp-dev@feat/youtube/sabr'`.
+Keep the `curl-cffi` extra in a requirement of your own: it lets yt-dlp impersonate a browser,
+which sites such as Bandcamp demand when they answer with a bot check ("no impersonate target is
+available" without it). A yt-dlp the engine does not manage needs `curl_cffi` installed too.
 yt-dlp keeps preferring `https` formats, so SABR is only used where YouTube offers nothing else.
 `ENTROXIMER_YTDLP_PLUGINS` installs yt-dlp plugins from PyPI alongside it; adding one triggers a
 fresh install on the next update check, or at once with `entroximer ytdlp update`.
@@ -476,7 +479,7 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_LOOP_CACHE_MB` | `1024` | Disk for repeated queues' tracks once they have played, besides `ENTROXIMER_DISK_TOTAL_MB`, so that their next round plays from disk; `0` keeps none (see [Queues](#queues)) |
 | `ENTROXIMER_DATA_DIR` | `$XDG_DATA_HOME/entroximer` | Persistent state: the managed yt-dlp and the YouTube session |
 | `ENTROXIMER_YTDLP_MANAGED` | off (on in the image) | Let the engine install and update yt-dlp |
-| `ENTROXIMER_YTDLP_PACKAGE` | `yt-dlp[default]` | pip requirement for the managed install |
+| `ENTROXIMER_YTDLP_PACKAGE` | `yt-dlp[default,curl-cffi]` | pip requirement for the managed install |
 | `ENTROXIMER_YTDLP_PLUGINS` | | More pip requirements for the managed install, whitespace separated, e.g. `bgutil-ytdlp-pot-provider==<version>` |
 | `ENTROXIMER_YTDLP_NIGHTLY` | off | Install nightly builds |
 | `ENTROXIMER_YTDLP_UPDATE_HOURS` | `24` | Update check interval; `0` installs once and never updates |

@@ -62,7 +62,8 @@ pub enum UpdateOutcome {
 pub struct ManagedYtDlp {
     root: PathBuf,
     python: String,
-    /// A pip requirement: `yt-dlp[default]`, a pinned version, or a git URL for a test build.
+    /// A pip requirement: `yt-dlp[default,curl-cffi]`, a pinned version, or a git URL for a test
+    /// build.
     package: String,
     /// More requirements installed alongside, e.g. yt-dlp plugins.
     plugins: Vec<String>,
