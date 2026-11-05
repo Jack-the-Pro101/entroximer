@@ -226,16 +226,21 @@ fn builtins() -> Vec<BuiltinPreset> {
     vec![
         preset(
             "bass_boost",
-            "More bass, as much as fits without clipping: the bass below the frequency is split off \
-             and raised, then compressed and lightly saturated, so that its peaks stay in range and \
-             it is heard even on small speakers. The rest is lowered by a quarter of the boost to \
-             make room, and a limiter catches what is left.",
+            "More bass without clipping: the bass below the frequency is split off and raised, \
+             then compressed and lightly saturated, so that its peaks stay in range and it is heard \
+             even on small speakers. The rest is lowered by a quarter of the boost to make room, \
+             and a limiter catches what is left.",
             [
-                param("gain_db", "Bass boost in dB.", 10.0, 0.0..=18.0),
+                param(
+                    "gain_db",
+                    "Bass boost in dB; 4 to 6 is a common boost, above 10 tires the ears.",
+                    6.0,
+                    0.0..=18.0,
+                ),
                 param(
                     "frequency",
                     "Everything below this frequency, in Hz, is boosted.",
-                    150.0,
+                    100.0,
                     40.0..=250.0,
                 ),
             ],

@@ -92,7 +92,7 @@ again. The helpers in `graph.ts` return new graphs and never change the one give
 ```ts
 await player.setPreset("bass_boost");
 // more bass from its compressor's makeup gain, then a small room after everything the preset does
-await player.setGraph(append(withParams(player.graph!, "bass", { makeup: 13 }), { type: "reverb", params: { mix: 0.2 } }));
+await player.setGraph(append(withParams(player.graph!, "bass", { makeup: 9 }), { type: "reverb", params: { mix: 0.2 } }));
 
 // or build one first, without applying it: a phone line, played a little faster
 const graph = withRate(await engine.buildPreset("telephone"), 1.15);
