@@ -15,7 +15,7 @@ use crate::api;
 use crate::config::{MediaContext, Secret};
 use crate::managed_ytdlp::YtDlpBinary;
 use crate::node::{Node, NodeSettings};
-use crate::youtube;
+use crate::youtube::{self, AuthPolicy, RotationSchedule, SessionState};
 
 pub const HEALTH_PATH: &str = "/health";
 
@@ -139,7 +139,7 @@ pub async fn run(args: ServeArgs, ctx: Arc<MediaContext>) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Imports a mounted cookie secret if it changed and keeps checking the session.
+/// Imports a mounted cookie secret if it changed, and keeps checking and rotating the session.
 fn start_youtube_session(ctx: &Arc<MediaContext>) {
     let config = &ctx.config.youtube;
     if let Some(path) = &config.cookies_file {
@@ -161,6 +161,55 @@ fn start_youtube_session(ctx: &Arc<MediaContext>) {
         let interval = Duration::from_secs(config.check_hours * 3600);
         tokio::spawn(youtube::maintain_session(Arc::clone(ctx), interval));
     }
+    start_rotation(ctx);
+}
+
+/// Rotates the session's cookies with headless Chromium, if rotation is on and a browser is found.
+fn start_rotation(ctx: &Arc<MediaContext>) {
+    let config = &ctx.config.youtube;
+    if config.rotate_hours == 0 || ctx.youtube.policy == AuthPolicy::Never {
+        return;
+    }
+    let Some(browser) = youtube::browser_config(ctx) else {
+        let configured = ctx
+            .config
+            .chromium
+            .as_deref()
+            .filter(|c| !c.trim().is_empty());
+        let signed_in = ctx
+            .youtube
+            .store
+            .status()
+            .is_ok_and(|s| s.state != SessionState::None);
+        if let Some(program) = configured {
+            tracing::warn!(
+                program,
+                "ENTROXIMER_CHROMIUM is not an executable; the YouTube session is not rotated"
+            );
+        } else if signed_in {
+            tracing::warn!(
+                "no Chromium found: the YouTube session's cookies are not rotated, so it may \
+                 expire sooner; install chromium or set ENTROXIMER_CHROMIUM"
+            );
+        } else {
+            tracing::info!("no Chromium found; a YouTube session would not be rotated");
+        }
+        return;
+    };
+    tracing::info!(
+        browser = %browser.program.display(),
+        every_hours = config.rotate_hours,
+        "rotating the YouTube session's cookies with headless Chromium"
+    );
+    let schedule = RotationSchedule {
+        interval: Duration::from_secs(config.rotate_hours * 3600),
+        max_refusals: config.rotate_max_refusals,
+    };
+    tokio::spawn(youtube::maintain_rotation(
+        Arc::clone(ctx),
+        browser,
+        schedule,
+    ));
 }
 
 /// Resolves on SIGINT, or SIGTERM as sent by `podman stop` / `docker stop`.

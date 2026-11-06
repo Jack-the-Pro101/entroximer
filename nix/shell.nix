@@ -14,6 +14,7 @@
   yt-dlp,
   deno,
   python3,
+  chromium,
   bun,
   nixfmt,
 }:
@@ -34,6 +35,7 @@ mkShell {
     yt-dlp
     deno
     python3
+    chromium
     # client and bot
     bun
     # flake

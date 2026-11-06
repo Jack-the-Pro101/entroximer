@@ -14,7 +14,8 @@
 //! Files, readable by the engine's user only:
 //! - `cookies.txt`: the session, in the Netscape format yt-dlp uses;
 //! - `session.json`: state and timestamps;
-//! - `session.lock`: serialises writers across processes, e.g. the server and the CLI.
+//! - `session.lock`: serialises writers across processes, e.g. the server and the CLI;
+//! - `rotation.lock`: held while a browser rotates the session, so only one does.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -25,12 +26,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
+use tokio::sync::broadcast;
 
 use super::cookies::{CookieJar, ParseError};
 
 const COOKIES_FILE: &str = "cookies.txt";
 const META_FILE: &str = "session.json";
 const LOCK_FILE: &str = "session.lock";
+const ROTATION_LOCK_FILE: &str = "rotation.lock";
 /// Sites whose cookies are kept on import; yt-dlp needs nothing else.
 const SITES: &[&str] = &["youtube.com", "google.com"];
 
@@ -66,6 +69,9 @@ pub struct SessionStatus {
     /// Unix seconds.
     #[ts(type = "number | null")]
     pub checked_at: Option<u64>,
+    /// When a browser last rotated the cookies, in Unix seconds.
+    #[ts(type = "number | null")]
+    pub rotated_at: Option<u64>,
     /// When the earliest cookie the session depends on expires, in Unix seconds.
     #[ts(type = "number | null")]
     pub expires_at: Option<u64>,
@@ -96,8 +102,19 @@ pub enum SessionError {
     Meta(#[source] serde_json::Error),
 }
 
+/// Where rotating the session stands, for scheduling the next rotation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RotationState {
+    pub generation: u64,
+    pub state: SessionState,
+    /// Unix seconds.
+    pub rotated_at: Option<u64>,
+    /// Times in a row YouTube refused to rotate the session.
+    pub refusals: u32,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 struct Meta {
     /// Increases whenever the session is replaced, so copies of an old one never merge back.
     generation: u64,
@@ -106,22 +123,41 @@ struct Meta {
     checked_at: Option<u64>,
     /// Fingerprint of the file last imported by `import_file_if_changed`.
     source_fingerprint: Option<u64>,
+    rotated_at: Option<u64>,
+    /// Refusals in a row; see [`RotationState::refusals`].
+    rotation_refusals: u32,
 }
 
 #[derive(Debug)]
 pub struct SessionStore {
     dir: PathBuf,
+    /// Changes of the state made by this process.
+    changes: broadcast::Sender<SessionState>,
 }
 
 impl SessionStore {
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self {
+            dir,
+            changes: broadcast::Sender::new(16),
+        }
+    }
+
+    /// Changes of the session's state made by this process: imports, removals, and what using,
+    /// checking or rotating the session showed.
+    pub fn subscribe(&self) -> broadcast::Receiver<SessionState> {
+        self.changes.subscribe()
     }
 
     /// Replaces the session with the cookies in `text`.
     pub fn import(&self, text: &str) -> Result<ImportReport, SessionError> {
         let _lock = self.lock()?;
         self.import_locked(text, None)
+    }
+
+    fn changed(&self, state: SessionState) {
+        // nobody listening (e.g. in the CLI) is fine
+        let _ = self.changes.send(state);
     }
 
     /// Imports `path` unless its contents are what was imported from it last time, so that a
@@ -154,6 +190,9 @@ impl SessionStore {
             source_fingerprint: meta.source_fingerprint,
             ..Meta::default()
         })?;
+        if meta.state != SessionState::None {
+            self.changed(SessionState::None);
+        }
         Ok(existed)
     }
 
@@ -165,8 +204,65 @@ impl SessionStore {
             state: meta.state,
             imported_at: meta.imported_at,
             checked_at: meta.checked_at,
+            rotated_at: meta.rotated_at,
             expires_at,
         })
+    }
+
+    pub fn rotation(&self) -> Result<RotationState, SessionError> {
+        let _lock = self.lock()?;
+        let meta = self.read_meta()?;
+        Ok(RotationState {
+            generation: meta.generation,
+            state: meta.state,
+            rotated_at: meta.rotated_at,
+            refusals: meta.rotation_refusals,
+        })
+    }
+
+    /// Records that a browser rotated the session (of `generation`); returns its state, or
+    /// `None` when the session has been replaced since.
+    pub fn rotated(&self, generation: u64) -> Result<Option<SessionState>, SessionError> {
+        self.update_rotation(generation, |meta| {
+            meta.rotated_at = Some(unix_now());
+            meta.rotation_refusals = 0;
+        })
+        .map(|meta| meta.map(|m| m.state))
+    }
+
+    /// Records that YouTube refused to rotate the session (of `generation`); returns how many
+    /// times in a row it has, or `None` when the session has been replaced since.
+    pub fn refused(&self, generation: u64) -> Result<Option<u32>, SessionError> {
+        self.update_rotation(generation, |meta| {
+            meta.rotation_refusals = meta.rotation_refusals.saturating_add(1);
+        })
+        .map(|meta| meta.map(|m| m.rotation_refusals))
+    }
+
+    fn update_rotation(
+        &self,
+        generation: u64,
+        update: impl FnOnce(&mut Meta),
+    ) -> Result<Option<Meta>, SessionError> {
+        let _lock = self.lock()?;
+        let mut meta = self.read_meta()?;
+        if meta.generation != generation || meta.state == SessionState::None {
+            return Ok(None);
+        }
+        update(&mut meta);
+        self.write_meta(&meta)?;
+        Ok(Some(meta))
+    }
+
+    /// The right to rotate the session, held until the file is dropped; `None` while another
+    /// process (or task) rotates it.
+    pub fn try_lock_rotation(&self) -> Result<Option<File>, SessionError> {
+        let file = self.lock_file(ROTATION_LOCK_FILE)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(file)),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(e)) => Err(io_error(&self.path(ROTATION_LOCK_FILE))(e)),
+        }
     }
 
     /// Records what using or checking the session (of `generation`) showed. Ignored when the
@@ -187,7 +283,11 @@ impl SessionStore {
         }
         let previous = std::mem::replace(&mut meta.state, state);
         self.write_meta(&meta)?;
-        Ok((previous != state).then_some(previous))
+        if previous == state {
+            return Ok(None);
+        }
+        self.changed(state);
+        Ok(Some(previous))
     }
 
     /// A private copy of the session for one yt-dlp process, created in `work_dir`; `None`
@@ -256,7 +356,10 @@ impl SessionStore {
             // a manual import keeps the secret's fingerprint: the secret only wins again once
             // its contents change
             source_fingerprint: fingerprint.or(previous.source_fingerprint),
+            rotated_at: None,
+            rotation_refusals: 0,
         })?;
+        self.changed(SessionState::Unverified);
         Ok(ImportReport {
             cookies: jar.len(),
             dropped,
@@ -268,21 +371,25 @@ impl SessionStore {
     }
 
     fn lock(&self) -> Result<File, SessionError> {
+        let file = self.lock_file(LOCK_FILE)?;
+        file.lock().map_err(io_error(&self.path(LOCK_FILE)))?;
+        Ok(file)
+    }
+
+    fn lock_file(&self, name: &str) -> Result<File, SessionError> {
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&self.dir)
             .map_err(io_error(&self.dir))?;
-        let path = self.path(LOCK_FILE);
-        let file = OpenOptions::new()
+        let path = self.path(name);
+        OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .mode(0o600)
             .open(&path)
-            .map_err(io_error(&path))?;
-        file.lock().map_err(io_error(&path))?;
-        Ok(file)
+            .map_err(io_error(&path))
     }
 
     fn read_meta(&self) -> Result<Meta, SessionError> {
@@ -366,6 +473,25 @@ impl SessionCopy {
         }
     }
 
+    /// The session's cookies as they were copied.
+    pub fn base(&self) -> &CookieJar {
+        &self.base
+    }
+
+    /// Writes into the copy what changed from `before` to `after` (e.g. what a browser did with
+    /// the cookies it took), leaving out other sites. Merged into the session when the copy is
+    /// dropped, like yt-dlp's changes; cookies missing from `before` (ones the browser would not
+    /// take) are left as they are.
+    pub fn absorb(&self, before: &CookieJar, after: &CookieJar) -> Result<(), SessionError> {
+        let mut before = before.clone();
+        let mut after = after.clone();
+        before.retain_sites(SITES);
+        after.retain_sites(SITES);
+        let mut jar = self.base.clone();
+        jar.apply(&after.changes_since(&before));
+        fs::write(self.path(), jar.to_string()).map_err(io_error(self.path()))
+    }
+
     /// Applies what yt-dlp changed in the copy to the stored session; returns how many cookies
     /// changed.
     fn merge_back(&self) -> Result<usize, SessionError> {
@@ -396,6 +522,7 @@ impl SessionCopy {
         if !jar.has_youtube_login() && meta.state.usable() {
             meta.state = SessionState::Expired;
             self.store.write_meta(&meta)?;
+            self.store.changed(SessionState::Expired);
             tracing::warn!("YouTube ended the session; import fresh cookies");
         }
         Ok(changes.len())
@@ -592,6 +719,115 @@ mod tests {
 
         fs::write(&secret, SIGNED_IN.replace("login-secret", "new-secret")).unwrap();
         assert!(store.import_file_if_changed(&secret).unwrap().is_some());
+    }
+
+    #[test]
+    fn browser_rotations_merge_only_what_the_browser_changed() {
+        let (dir, store) = store();
+        store.import(SIGNED_IN).unwrap();
+        let stored = || fs::read_to_string(store.path(COOKIES_FILE)).unwrap();
+
+        // a copy dropped untouched (a refused rotation) leaves the session as it was
+        let before_refusal = stored();
+        drop(store.checkout_any(dir.path()).unwrap().unwrap());
+        assert_eq!(stored(), before_refusal);
+
+        let copy = store.checkout_any(dir.path()).unwrap().unwrap();
+        // the browser would not take NID, rotated a token, and set cookies of its own
+        let taken: CookieJar = SIGNED_IN
+            .lines()
+            .filter(|l| !l.contains("\tNID\t"))
+            .map(|l| format!("{l}\n"))
+            .collect::<String>()
+            .parse()
+            .unwrap();
+        let after: CookieJar = format!(
+            "{}.youtube.com\tTRUE\t/\tTRUE\t1830000000\tYSC\tnew\n\
+             .example.com\tTRUE\t/\tTRUE\t1830000000\ttracker\tad\n",
+            taken.to_string().replace("psid-secret", "rotated")
+        )
+        .parse()
+        .unwrap();
+        copy.absorb(&taken, &after).unwrap();
+        drop(copy);
+
+        let merged = stored();
+        assert!(merged.contains("rotated") && !merged.contains("psid-secret"));
+        assert!(merged.contains("\tYSC\tnew"));
+        assert!(
+            merged.contains("\tNID\t"),
+            "cookies the browser did not take are kept"
+        );
+        assert!(!merged.contains("example.com"), "other sites stay out");
+    }
+
+    #[test]
+    fn metadata_from_before_rotation_still_reads() {
+        let (_dir, store) = store();
+        store.import(SIGNED_IN).unwrap();
+        fs::write(
+            store.path(META_FILE),
+            r#"{"generation": 4, "state": "valid", "importedAt": 1, "checkedAt": 2}"#,
+        )
+        .unwrap();
+        let rotation = store.rotation().unwrap();
+        assert_eq!(
+            rotation,
+            RotationState {
+                generation: 4,
+                state: SessionState::Valid,
+                rotated_at: None,
+                refusals: 0,
+            }
+        );
+        assert_eq!(store.refused(4).unwrap(), Some(1));
+        assert_eq!(
+            store.refused(3).unwrap(),
+            None,
+            "an older session's refusal"
+        );
+        assert_eq!(store.rotated(4).unwrap(), Some(SessionState::Valid));
+        let rotation = store.rotation().unwrap();
+        assert_eq!(rotation.refusals, 0);
+        assert!(rotation.rotated_at.is_some());
+
+        store.import(SIGNED_IN).unwrap();
+        let fresh = store.rotation().unwrap();
+        assert_eq!((fresh.rotated_at, fresh.refusals), (None, 0));
+    }
+
+    #[test]
+    fn changes_are_broadcast() {
+        let (dir, store) = store();
+        let mut changes = store.subscribe();
+        store.import(SIGNED_IN).unwrap();
+        assert_eq!(changes.try_recv().unwrap(), SessionState::Unverified);
+
+        // YouTube signing the session out during a yt-dlp run
+        let copy = store.checkout(dir.path()).unwrap().unwrap();
+        let signed_out: String = fs::read_to_string(copy.path())
+            .unwrap()
+            .lines()
+            .filter(|l| !l.contains("LOGIN_INFO"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        fs::write(copy.path(), signed_out).unwrap();
+        drop(copy);
+        assert_eq!(changes.try_recv().unwrap(), SessionState::Expired);
+
+        store.remove().unwrap();
+        assert_eq!(changes.try_recv().unwrap(), SessionState::None);
+        assert!(changes.try_recv().is_err());
+    }
+
+    #[test]
+    fn one_rotation_at_a_time() {
+        let (_dir, store) = store();
+        let held = store.try_lock_rotation().unwrap();
+        assert!(held.is_some());
+        assert!(store.try_lock_rotation().unwrap().is_none());
+        drop(held);
+        assert!(store.try_lock_rotation().unwrap().is_some());
     }
 
     #[test]

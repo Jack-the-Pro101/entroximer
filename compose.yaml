@@ -4,6 +4,8 @@ services:
     build:
       context: ./engine
       dockerfile: Containerfile
+      # args:
+      #   WITH_CHROMIUM: "false"                    # leave Chromium out: no cookie rotation
     image: localhost/entroximer-engine
     restart: unless-stopped
     ports:
@@ -22,6 +24,9 @@ services:
       # ENTROXIMER_SPOTIFY_CLIENT_SECRET: ${ENTROXIMER_SPOTIFY_CLIENT_SECRET:-}
       # YouTube session for age-restricted videos; or run `entroximer youtube cookies import -`
       # ENTROXIMER_YOUTUBE_COOKIES_FILE: /run/secrets/youtube-cookies
+      # Headless Chromium rotates the session's cookies, which keeps it alive:
+      # ENTROXIMER_YOUTUBE_ROTATE_HOURS: "6"        # 0 = never rotate
+      # ENTROXIMER_CHROMIUM_NO_SANDBOX: "true"      # if Chromium's sandbox fails (e.g. Docker)
       # A bot's own sounds, played by their path: mount the same directory at the same path into
       # the bot's container too (see the volume below)
       # ENTROXIMER_LOCAL_FILES_DIR: /sounds

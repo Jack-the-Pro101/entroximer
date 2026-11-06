@@ -12,7 +12,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use clap::Subcommand;
 
-use super::{CheckOutcome, SessionState, check_session};
+use super::{
+    CheckOutcome, RotationOutcome, RotationReport, SessionState, browser_config, check_session,
+    rotate_session,
+};
 use crate::config::MediaContext;
 
 #[derive(Debug, Subcommand)]
@@ -39,6 +42,9 @@ pub enum CookiesCommand {
     Status,
     /// Check now whether YouTube still accepts the session.
     Check,
+    /// Rotate the session's cookies now with headless Chromium, as the engine does every few
+    /// hours, which keeps the session alive.
+    Rotate,
     /// Forget the session.
     Remove,
 }
@@ -74,11 +80,23 @@ pub async fn run(command: YouTubeCommand, ctx: &MediaContext) -> anyhow::Result<
                 None if status.state != SessionState::None => println!("last checked: never"),
                 None => {}
             }
+            match status.rotated_at {
+                Some(at) => println!("last rotated: {}", relative(at, now)),
+                None if status.state != SessionState::None => println!("last rotated: never"),
+                None => {}
+            }
             if let Some(at) = status.expires_at {
                 println!("cookies expire: {}", relative(at, now));
             }
         }
         CookiesCommand::Check => print_check(check_session(ctx, true).await?),
+        CookiesCommand::Rotate => {
+            let browser = browser_config(ctx).context(
+                "no Chromium found; install chromium (or chromium-headless-shell) or set \
+                 ENTROXIMER_CHROMIUM",
+            )?;
+            print_rotation(&rotate_session(ctx, &browser).await?);
+        }
         CookiesCommand::Remove => {
             if store.remove()? {
                 println!("signed out of YouTube");
@@ -112,6 +130,37 @@ fn print_check(outcome: CheckOutcome) {
         ),
         CheckOutcome::Inconclusive(reason) => {
             println!("could not check the session, it is unchanged: {reason}");
+        }
+    }
+}
+
+fn print_rotation(report: &RotationReport) {
+    match &report.outcome {
+        RotationOutcome::NoSession => println!("there is no YouTube session to rotate"),
+        RotationOutcome::Rotated { tokens_changed } => {
+            println!(
+                "rotated the session{}",
+                if *tokens_changed {
+                    ": Google issued new tokens"
+                } else {
+                    "; its tokens were still fresh"
+                }
+            );
+            if report.revived {
+                println!("it had expired and works again");
+            }
+        }
+        RotationOutcome::SignedOut(reason) if report.gave_up => println!(
+            "YouTube refused the session ({reason}), {} times in a row: it has expired, import \
+             fresh cookies",
+            report.refusals
+        ),
+        RotationOutcome::SignedOut(reason) => println!(
+            "YouTube refused the session ({reason}); refusals in a row: {}",
+            report.refusals
+        ),
+        RotationOutcome::Inconclusive(reason) => {
+            println!("could not rotate the session, it is unchanged: {reason}");
         }
     }
 }

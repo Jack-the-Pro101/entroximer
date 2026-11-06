@@ -14,6 +14,10 @@ importedAt: number | null,
  */
 checkedAt: number | null, 
 /**
+ * When a browser last rotated the cookies, in Unix seconds.
+ */
+rotatedAt: number | null, 
+/**
  * When the earliest cookie the session depends on expires, in Unix seconds.
  */
 expiresAt: number | null, };

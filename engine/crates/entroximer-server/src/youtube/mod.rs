@@ -3,10 +3,14 @@
 //! YouTube no longer accepts OAuth from yt-dlp, so the session is a set of browser cookies,
 //! exported from a private window and imported with `entroximer youtube cookies import`. Using
 //! an account risks YouTube restricting it, so by default ([`AuthPolicy::Fallback`]) every video
-//! is tried anonymously first and the session is only sent when YouTube demands it.
+//! is tried anonymously first and the session is only sent when YouTube demands it. Headless
+//! Chromium keeps the session alive by rotating its cookies ([`rotation`]).
 
+mod browser;
+mod cdp;
 pub mod command;
 pub mod cookies;
+pub mod rotation;
 pub mod session;
 
 use std::path::PathBuf;
@@ -18,8 +22,14 @@ use entroximer_core::error::display_chain;
 use reqwest::Url;
 use tokio::sync::{Notify, broadcast};
 
+pub use browser::{BrowserConfig, find_chromium};
+pub use rotation::{
+    RotationOutcome, RotationReport, RotationSchedule, browser_config, maintain_rotation,
+    rotate_session,
+};
 pub use session::{
-    ImportReport, Session, SessionCopy, SessionError, SessionState, SessionStatus, SessionStore,
+    ImportReport, RotationState, Session, SessionCopy, SessionError, SessionState, SessionStatus,
+    SessionStore,
 };
 
 use crate::config::MediaContext;
@@ -82,7 +92,6 @@ pub struct YouTube {
     /// Queries that needed an account recently, so repeat plays skip the anonymous attempt.
     recently_restricted: Expiring<String, ()>,
     check_requested: Notify,
-    changes: broadcast::Sender<SessionState>,
     /// What everything sent to YouTube goes through, if set.
     proxy: Option<Url>,
     /// For the engine's own requests to YouTube: through `proxy`, if set.
@@ -114,7 +123,6 @@ impl YouTube {
                 Self::REMEMBERED_RESTRICTED,
             ),
             check_requested: Notify::new(),
-            changes: broadcast::Sender::new(16),
             proxy,
             client,
         })
@@ -132,7 +140,7 @@ impl YouTube {
 
     /// Changes of the session's state observed by this process.
     pub fn subscribe(&self) -> broadcast::Receiver<SessionState> {
-        self.changes.subscribe()
+        self.store.subscribe()
     }
 
     /// Whether the first attempt at `query` should already be signed in.
@@ -182,8 +190,6 @@ impl YouTube {
     fn set_state(&self, generation: u64, state: SessionState, checked: bool) {
         match self.store.record(generation, state, checked) {
             Ok(Some(previous)) => {
-                // nobody listening (e.g. in the CLI) is fine
-                let _ = self.changes.send(state);
                 if state == SessionState::Expired {
                     tracing::warn!(
                         ?previous,

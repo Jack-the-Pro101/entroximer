@@ -20,6 +20,8 @@ const SESSION_COOKIES: &[&str] = &[
     "SAPISID",
     "__Secure-3PAPISID",
 ];
+/// Short-lived tokens bound to the session, which signed-in pages have Google replace.
+const ROTATING_COOKIES: &[&str] = &["__Secure-1PSIDTS", "__Secure-3PSIDTS"];
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Cookie {
@@ -92,6 +94,14 @@ pub struct ParseError {
 }
 
 impl CookieJar {
+    pub fn from_cookies(cookies: Vec<Cookie>) -> Self {
+        Self { cookies }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Cookie> {
+        self.cookies.iter()
+    }
+
     pub fn len(&self) -> usize {
         self.cookies.len()
     }
@@ -108,6 +118,19 @@ impl CookieJar {
                 .any(|c| c.name == name && c.domain_is("youtube.com"))
         };
         youtube(LOGIN_COOKIE) && SAPISID_COOKIES.iter().any(|name| youtube(name))
+    }
+
+    /// The values of the `__Secure-*PSIDTS` cookies, which Google replaces when it rotates a
+    /// session; to tell whether it did.
+    pub fn rotating_tokens(&self) -> Vec<(&str, &str, &str)> {
+        let mut tokens: Vec<_> = self
+            .cookies
+            .iter()
+            .filter(|c| ROTATING_COOKIES.contains(&c.name.as_str()))
+            .map(|c| (c.domain.as_str(), c.name.as_str(), c.value.as_str()))
+            .collect();
+        tokens.sort_unstable();
+        tokens
     }
 
     /// The earliest expiry among the cookies the session depends on, in Unix seconds.

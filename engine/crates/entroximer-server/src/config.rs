@@ -55,6 +55,17 @@ pub struct MediaConfig {
     #[arg(long, env = "ENTROXIMER_FFPROBE", default_value = "ffprobe")]
     pub ffprobe: String,
 
+    /// Chromium (or Chrome) executable, which rotates the YouTube session's cookies. Defaults to
+    /// the first of `chromium-headless-shell`, `chromium`, `chromium-browser`, `google-chrome`
+    /// found on `PATH`; without one, the session is not rotated.
+    #[arg(long, env = "ENTROXIMER_CHROMIUM")]
+    pub chromium: Option<String>,
+
+    /// Run Chromium without its sandbox, which needs user namespaces that rootless containers
+    /// usually lack. It only ever visits YouTube.
+    #[arg(long, env = "ENTROXIMER_CHROMIUM_NO_SANDBOX", value_parser = BoolishValueParser::new())]
+    pub chromium_no_sandbox: bool,
+
     /// Directory for the packet cache and in-progress downloads. Put it on fast disk, never on
     /// a RAM-backed tmpfs. Defaults to `entroximer` in the system temp directory.
     #[arg(long, env = "ENTROXIMER_CACHE_DIR")]
@@ -331,6 +342,26 @@ pub struct YouTubeConfig {
         default_value_t = 12
     )]
     pub check_hours: u64,
+
+    /// Hours between rotations of the session's cookies with headless Chromium, which keeps the
+    /// session alive; it is also rotated as soon as it is found expired. 0 disables rotation.
+    #[arg(
+        long = "youtube-rotate-hours",
+        env = "ENTROXIMER_YOUTUBE_ROTATE_HOURS",
+        default_value_t = 6
+    )]
+    pub rotate_hours: u64,
+
+    /// Refusals by YouTube in a row (the session comes back signed out) after which rotation
+    /// gives up and the session is expired until fresh cookies are imported. Failures on the
+    /// engine's side, such as no network, never count.
+    #[arg(
+        long = "youtube-rotate-max-refusals",
+        env = "ENTROXIMER_YOUTUBE_ROTATE_MAX_REFUSALS",
+        default_value_t = 3,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    pub rotate_max_refusals: u32,
 
     /// An age-restricted video that only loads when signed in, used for those checks.
     #[arg(

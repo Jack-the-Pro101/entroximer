@@ -871,6 +871,7 @@ dependencies = [
  "fastrand",
  "futures-util",
  "hound",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",

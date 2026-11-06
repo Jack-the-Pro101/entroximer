@@ -387,7 +387,8 @@ makes it worse.
 
 Plain HTTP serves `/health`, `GET /v1/info`, `GET /v1/artwork/<key>` (embedded covers, see
 [Artwork](#artwork)), `POST /v1/uploads` and `DELETE /v1/uploads/<id>` (see [Uploads](#uploads))
-and `GET|PUT|DELETE /v1/youtube/session` (the cookies.txt as the `PUT` body). The protocol's types are in
+`GET|PUT|DELETE /v1/youtube/session` (the cookies.txt as the `PUT` body) and
+`POST /v1/youtube/session/rotate` (see [Keeping the session alive](#keeping-the-session-alive)). The protocol's types are in
 `crates/entroximer-server/src/api/protocol.rs`; `cargo test` exports them as TypeScript to
 `client/src/generated`.
 
@@ -398,7 +399,8 @@ accepts OAuth from yt-dlp, so the engine uses the cookies of a browser session:
 
 1. In a private browser window, sign into a dedicated adult YouTube account (YouTube may restrict
    accounts used this way), open `https://www.youtube.com/robots.txt`, and export the cookies with
-   a cookies.txt extension. Close the window without signing out, so YouTube does not rotate them.
+   a cookies.txt extension. Close the window without signing out: from now on the engine must be
+   the session's only user, since two browsers rotating one session look like a stolen one.
 2. Give them to the engine, from anywhere that can reach it:
 
    ```sh
@@ -411,8 +413,33 @@ every video is tried anonymously first and the session is only sent when YouTube
 which keeps the account out of most traffic. Cookies YouTube rotates are merged back after every
 yt-dlp run, and the session is re-checked every 12 hours; when YouTube stops accepting it the
 engine logs a warning and tracks needing it fail with instructions until fresh cookies are
-imported, or a later check finds it accepted again. `entroximer youtube cookies status|check|remove` manage it; a cookie file mounted as a
+imported, or a later check finds it accepted again. `entroximer youtube cookies status|check|rotate|remove` manage it; a cookie file mounted as a
 secret (`ENTROXIMER_YOUTUBE_COOKIES_FILE`) is imported whenever it changes.
+
+### Keeping the session alive
+
+Google ties a signed-in session to short-lived tokens (`__Secure-*PSIDTS`), which signed-in pages
+have it replace from time to time, and it ends sessions whose tokens go stale. So the engine
+rotates the session's cookies with headless Chromium: every 6 hours
+(`ENTROXIMER_YOUTUBE_ROTATE_HOURS`), soon after an import, and as soon as the session is found
+expired. Each rotation loads YouTube's front page with the session for about 20 seconds and keeps
+the cookies YouTube sets; images, media, fonts, stylesheets, telemetry and ads are blocked. Chromium
+runs only for the visit; it peaks at about 370 MB with the image's `chromium-headless-shell`, and
+around 600 MB with a full Chromium. It goes through `ENTROXIMER_YOUTUBE_PROXY` if one is set, so
+YouTube always sees the session from one address.
+
+A rotation only counts against the session when YouTube refuses it: the page comes back signed
+out, or Google rejects the rotation. After `ENTROXIMER_YOUTUBE_ROTATE_MAX_REFUSALS` (3) refusals in
+a row, 5 and 30 minutes apart, rotation gives up and the session is expired until fresh cookies
+are imported. Failures on the engine's side (no network, the browser crashed) are retried, waiting
+longer each time, for as long as they last; a warning every five in a row says if it keeps
+failing, which may mean YouTube changed its page. `entroximer youtube cookies rotate` (or
+`POST /v1/youtube/session/rotate`) rotates now, and `status` shows the last rotation.
+
+The browser is the first of `chromium-headless-shell`, `chromium`, `chromium-browser` and
+`google-chrome` found on `PATH`, or `ENTROXIMER_CHROMIUM`; without one, the session is not rotated.
+Chromium's sandbox needs user namespaces, which it gets under rootless Podman; where it cannot
+start (e.g. Docker's default seccomp profile), set `ENTROXIMER_CHROMIUM_NO_SANDBOX=true`.
 
 ## How seeking works
 
@@ -490,6 +517,8 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_YTDLP_NIGHTLY` | off | Install nightly builds |
 | `ENTROXIMER_YTDLP_UPDATE_HOURS` | `24` | Update check interval; `0` installs once and never updates |
 | `ENTROXIMER_YTDLP`, `ENTROXIMER_FFMPEG`, `ENTROXIMER_FFPROBE` | `yt-dlp`, `ffmpeg`, `ffprobe` | Executables (`ENTROXIMER_YTDLP` only when not managed) |
+| `ENTROXIMER_CHROMIUM` | first found on `PATH` | Chromium executable that rotates the YouTube session's cookies |
+| `ENTROXIMER_CHROMIUM_NO_SANDBOX` | off | Run Chromium without its sandbox, where it cannot start with it |
 | `ENTROXIMER_PYTHON` | `python3` | Python used for the managed install |
 | `ENTROXIMER_SPOTIFY_CLIENT_ID` / `ENTROXIMER_SPOTIFY_CLIENT_SECRET` | none | A Spotify app's credentials, which enable Spotify links and `spsearch` |
 | `ENTROXIMER_SPOTIFY_MARKET` | `US` | Country whose Spotify catalog is read |
@@ -498,6 +527,8 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_YOUTUBE_COOKIES_FILE` | | cookies.txt imported whenever it changes, e.g. a secret |
 | `ENTROXIMER_YOUTUBE_CHECK_HOURS` | `12` | Session check interval; `0` disables it |
 | `ENTROXIMER_YOUTUBE_CHECK_VIDEO` | an age-restricted video | Video used to check the session |
+| `ENTROXIMER_YOUTUBE_ROTATE_HOURS` | `6` | Interval between rotations of the session's cookies with Chromium; `0` disables them |
+| `ENTROXIMER_YOUTUBE_ROTATE_MAX_REFUSALS` | `3` | Refusals by YouTube in a row after which rotation gives up and the session expires |
 | `ENTROXIMER_YOUTUBE_PROXY` | | HTTP proxy for everything sent to YouTube; other sites go direct |
 | `ENTROXIMER_YTDLP_ARGS` | | Extra yt-dlp arguments, e.g. `--extractor-args youtube:formats=duplicate` |
 | `ENTROXIMER_YTDLP_MAX_RUNS` | `2` | yt-dlp runs at once, counted separately for searches; downloads do not count |
@@ -520,6 +551,8 @@ cleanly on `SIGTERM`, and has a health check (`entroximer healthcheck`). It has 
 `/var/lib/entroximer` holds the managed yt-dlp and the YouTube session, which therefore survive
 restarts and image upgrades, and `/var/cache/entroximer` holds the packet cache and belongs on fast disk. On SELinux
 hosts add `:Z` to bind mounts. yt-dlp is not in the image, so YouTube fixes never need a rebuild.
+Chromium's headless shell is, for [rotating the session's cookies](#keeping-the-session-alive);
+`--build-arg WITH_CHROMIUM=false` leaves it out, about 315 MB, and with it the rotation.
 
 When the bot runs beside the engine, e.g. in the same pod, its sounds can be a volume mounted
 into both containers at the same path, read-only in the engine's, with

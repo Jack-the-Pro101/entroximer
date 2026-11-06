@@ -1,4 +1,4 @@
-# The `entroximer` engine binary, with the tools it runs (ffmpeg, yt-dlp, Deno) on its PATH.
+# The `entroximer` engine binary, with the tools it runs (ffmpeg, yt-dlp, Deno, Chromium) on its PATH.
 {
   lib,
   rustPlatform,
@@ -10,6 +10,7 @@
   yt-dlp,
   deno,
   python3,
+  chromium,
 }:
 
 let
@@ -18,11 +19,13 @@ let
   # - ffmpeg seeks and remuxes media
   # - yt-dlp resolves and downloads tracks, and needs a JavaScript runtime for YouTube
   # - Python lets the engine manage its own yt-dlp (`--ytdlp-managed`)
+  # - Chromium keeps the YouTube session alive by rotating its cookies
   runtimeTools = [
     ffmpeg-headless
     yt-dlp
     deno
     python3
+    chromium
   ];
 in
 rustPlatform.buildRustPackage {

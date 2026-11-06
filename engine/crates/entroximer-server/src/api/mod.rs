@@ -26,7 +26,9 @@ use crate::node::Node;
 use crate::node::tracks::load_error;
 use crate::serve::HEALTH_PATH;
 use crate::sources::artwork::{COVER_PATH, CoverError};
-use crate::youtube::{CheckOutcome, SessionStatus, check_session};
+use crate::youtube::{
+    CheckOutcome, RotationOutcome, SessionStatus, browser_config, check_session, rotate_session,
+};
 use protocol::{ApiError, ErrorCode};
 
 pub fn router(node: Arc<Node>) -> Router {
@@ -45,6 +47,7 @@ pub fn router(node: Arc<Node>) -> Router {
                 .put(import_session)
                 .delete(remove_session),
         )
+        .route("/v1/youtube/session/rotate", post(rotate))
         .with_state(node)
 }
 
@@ -205,6 +208,60 @@ async fn import_session(
         dropped: report.dropped,
         accepted,
         check_error,
+    }))
+}
+
+/// Result of `POST /v1/youtube/session/rotate`.
+#[derive(Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SessionRotation {
+    pub outcome: RotationResult,
+    /// Why YouTube refused, or why nothing could be told.
+    pub reason: Option<String>,
+    /// Whether Google issued new tokens, when rotated.
+    pub tokens_changed: Option<bool>,
+    /// YouTube's refusals in a row.
+    pub refusals: u32,
+    /// Rotation gave up after this refusal: the session has expired.
+    pub gave_up: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum RotationResult {
+    NoSession,
+    Rotated,
+    /// YouTube refused the session.
+    Refused,
+    /// The session is unchanged, e.g. because the browser failed.
+    Inconclusive,
+}
+
+/// Rotates the session's cookies now with headless Chromium.
+async fn rotate(
+    _: Authorized,
+    State(node): State<Arc<Node>>,
+) -> Result<Json<SessionRotation>, HttpError> {
+    let browser = browser_config(&node.ctx)
+        .ok_or_else(|| HttpError::unavailable("the engine has no Chromium to rotate with"))?;
+    let report = rotate_session(&node.ctx, &browser)
+        .await
+        .map_err(|e| HttpError::internal(display_chain(&e)))?;
+    let (outcome, reason, tokens_changed) = match report.outcome {
+        RotationOutcome::NoSession => (RotationResult::NoSession, None, None),
+        RotationOutcome::Rotated { tokens_changed } => {
+            (RotationResult::Rotated, None, Some(tokens_changed))
+        }
+        RotationOutcome::SignedOut(reason) => (RotationResult::Refused, Some(reason), None),
+        RotationOutcome::Inconclusive(reason) => (RotationResult::Inconclusive, Some(reason), None),
+    };
+    Ok(Json(SessionRotation {
+        outcome,
+        reason,
+        tokens_changed,
+        refusals: report.refusals,
+        gave_up: report.gave_up,
     }))
 }
 

@@ -16,11 +16,16 @@
 # yt-dlp is not part of the image: the engine installs it into the data volume on first start
 # and keeps it updated (ENTROXIMER_YTDLP_* settings), so YouTube fixes never need a rebuild.
 # Update on demand with `podman exec <container> entroximer ytdlp update`.
+#
+# Chromium's headless shell is, unless built with `--build-arg WITH_CHROMIUM=false`: it rotates
+# the YouTube session's cookies, which keeps the session alive. Rebuild for its security fixes.
 
 ARG RUST_VERSION=1.99
 ARG DEBIAN_RELEASE=trixie
 # yt-dlp needs a JavaScript runtime to solve YouTube's player challenges
 ARG DENO_VERSION=2.9.8
+# false leaves Chromium out (about 315 MB), which turns cookie rotation off
+ARG WITH_CHROMIUM=true
 
 # Runs on the building machine's CPU and cross-compiles for the image's when they differ: Rust
 # compiled under emulation would take hours
@@ -66,10 +71,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM docker.io/denoland/deno:bin-${DENO_VERSION} AS deno
 
 FROM docker.io/library/debian:${DEBIAN_RELEASE}-slim
+ARG WITH_CHROMIUM
 # python3-venv lets the engine install yt-dlp at runtime; tini reaps the processes yt-dlp
-# leaves behind (ffmpeg, deno) and forwards signals
+# leaves behind (ffmpeg, deno) and forwards signals. Chromium's sandbox works under rootless
+# Podman; where it cannot (some Docker seccomp profiles), set ENTROXIMER_CHROMIUM_NO_SANDBOX=true
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates ffmpeg python3 python3-venv tini \
+      $([ "$WITH_CHROMIUM" = true ] && echo chromium-headless-shell) \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=deno /deno /usr/local/bin/deno
 COPY --from=build /out/entroximer /usr/local/bin/entroximer
