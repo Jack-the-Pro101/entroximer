@@ -72,11 +72,23 @@ pub async fn run(args: ServeArgs, ctx: Arc<MediaContext>) -> anyhow::Result<()> 
             );
         }
     }
+    let report_missing_features = {
+        let ctx = Arc::clone(&ctx);
+        move || {
+            let ctx = Arc::clone(&ctx);
+            async move {
+                let args = &ctx.config.ytdlp.args.0;
+                ctx.ytdlp.report_missing_features(args).await;
+            }
+        }
+    };
     if let YtDlpBinary::Managed(managed) = &ctx.ytdlp {
         let hours = ctx.config.ytdlp.update_hours;
         let interval = (hours > 0).then(|| Duration::from_secs(hours * 3600));
         let managed = Arc::clone(managed);
-        tokio::spawn(async move { managed.maintain(interval).await });
+        tokio::spawn(async move { managed.maintain(interval, report_missing_features).await });
+    } else {
+        tokio::spawn(report_missing_features());
     }
     if let Some(uploads) = &ctx.uploads {
         let limits = uploads.limits();

@@ -21,6 +21,8 @@ use crate::timeline::Ticks;
 pub struct ProcessSpec {
     pub program: String,
     pub args: Vec<String>,
+    /// Environment variables the child does not inherit.
+    pub env_remove: Vec<String>,
     /// Written to the child's stdin, which is then closed.
     pub stdin: Option<Bytes>,
     /// Kept alive until the child has exited, e.g. a file it reads and writes back.
@@ -41,6 +43,7 @@ impl ProcessSpec {
         Self {
             program: program.into(),
             args: Vec::new(),
+            env_remove: Vec::new(),
             stdin: None,
             guard: None,
         }
@@ -53,6 +56,11 @@ impl ProcessSpec {
 
     pub fn args<I: IntoIterator<Item = S>, S: Into<String>>(mut self, args: I) -> Self {
         self.args.extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    pub fn env_remove(mut self, key: impl Into<String>) -> Self {
+        self.env_remove.push(key.into());
         self
     }
 
@@ -70,6 +78,9 @@ impl ProcessSpec {
     /// Spawns the process with stdout as `stdout`; stderr is logged and its tail kept for errors.
     pub(crate) fn spawn(&self, stdout: Stdio) -> io::Result<RunningProcess> {
         let mut cmd = tokio::process::Command::new(&self.program);
+        for key in &self.env_remove {
+            cmd.env_remove(key);
+        }
         cmd.args(&self.args)
             .stdout(stdout)
             .stderr(Stdio::piped())

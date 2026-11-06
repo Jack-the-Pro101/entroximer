@@ -18,6 +18,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use entroximer_core::producer::process::ProcessSpec;
 use serde::Deserialize;
 use tokio::process::Command;
 use tokio::sync::watch;
@@ -28,6 +29,10 @@ const LOCK_FILE: &str = "update.lock";
 
 /// After a failed install or update check, try again this soon rather than a full interval later.
 const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(10 * 60);
+
+/// Variables that point Python at packages besides an install's own, which it does not inherit:
+/// from a Nix dev shell, for one, `PYTHONPATH` puts the shell's yt-dlp ahead of the managed one.
+const FOREIGN_PYTHON_ENV: [&str; 2] = ["PYTHONPATH", "PYTHONHOME"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum InstallError {
@@ -171,24 +176,38 @@ impl ManagedYtDlp {
 
     /// Installs yt-dlp if missing and, given an interval, checks for updates that often.
     /// Failures are retried after a short delay. Returns only when there is nothing left to do.
-    pub async fn maintain(&self, update_interval: Option<Duration>) {
+    /// `check` runs after the first pass, if there is an install by then, and after each new one.
+    pub async fn maintain<C: Future<Output = ()>>(
+        &self,
+        update_interval: Option<Duration>,
+        check: impl Fn() -> C,
+    ) {
+        let mut first = true;
         loop {
             if update_interval.is_none() && self.installed_version().await.is_some() {
+                check().await;
                 return;
             }
-            match self.update().await {
-                Ok(outcome) => {
-                    log_outcome(&outcome);
-                    match update_interval {
-                        Some(interval) => tokio::time::sleep(interval).await,
-                        None => return,
-                    }
-                }
+            let result = self.update().await;
+            match &result {
+                Ok(outcome) => log_outcome(outcome),
                 Err(e) => {
-                    let error = entroximer_core::error::display_chain(&e);
+                    let error = entroximer_core::error::display_chain(e);
                     tracing::warn!(retry_in = ?RETRY_AFTER_FAILURE, %error, "yt-dlp install or update failed");
-                    tokio::time::sleep(RETRY_AFTER_FAILURE).await;
                 }
+            }
+            let changed = matches!(
+                result,
+                Ok(UpdateOutcome::Installed { .. } | UpdateOutcome::Updated { .. })
+            );
+            if (first || changed) && self.executable().exists() {
+                check().await;
+            }
+            first = false;
+            match (result, update_interval) {
+                (Ok(_), None) => return,
+                (Ok(_), Some(interval)) => tokio::time::sleep(interval).await,
+                (Err(_), _) => tokio::time::sleep(RETRY_AFTER_FAILURE).await,
             }
         }
     }
@@ -232,7 +251,9 @@ impl ManagedYtDlp {
     }
 
     fn pip_flags(&self) -> Vec<&'static str> {
-        let mut flags = vec!["--disable-pip-version-check"];
+        // the image has no compiler: a release that ships only its source, or ships it before its
+        // wheels, would fail to build, where the newest version with a wheel installs
+        let mut flags = vec!["--disable-pip-version-check", "--prefer-binary"];
         if self.pre_release {
             flags.push("--pre");
         }
@@ -322,6 +343,9 @@ async fn run(command: &mut Command) -> Result<String, InstallError> {
         .get_program()
         .to_string_lossy()
         .into_owned();
+    for key in FOREIGN_PYTHON_ENV {
+        command.env_remove(key);
+    }
     let output = command
         .stdin(Stdio::null())
         .kill_on_drop(true)
@@ -364,10 +388,88 @@ impl YtDlpBinary {
     /// How long resolving waits for a first install still in progress.
     const INSTALL_WAIT: Duration = Duration::from_secs(180);
 
-    pub fn program(&self) -> String {
+    /// What every run starts with. Config files, the user's or a `yt-dlp.conf` in the working
+    /// directory, would change what yt-dlp returns; options go in `ENTROXIMER_YTDLP_ARGS`.
+    const FIRST_ARGS: [&str; 1] = ["--ignore-config"];
+
+    /// How long asking yt-dlp what it supports may take: a Python start, without network.
+    const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+
+    fn program(&self) -> String {
         match self {
             Self::System(program) => program.clone(),
             Self::Managed(managed) => managed.executable().to_string_lossy().into_owned(),
+        }
+    }
+
+    /// A yt-dlp run, for its own arguments to follow.
+    pub fn command(&self) -> Command {
+        let mut command = Command::new(self.program());
+        command.args(Self::FIRST_ARGS);
+        if let Self::Managed(_) = self {
+            for key in FOREIGN_PYTHON_ENV {
+                command.env_remove(key);
+            }
+        }
+        command
+    }
+
+    /// A yt-dlp run as a producer's process, for its own arguments to follow.
+    pub fn spec(&self) -> ProcessSpec {
+        let mut spec = ProcessSpec::new(self.program()).args(Self::FIRST_ARGS);
+        if let Self::Managed(_) = self {
+            for key in FOREIGN_PYTHON_ENV {
+                spec = spec.env_remove(key);
+            }
+        }
+        spec
+    }
+
+    /// Warns about what yt-dlp lacks that only some sites need, which would otherwise show only
+    /// when one of them fails. `args` are the ones every run gets, which may choose a JavaScript
+    /// runtime.
+    pub async fn report_missing_features(&self, args: &[String]) {
+        let asking = self
+            .command()
+            .args(args)
+            .args(["--verbose", "--list-impersonate-targets"])
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output();
+        let header = match tokio::time::timeout(Self::CHECK_TIMEOUT, asking).await {
+            Ok(Ok(output)) if output.status.success() => {
+                String::from_utf8_lossy(&output.stderr).into_owned()
+            }
+            Ok(Ok(output)) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let error = stderr.lines().rev().find(|l| !l.trim().is_empty());
+                tracing::warn!(
+                    error = error.unwrap_or("no error output"),
+                    "cannot ask yt-dlp what it supports"
+                );
+                return;
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(program = %self.program(), error = %e, "cannot run yt-dlp");
+                return;
+            }
+            Err(_) => {
+                tracing::warn!(after = ?Self::CHECK_TIMEOUT, "yt-dlp did not say what it supports in time");
+                return;
+            }
+        };
+        let features = Features::from_header(&header);
+        if features.impersonation == Some(false) {
+            tracing::warn!(
+                "yt-dlp cannot impersonate a browser, as curl_cffi is missing: sites such as Bandcamp \
+                 fail when they answer with a bot check"
+            );
+        }
+        if features.js_runtime == Some(false) {
+            tracing::warn!(
+                "yt-dlp finds no JavaScript runtime it supports, such as a recent enough Deno: \
+                 YouTube offers fewer formats or none"
+            );
         }
     }
 
@@ -380,9 +482,72 @@ impl YtDlpBinary {
     }
 }
 
+/// What yt-dlp can do beyond the basics, as the header of a `--verbose` run says; `None` where the
+/// header does not say.
+#[derive(Debug, PartialEq, Eq)]
+struct Features {
+    /// curl_cffi is installed, which lets yt-dlp impersonate a browser.
+    impersonation: Option<bool>,
+    /// yt-dlp found a JavaScript runtime it supports, which YouTube's player challenges need.
+    js_runtime: Option<bool>,
+}
+
+impl Features {
+    fn from_header(header: &str) -> Self {
+        let field = |label: &str| {
+            header
+                .lines()
+                .find_map(|line| line.strip_prefix("[debug] ")?.strip_prefix(label))
+                .map(|value| value.split(", "))
+        };
+        Self {
+            impersonation: field("Request Handlers: ")
+                .map(|mut handlers| handlers.any(|h| h == "curl_cffi")),
+            // e.g. `deno-2.9.8`, `deno-2.1.0 (unsupported)`, `none` or `none (disabled)`
+            js_runtime: field("JS runtimes: ")
+                .map(|mut runtimes| runtimes.any(|r| r != "none" && !r.ends_with(')'))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn features_come_from_the_verbose_header() {
+        let complete = "[debug] Optional libraries: brotli-1.2.1, curl_cffi-0.17.0\n\
+                        [debug] JS runtimes: deno-2.9.8\n\
+                        [debug] Proxy map: {}\n\
+                        [debug] Request Handlers: urllib, requests, websockets, curl_cffi\n";
+        assert_eq!(
+            Features::from_header(complete),
+            Features {
+                impersonation: Some(true),
+                js_runtime: Some(true)
+            }
+        );
+        let lacking = "[debug] JS runtimes: deno-2.1.0 (unsupported), node (unknown)\n\
+                       [debug] Request Handlers: urllib, requests, websockets\n";
+        assert_eq!(
+            Features::from_header(lacking),
+            Features {
+                impersonation: Some(false),
+                js_runtime: Some(false)
+            }
+        );
+        for none in ["none", "none (disabled)"] {
+            let header = format!("[debug] JS runtimes: {none}\n");
+            assert_eq!(Features::from_header(&header).js_runtime, Some(false));
+        }
+        assert_eq!(
+            Features::from_header("[debug] Command-line config: []\n"),
+            Features {
+                impersonation: None,
+                js_runtime: None
+            }
+        );
+    }
 
     #[test]
     fn pip_report_tells_whether_anything_changes() {

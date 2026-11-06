@@ -49,7 +49,13 @@ as yt-dlp's SABR branch (PR #13515) with
 `ENTROXIMER_YTDLP_PACKAGE='yt-dlp[default,curl-cffi] @ git+https://github.com/coletdjnz/yt-dlp-dev@feat/youtube/sabr'`.
 Keep the `curl-cffi` extra in a requirement of your own: it lets yt-dlp impersonate a browser,
 which sites such as Bandcamp demand when they answer with a bot check ("no impersonate target is
-available" without it). A yt-dlp the engine does not manage needs `curl_cffi` installed too.
+available" without it). A yt-dlp the engine does not manage needs `curl_cffi` installed too. At
+startup, and after each new managed install, the engine warns when yt-dlp lacks `curl_cffi` or a
+JavaScript runtime it supports.
+
+yt-dlp runs with `--ignore-config`, so that no config file (the user's, `/etc/yt-dlp.conf` or a
+`yt-dlp.conf` in the working directory) changes what the engine gets back. Options go in
+`ENTROXIMER_YTDLP_ARGS`, which can also name a config file with `--config-locations`.
 yt-dlp keeps preferring `https` formats, so SABR is only used where YouTube offers nothing else.
 `ENTROXIMER_YTDLP_PLUGINS` installs yt-dlp plugins from PyPI alongside it; adding one triggers a
 fresh install on the next update check, or at once with `entroximer ytdlp update`.

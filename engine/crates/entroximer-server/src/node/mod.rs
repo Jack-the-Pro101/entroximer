@@ -264,10 +264,12 @@ impl Node {
         let ytdlp = match &self.ctx.ytdlp {
             YtDlpBinary::Managed(managed) => managed.version().await,
             // asked once: replacing it means restarting the engine
-            YtDlpBinary::System(program) => self
+            YtDlpBinary::System(_) => self
                 .system_ytdlp_version
                 .get_or_init(|| async {
-                    tokio::process::Command::new(program)
+                    self.ctx
+                        .ytdlp
+                        .command()
                         .arg("--version")
                         .output()
                         .await

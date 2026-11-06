@@ -565,7 +565,7 @@ async fn run(
     args: &[&str],
 ) -> Result<Output, ResolveError> {
     let _turn = background::turn(purpose.turns(ctx), &ctx.ytdlp_runs.background).await;
-    let mut command = tokio::process::Command::new(ctx.ytdlp.program());
+    let mut command = ctx.ytdlp.command();
     command.args(&ctx.config.ytdlp.args.0).args(args);
     if let Some(proxy) = ctx.youtube.proxy().filter(|_| is_youtube_target(target)) {
         command.arg("--proxy").arg(proxy.as_str());
@@ -743,7 +743,9 @@ impl YtDlpProducer {
 
         let download: Arc<dyn Producer> = match transport {
             Transport::Stdout => {
-                let mut spec = ProcessSpec::new(ctx.ytdlp.program())
+                let mut spec = ctx
+                    .ytdlp
+                    .spec()
                     .args(base_args())
                     .args(["--load-info-json", "-", "-o", "-"])
                     .stdin(info_json);
@@ -756,7 +758,7 @@ impl YtDlpProducer {
                 }))
             }
             Transport::GrowingFile => {
-                let (program, mut args) = (ctx.ytdlp.program(), base_args());
+                let (ytdlp, mut args) = (ctx.ytdlp.spec(), base_args());
                 // extracted again, the format may be missing or come over `https` instead; the
                 // best audio left is as good
                 let formats = match &format.format_id {
@@ -771,7 +773,8 @@ impl YtDlpProducer {
                     hint,
                     move |_, dir: &Path| {
                         let template = dir.join("media.%(ext)s");
-                        let spec = ProcessSpec::new(&program)
+                        let spec = ytdlp
+                            .clone()
                             .args(args.clone())
                             .arg("-o")
                             .arg(template.to_string_lossy());
