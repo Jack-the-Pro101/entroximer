@@ -318,6 +318,11 @@ async fn dispatch(
                 .configure_queue(params.repeat, params.crossfade)
                 .await?,
         ),
+        Call::UpdateItem(params) => to_value(
+            player(session, params.guild_id)?
+                .update_item(&params)
+                .await?,
+        ),
         Call::UpdateLayer(update) => {
             let player = session.player_or_create(node, update.guild_id);
             to_value(player.layer_update(node, *update).await?)

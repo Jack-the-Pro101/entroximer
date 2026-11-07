@@ -21,18 +21,19 @@ guild, permission to view, connect to and speak in voice channels.
 | Command | Does |
 |---|---|
 | `/join [channel]` | Joins your voice channel, or the one given |
-| `/play query [start_index]` | Plays a URL (Spotify links too, if the engine has a Spotify app), playlist (from track `start_index`) or YouTube search, or queues it if something is playing; joins your channel if needed. Suggests search results as you type |
-| `/next query [start_index]` | Queues a track or playlist to play right after the current one |
-| `/bulk [file] [start_index]` | Queues a list of links or searches from anywhere, one per line, from a form (without `file`) or an attached `.txt`, from line `start_index` on; the engine loads them in the background, in order, and the reply ends with what was queued and which lines failed |
+| `/play query [start_index] [time]` | Plays a URL (Spotify links too, if the engine has a Spotify app), playlist (from track `start_index`) or YouTube search, or queues it if something is playing; joins your channel if needed. Suggests search results as you type. Plays the part of the track a link points at (YouTube's `?t=`, SoundCloud's `#t=`, ...), or the `time` given: `1:30` (from), `1:30-2:45` (from and to) or `-2:45` (to), in seconds, `m:ss`, `h:mm:ss` or `1m30s`; `0` (or `start`) is the beginning and `end` the end, whatever the link says |
+| `/next query [start_index] [time]` | Queues a track or playlist to play right after the current one |
+| `/bulk [file] [start_index]` | Queues a list of links or searches from anywhere, one per line, from a form (without `file`) or an attached `.txt`, from line `start_index` on; each link plays the part it points at (`?t=`, `#t=`, ...); the engine loads them in the background, in order, and the reply ends with what was queued and which lines failed |
 | `/search query [source]` | Searches YouTube, YouTube Music, SoundCloud or Spotify (if the engine has a Spotify app), shows the results with their artwork, and queues the ones you pick |
 | `/queue [page]` | Shows the queue, each track with its artwork; items still loading show their link, marked ⏳ |
 | `/skip [to]` | Skips to the next track, or to a position in the queue |
 | `/remove position`, `/move from to`, `/shuffle`, `/clear` | Edit the queue |
+| `/trim time [position]` | Changes the part of the current track, or of the queued one at `position`, that plays, with `time` as `/play` takes it (a side left out stays). The current track plays on from where it is: a new start applies the next time it plays, e.g. when repeated |
 | `/repeat mode` | Repeats nothing, the current track, or the queue |
 | `/crossfade seconds` | Fades each track into the next over up to 12 s; 0 plays them back to back |
 | `/pause`, `/resume` | Control playback |
 | `/stop` | Stops playback; `/skip` continues with the queue |
-| `/seek position` | Jumps to `90`, `1:30` or `1:02:03` |
+| `/seek position` | Jumps to `90`, `1:30`, `1:02:03` or `1m30s` |
 | `/volume percent [layer]` | 0 to 1000; 100 leaves the audio unchanged. The music's, or the sound effects' or announcements' |
 | `/effects [preset] [chain] [layer]` | Applies a preset (suggested as you type, e.g. `nightcore`, `bass_boost`, `karaoke`), a chain such as `lowpass(800) => reverb(10, 2)`, or a preset followed by a chain; with neither, removes effects. To the music, or to the sound effects or announcements |
 | `/sfx play [file] [url] [loop] [volume]`, `/sfx stop` | Plays an attached audio file or a link over the music, up to 8 at once, on a loop if asked; stops them |

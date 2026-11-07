@@ -1,12 +1,12 @@
 // Finding tracks and queueing them: /play, /next, /bulk, /search.
 import { ActionRowBuilder, ComponentType, ModalBuilder, StringSelectMenuBuilder, TextInputStyle } from "discord.js";
-import type { Attachment } from "discord.js";
+import type { Attachment, SlashCommandStringOption } from "discord.js";
 import { EntroximerError, parseQueries } from "entroximer-client";
 import type { PlaylistInfo, Player, QueueItem } from "entroximer-client";
 
 import { searchMessage } from "../embeds";
 import type { Engine } from "../engine";
-import { describeTrack, escape, plainTrack, trackLength, truncate } from "../format";
+import { TIME_RANGE_HELP, describeTrack, escape, parseTimeRange, plainTrack, trackLength, truncate } from "../format";
 import { SUGGESTION_TIMEOUT_MS, UserError, command, failureText, withTimeout } from "./command";
 import type { Command, GuildAutocomplete, GuildInteraction } from "./command";
 import { joinedPlayer, requester, voiceChannelOf } from "./players";
@@ -60,7 +60,8 @@ export const playCommands: Command[] = [
         )
         .addIntegerOption((o) =>
           o.setName("start_index").setDescription("For a playlist: the track to start from").setMinValue(1),
-        ),
+        )
+        .addStringOption(timeOption),
     async (interaction, engine) => {
       const player = joinedPlayer(interaction, engine);
       await interaction.deferReply();
@@ -84,7 +85,8 @@ export const playCommands: Command[] = [
         )
         .addIntegerOption((o) =>
           o.setName("start_index").setDescription("For a playlist: the track to start from").setMinValue(1),
-        ),
+        )
+        .addStringOption(timeOption),
     async (interaction, engine) => {
       const player = joinedPlayer(interaction, engine);
       await interaction.deferReply();
@@ -251,9 +253,18 @@ async function suggestTracks(interaction: GuildAutocomplete, engine: Engine): Pr
   await interaction.respond(choices);
 }
 
+/** `/play`'s and `/next`'s part of the track to play. */
+function timeOption(o: SlashCommandStringOption): SlashCommandStringOption {
+  return o
+    .setName("time")
+    .setDescription("Part to play: 1:30 (from), 1:30-2:45 (from-to) or -2:45 (to); else the link's own, like ?t=90")
+    .setMaxLength(40);
+}
+
 /**
- * Queues the command's `query` (from its `start_index`, for a playlist) at `index`, and says what it
- * found. Added on its own, the query loads at once, as `load` would load it.
+ * Queues the command's `query` (from its `start_index`, for a playlist; between its `time`s, else
+ * the link's own) at `index`, and says what it found. Added on its own, the query loads at once,
+ * as `load` would load it.
  */
 async function queueQuery(
   interaction: GuildInteraction,
@@ -262,9 +273,17 @@ async function queueQuery(
   started: boolean,
 ): Promise<void> {
   const start = interaction.options.getInteger("start_index");
+  const time = interaction.options.getString("time");
+  const range = time === null ? null : parseTimeRange(time);
+  if (time !== null && range === null) {
+    throw new UserError(TIME_RANGE_HELP);
+  }
   const added = await player.queue.add(asQuery(interaction.options.getString("query", true)), {
     ...(index === undefined ? {} : { index }),
     ...(start === null ? {} : { startIndex: start - 1 }),
+    // a side not given stays as the link has it
+    ...(range?.startTime === undefined ? {} : { startTime: range.startTime }),
+    ...(range?.endTime === undefined ? {} : { endTime: range.endTime }),
     userData: requester(interaction),
   });
   const item = added.items[0];

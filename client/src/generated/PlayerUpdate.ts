@@ -14,7 +14,7 @@ export type PlayerUpdate = { guildId: Snowflake,
 /**
  * Plays this track now, in place of the current one; the queue stays as it is and
  * continues afterwards. `null` stops playback, and the queue waits until something plays
- * again.
+ * again. With it, `position` and `endTime` take the place of its `startTime` and `endTime`.
  */
 track?: TrackSelector | null, 
 /**
@@ -26,7 +26,8 @@ onlyIfIdle?: boolean,
  */
 position?: Millis, 
 /**
- * Stops the current track at this position; `null` plays it to the end.
+ * Stops the current track at this position; `null` plays it to the end. Its track's
+ * `endTime` changes too, so a repeat ends it there as well.
  */
 endTime?: Millis | null, 
 /**

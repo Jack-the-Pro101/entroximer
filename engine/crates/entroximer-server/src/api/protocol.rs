@@ -78,6 +78,22 @@ impl Millis {
         (seconds.is_finite() && seconds > 0.0).then_some(Self((seconds * 1000.0) as u64))
     }
 
+    /// As people read times in a track: `m:ss`, or `h:mm:ss` from an hour, plus milliseconds
+    /// if there are any (`1:05.250`).
+    pub fn clock(self) -> String {
+        let seconds = self.0 / 1000;
+        let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+        let whole = if hours > 0 {
+            format!("{hours}:{minutes:02}:{seconds:02}")
+        } else {
+            format!("{minutes}:{seconds:02}")
+        };
+        match self.0 % 1000 {
+            0 => whole,
+            millis => format!("{whole}.{millis:03}"),
+        }
+    }
+
     /// The current time as Unix milliseconds.
     pub fn now() -> Self {
         SystemTime::now()
@@ -160,6 +176,14 @@ pub enum Call {
     /// Result: [`QueueState`].
     #[serde(rename = "queue.configure")]
     ConfigureQueue(ConfigureQueue),
+    /// Changes the part of an item's track that plays: of an item in the queue (a loading one
+    /// too), reported as an `updated` change, or of the playing one (its `itemId`), shown in the
+    /// result's `track`. The playing track plays on from where it is: a new start applies the
+    /// next time it plays (repeated), a new end now, and one it has passed ends it at once
+    /// (`finished`). Times the track cannot play are refused, as in `queue.add`. Result:
+    /// [`PlayerInfo`].
+    #[serde(rename = "queue.update")]
+    UpdateItem(UpdateItem),
     /// Creates a layer of the player (and the player) if needed, and changes it; a refused
     /// update changes nothing. The music is the player's own layer, which `player.update`
     /// changes. Result: [`LayerInfo`].
@@ -258,7 +282,7 @@ pub struct PlayerUpdate {
     pub guild_id: Snowflake,
     /// Plays this track now, in place of the current one; the queue stays as it is and
     /// continues afterwards. `null` stops playback, and the queue waits until something plays
-    /// again.
+    /// again. With it, `position` and `endTime` take the place of its `startTime` and `endTime`.
     #[serde(default, deserialize_with = "present")]
     #[ts(optional)]
     pub track: Option<Option<TrackSelector>>,
@@ -269,7 +293,8 @@ pub struct PlayerUpdate {
     /// Seeks the current track.
     #[ts(optional)]
     pub position: Option<Millis>,
-    /// Stops the current track at this position; `null` plays it to the end.
+    /// Stops the current track at this position; `null` plays it to the end. Its track's
+    /// `endTime` changes too, so a repeat ends it there as well.
     #[serde(default, deserialize_with = "present")]
     #[ts(optional)]
     pub end_time: Option<Option<Millis>>,
@@ -297,6 +322,12 @@ pub struct PlayerUpdate {
 /// A track by its `encoded` form (from `tracks.load` or `tracks.search`), or by a query to load
 /// first: a search plays its first result, a playlist link the track it points at (or the one at
 /// `startIndex`).
+///
+/// `startTime` and `endTime` play only part of the track, e.g. from where a link points into it:
+/// the track starts at `startTime` and ends (`finished`) at `endTime`, every time it plays, and
+/// its events show them. The engine does not read them from links. For a query, they apply to
+/// the track it finds, or the first of a playlist's. A track that is a stream, or shorter than
+/// `startTime`, is refused.
 #[derive(Clone, Debug, Deserialize, TS)]
 #[serde(untagged)]
 pub enum TrackSelector {
@@ -306,6 +337,15 @@ pub enum TrackSelector {
         #[serde(default, rename = "userData")]
         #[ts(optional)]
         user_data: Option<Value>,
+        /// Where the track starts playing; its beginning if absent. (A track's own `startTime`
+        /// is not part of its `encoded` form: pass it again to keep it.)
+        #[serde(default, rename = "startTime")]
+        #[ts(optional)]
+        start_time: Option<Millis>,
+        /// Where the track stops; its end if absent.
+        #[serde(default, rename = "endTime")]
+        #[ts(optional)]
+        end_time: Option<Millis>,
     },
     Query {
         query: String,
@@ -317,6 +357,14 @@ pub enum TrackSelector {
         #[serde(default, rename = "userData")]
         #[ts(optional)]
         user_data: Option<Value>,
+        /// Where the track found starts playing.
+        #[serde(default, rename = "startTime")]
+        #[ts(optional)]
+        start_time: Option<Millis>,
+        /// Where the track found stops.
+        #[serde(default, rename = "endTime")]
+        #[ts(optional)]
+        end_time: Option<Millis>,
     },
 }
 
@@ -325,6 +373,98 @@ impl TrackSelector {
         match self {
             Self::Encoded { user_data, .. } | Self::Query { user_data, .. } => user_data.as_ref(),
         }
+    }
+
+    /// The part of the track to play, as given.
+    pub fn times(&self) -> Times {
+        match self {
+            Self::Encoded {
+                start_time,
+                end_time,
+                ..
+            }
+            | Self::Query {
+                start_time,
+                end_time,
+                ..
+            } => Times {
+                start: *start_time,
+                end: *end_time,
+            },
+        }
+    }
+}
+
+/// The part of a track that plays: from `start` (its beginning if `None`) to `end` (its end if
+/// `None`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Times {
+    pub start: Option<Millis>,
+    pub end: Option<Millis>,
+}
+
+impl Times {
+    pub fn of(track: &Track) -> Self {
+        Self {
+            start: track.start_time,
+            end: track.end_time,
+        }
+    }
+
+    /// Checks the times on their own: the start must come before the end. A start at 0 is the
+    /// beginning.
+    pub fn checked(self) -> Result<Self, ApiError> {
+        let start = self.start.filter(|start| start.0 > 0);
+        if let (Some(start), Some(end)) = (start, self.end)
+            && start >= end
+        {
+            return Err(ApiError::new(
+                ErrorCode::BadRequest,
+                format!(
+                    "startTime ({}) must come before endTime ({})",
+                    start.clock(),
+                    end.clock()
+                ),
+            ));
+        }
+        Ok(Self { start, ..self })
+    }
+
+    /// Puts the times on `track`, if it can play them: it must not be a stream, and must be
+    /// longer than `start` (if its length is known).
+    pub fn apply(self, mut track: Track) -> Result<Track, ApiError> {
+        let Self { start, end } = self.checked()?;
+        let info = &track.info;
+        if let Some(start) = start {
+            let refusal = if !info.is_seekable {
+                Some("it is a stream".to_owned())
+            } else {
+                info.length
+                    .filter(|length| start >= *length)
+                    .map(|length| format!("it is only {} long", length.clock()))
+            };
+            if let Some(refusal) = refusal {
+                return Err(ApiError::new(
+                    ErrorCode::BadRequest,
+                    format!(
+                        "`{}` cannot start at {}: {refusal}",
+                        info.title,
+                        start.clock()
+                    ),
+                ));
+            }
+        }
+        track.start_time = start;
+        track.end_time = end;
+        Ok(track)
+    }
+
+    pub fn start_ticks(self) -> Option<Ticks> {
+        self.start.map(Millis::to_ticks)
+    }
+
+    pub fn end_ticks(self) -> Option<Ticks> {
+        self.end.map(Millis::to_ticks)
     }
 }
 
@@ -399,6 +539,32 @@ pub struct ConfigureQueue {
     #[serde(default)]
     #[ts(optional)]
     pub crossfade: Option<Millis>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateItem {
+    pub guild_id: Snowflake,
+    /// An item in the queue, or the playing one.
+    pub id: String,
+    /// Where its track starts playing; `null` from its beginning; absent leaves it.
+    #[serde(default, deserialize_with = "present")]
+    #[ts(optional)]
+    pub start_time: Option<Option<Millis>>,
+    /// Where its track stops; `null` at its end; absent leaves it.
+    #[serde(default, deserialize_with = "present")]
+    #[ts(optional)]
+    pub end_time: Option<Option<Millis>>,
+}
+
+impl UpdateItem {
+    /// `times` with the changes asked for.
+    pub fn changed(&self, times: Times) -> Times {
+        Times {
+            start: self.start_time.unwrap_or(times.start),
+            end: self.end_time.unwrap_or(times.end),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -491,10 +657,10 @@ pub struct PlayClip {
     /// Percent of the layer's volume, up to 1000; 100 if absent.
     #[ts(optional)]
     pub volume: Option<u16>,
-    /// Where in the track it starts.
+    /// Where in the track it starts; its `startTime` if absent.
     #[ts(optional)]
     pub position: Option<Millis>,
-    /// Where in the track it ends.
+    /// Where in the track it ends; its `endTime` if absent.
     #[ts(optional)]
     pub end_time: Option<Millis>,
     /// How long it takes to fade in, up to 10 s.
@@ -711,6 +877,15 @@ pub struct Track {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub user_data: Option<Value>,
+    /// Where the track starts playing, as the client asked; absent for its beginning. Its
+    /// `info.length` stays the whole track's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub start_time: Option<Millis>,
+    /// Where the track stops, as the client asked; absent for its end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub end_time: Option<Millis>,
 }
 
 #[derive(Clone, Debug, Serialize, TS)]
@@ -998,6 +1173,30 @@ mod tests {
         ));
 
         let call: Call = serde_json::from_value(json!({
+            "op": "queue.update",
+            "params": { "guildId": "1", "id": "a", "startTime": 1000, "endTime": null }
+        }))
+        .unwrap();
+        let Call::UpdateItem(update) = call else {
+            panic!("wrong call");
+        };
+        let times = Times {
+            start: Some(Millis(5)),
+            end: Some(Millis(9000)),
+        };
+        assert_eq!(
+            update.changed(times),
+            Times {
+                start: Some(Millis(1000)),
+                end: None
+            },
+            "null clears, a time replaces"
+        );
+        let update: UpdateItem =
+            serde_json::from_value(json!({ "guildId": "1", "id": "a" })).unwrap();
+        assert_eq!(update.changed(times), times, "absent leaves them");
+
+        let call: Call = serde_json::from_value(json!({
             "op": "player.update",
             "params": { "guildId": "1", "preset": { "name": "bass_boost", "params": { "gain_db": 9 } } }
         }))
@@ -1014,6 +1213,46 @@ mod tests {
         assert!(matches!(call, Call::Stats));
         assert!(serde_json::from_value::<Call>(json!({ "op": "nope" })).is_err());
         assert!(serde_json::from_value::<Snowflake>(json!("12a")).is_err());
+    }
+
+    #[test]
+    fn selectors_take_the_part_of_the_track_to_play() {
+        let selector: TrackSelector = serde_json::from_value(
+            json!({ "query": "https://example.com/a", "startTime": 90_000, "endTime": 120_000 }),
+        )
+        .unwrap();
+        assert_eq!(
+            selector.times(),
+            Times {
+                start: Some(Millis(90_000)),
+                end: Some(Millis(120_000))
+            }
+        );
+        let selector: TrackSelector =
+            serde_json::from_value(json!({ "encoded": "abc", "endTime": 5000 })).unwrap();
+        assert_eq!(selector.times().end, Some(Millis(5000)));
+
+        let backwards = Times {
+            start: Some(Millis(5000)),
+            end: Some(Millis(5000)),
+        };
+        assert!(backwards.checked().is_err());
+        let from_zero = Times {
+            start: Some(Millis(0)),
+            end: Some(Millis(10)),
+        };
+        assert_eq!(
+            from_zero.checked().unwrap().start,
+            None,
+            "0 is the beginning"
+        );
+    }
+
+    #[test]
+    fn times_read_as_clock_times() {
+        assert_eq!(Millis(0).clock(), "0:00");
+        assert_eq!(Millis(65_250).clock(), "1:05.250");
+        assert_eq!(Millis(3_723_000).clock(), "1:02:03");
     }
 
     #[test]

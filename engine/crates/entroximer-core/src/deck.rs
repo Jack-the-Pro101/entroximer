@@ -38,6 +38,9 @@ const READY_AHEAD: Ticks = TICKS_PER_SECOND;
 pub struct DeckTrack {
     pub id: TrackId,
     pub player: Player,
+    /// Where playback started, e.g. a queue item's start time; a crossfade covers at most half of
+    /// what plays from there.
+    pub start: Ticks,
     /// Stop when playback reaches this position.
     pub end_at: Option<Ticks>,
     /// The track's length as its source describes it, for a crossfade to start before the media
@@ -425,7 +428,7 @@ impl Tracks {
         };
         // in the tracks' time, which a rate makes pass faster than the output's
         let media = |ticks: Ticks| (ticks as f64 * f64::from(rate)) as Ticks;
-        let fade = media(self.crossfade).min(end / 2);
+        let fade = media(self.crossfade).min((end - track.start).max(0) / 2);
         let remaining = end - track.player.position();
         if remaining > fade || remaining < media(MIN_CROSSFADE) || !is_ready(&next.player) {
             return;

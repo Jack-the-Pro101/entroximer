@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use entroximer_core::player::Kept;
 
 use super::*;
+use crate::api::protocol::Times;
 use crate::node::loop_cache::Holder;
 use crate::sources::{local, upload};
 
@@ -42,11 +43,13 @@ impl GuildPlayer {
     /// `item` as kept from an earlier round (of any player's queue), ready to play.
     pub(super) fn kept_track(&self, item: &QueueItem) -> Option<DeckTrack> {
         let kept = self.node.upgrade()?.loop_cache.get(&item.track.encoded)?;
+        let times = Times::of(&item.track);
         Some(DeckTrack {
             id: self.next_track.fetch_add(1, Ordering::Relaxed),
             length: kept.length(),
-            player: Player::from_kept(Handle::current(), &kept),
-            end_at: None,
+            player: Player::from_kept(Handle::current(), &kept, times.start_ticks()),
+            start: times.start_ticks().unwrap_or(0),
+            end_at: times.end_ticks(),
         })
     }
 

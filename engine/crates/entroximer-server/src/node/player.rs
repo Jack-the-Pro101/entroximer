@@ -43,7 +43,7 @@ use super::session::Session;
 use super::tracks::Loaded;
 use crate::api::protocol::{
     ApiError, ErrorCode, Event, Millis, PlayerInfo, PlayerState, PlayerUpdate, QueueAdded,
-    QueuePage, QueueState, Snowflake, Track, TrackEndReason, VoiceState,
+    QueuePage, QueueState, Snowflake, Times, Track, TrackEndReason, UpdateItem, VoiceState,
 };
 
 /// How often a player checks whether to prepare the next item.
@@ -218,10 +218,26 @@ impl GuildPlayer {
         // `None`: leave the track alone; `Some(None)`: stop
         let track = match update.track {
             Some(Some(_)) if update.only_if_idle == Some(true) && !self.deck().is_idle() => None,
-            Some(Some(selector)) => Some(Some(node.load(&selector).await?)),
+            Some(Some(selector)) => {
+                let mut loaded = node.load(&selector).await?;
+                // a position and end given with a track are where it starts and stops
+                let times = Times {
+                    start: update.position.or(loaded.track.start_time),
+                    end: update.end_time.unwrap_or(loaded.track.end_time),
+                };
+                loaded.track = times.apply(loaded.track)?;
+                Some(Some(loaded))
+            }
             Some(None) => Some(None),
             None => None,
         };
+        let current = self.deck().current().map(|t| t.id);
+        if track.is_none()
+            && let Some(end) = update.end_time
+        {
+            let start = current.and_then(|id| self.state().items.get(&id)?.track.start_time);
+            Times { start, end }.checked()?;
+        }
 
         if let Some(volume) = update.volume {
             self.deck().set_volume(f32::from(volume) / 100.0);
@@ -235,14 +251,16 @@ impl GuildPlayer {
             self.state().paused = paused;
             self.mixer().main_mut().paused = paused;
         }
-        let end_at = update.end_time.map(|end| end.map(Millis::to_ticks));
+        let mut end_time = update.end_time;
         let mut seek = update.position.map(Millis::to_ticks);
         match track {
             Some(None) => self.halt(),
             Some(Some(loaded)) => {
+                // its track's times now
+                (seek, end_time) = (None, None);
+                let times = Times::of(&loaded.track);
                 let item = QueueItem::new(loaded.track.clone());
-                // a position given with a track is where it starts
-                let track = self.deck_track(node, loaded, seek.take(), end_at.flatten());
+                let track = self.deck_track(node, loaded, times);
                 let mut state = self.state();
                 state.halted = false;
                 // it also takes the place of an item a skip is waiting for
@@ -255,8 +273,13 @@ impl GuildPlayer {
             }
             None => {}
         }
-        if let Some(end_at) = end_at {
-            self.deck().set_end_at(end_at);
+        if let Some(end_time) = end_time {
+            self.deck().set_end_at(end_time.map(Millis::to_ticks));
+            // its track shows it, and ends there whenever it plays again
+            let mut state = self.state();
+            if let Some(item) = current.and_then(|id| state.items.get_mut(&id)) {
+                item.track.end_time = end_time;
+            }
         }
         if let Some(position) = seek {
             self.deck().seek(position).map_err(|e| playback_error(&e))?;
@@ -379,6 +402,22 @@ impl GuildPlayer {
         Ok(self.info())
     }
 
+    /// Changes the times of an item in the queue, or of the playing one, which stays within
+    /// them; refused times change nothing.
+    pub async fn update_item(&self, update: &UpdateItem) -> Result<PlayerInfo, ApiError> {
+        let _in_order = self.updating.lock().await;
+        // decide on what the deck is really playing
+        self.drain_deck();
+        self.flush().await;
+        {
+            let mut state = self.state();
+            self.update_item_locked(&mut state, update)?;
+            self.plan_next(&mut state);
+        }
+        self.settle().await;
+        Ok(self.info())
+    }
+
     /// Stops playback and leaves the voice channel.
     pub async fn destroy(&self) {
         {
@@ -493,13 +532,8 @@ impl GuildPlayer {
         self.sync_output();
     }
 
-    fn deck_track(
-        &self,
-        node: &Node,
-        loaded: Loaded,
-        start: Option<Ticks>,
-        end_at: Option<Ticks>,
-    ) -> DeckTrack {
+    /// A deck track playing `loaded` from and to `times`.
+    fn deck_track(&self, node: &Node, loaded: Loaded, times: Times) -> DeckTrack {
         DeckTrack {
             id: self.next_track.fetch_add(1, Ordering::Relaxed),
             length: loaded.track.info.length.map(Millis::to_ticks),
@@ -507,9 +541,10 @@ impl GuildPlayer {
                 Handle::current(),
                 loaded.producer,
                 node.ctx.player_config(),
-                start,
+                times.start_ticks(),
             ),
-            end_at,
+            start: times.start_ticks().unwrap_or(0),
+            end_at: times.end_ticks(),
         }
     }
 

@@ -40,6 +40,14 @@ export interface AddOptions {
    * one the link points at; the tracks before it are left out. Applies to every query given.
    */
   startIndex?: number;
+  /**
+   * Where the tracks start playing, in milliseconds, in place of the start time their links
+   * give (see `parseLinkTimes`) or their own; `null` (or 0) plays them from the beginning.
+   * Applies to every track given; for a playlist, to the track it starts from.
+   */
+  startTime?: number | null;
+  /** Where they stop, in milliseconds, in place of their links' or their own; `null` plays them to the end. */
+  endTime?: number | null;
 }
 
 /** What took the place of a loading item. */
@@ -114,13 +122,19 @@ export class Queue extends Emitter<QueueEvents> {
    * `parseQueries`) are queued at once as loading items, which the engine loads in the
    * background, in order, into what they find: a search its first result, a playlist link its
    * tracks. `whenLoaded` tells when one has. With nothing playing, the first item of the queue
-   * starts once it is ready.
+   * starts once it is ready. Each plays from its `startTime` to its `endTime`: a link's own
+   * (such as YouTube's `?t=1m30s`), a track's own, or the options'.
    */
   async add(tracks: Playable | Playable[], options: AddOptions = {}): Promise<QueueAdded> {
     const added = await this.#request("queue.add", {
       guildId: this.guildId,
       tracks: (Array.isArray(tracks) ? tracks : [tracks]).map((track) =>
-        selector(track, options.userData, options.startIndex),
+        selector(track, {
+          userData: options.userData,
+          startIndex: options.startIndex,
+          startTime: options.startTime,
+          endTime: options.endTime,
+        }),
       ),
       ...(options.index === undefined ? {} : { index: options.index }),
     });

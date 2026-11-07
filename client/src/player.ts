@@ -19,10 +19,13 @@ import { whole } from "./units.js";
 export interface PlayOptions {
   /** Data echoed back in this track's events, e.g. who requested it. */
   userData?: JsonValue;
-  /** Where to start, in milliseconds. */
-  startAt?: number;
-  /** Where to stop, in milliseconds. */
-  endAt?: number;
+  /**
+   * Where to start, in milliseconds, in place of the link's start time (see `parseLinkTimes`) or
+   * the track's own; `null` (or 0) plays from the beginning.
+   */
+  startAt?: number | null;
+  /** Where to stop, in milliseconds, in place of the link's or the track's end time; `null` plays to the end. */
+  endAt?: number | null;
   /** Only start the track if nothing is playing. */
   onlyIfIdle?: boolean;
 }
@@ -174,9 +177,10 @@ export class Player extends Emitter<PlayerEvents> {
     const flowing = this.track !== null && !this.paused && state.connected && !state.buffering;
     const rate = this.graph?.rate ?? 1;
     const elapsed = flowing ? Math.max(0, Date.now() - this.#stateReceivedAt) * rate : 0;
-    const length = this.track?.info.length;
+    // the track stops at its end time
+    const end = this.track?.endTime ?? this.track?.info.length;
     const position = state.position + elapsed;
-    return length == null ? position : Math.min(position, length);
+    return end == null ? position : Math.min(position, end);
   }
 
   /** Joins a voice channel, or moves to another one. */
@@ -187,13 +191,12 @@ export class Player extends Emitter<PlayerEvents> {
 
   /**
    * Plays `track` now, in place of the current one. The queue stays as it is and goes on once
-   * the track ends.
+   * the track ends. A link's start and end times (such as YouTube's `?t=`) apply, unless
+   * `startAt` or `endAt` replace them.
    */
   play(track: Playable, options: PlayOptions = {}): Promise<PlayerInfo> {
     return this.update({
-      track: selector(track, options.userData),
-      ...(options.startAt === undefined ? {} : { position: whole(options.startAt) }),
-      ...(options.endAt === undefined ? {} : { endTime: whole(options.endAt) }),
+      track: selector(track, { userData: options.userData, startTime: options.startAt, endTime: options.endAt }),
       ...(options.onlyIfIdle === undefined ? {} : { onlyIfIdle: options.onlyIfIdle }),
     });
   }
@@ -241,6 +244,26 @@ export class Player extends Emitter<PlayerEvents> {
   /** Where the current track stops, in milliseconds; `null` plays it to the end. */
   setEndTime(positionMs: number | null): Promise<PlayerInfo> {
     return this.update({ endTime: positionMs === null ? null : whole(positionMs) });
+  }
+
+  /**
+   * Changes the part of a track that plays, in milliseconds, of the queue item `itemId` or of
+   * the playing one (`this.itemId`): `null` plays from the beginning or to the end, and a time
+   * left out stays. The playing track plays on from where it is: a new start applies the next
+   * time it plays (when repeated), a new end right away, and one it has passed ends it now.
+   * A queued item shows its new times with the queue's `change`.
+   */
+  async setTimes(itemId: string, times: { startTime?: number | null; endTime?: number | null }): Promise<PlayerInfo> {
+    this.#ensureUsable();
+    const ms = (time: number | null) => (time === null ? null : whole(time));
+    const info = await this.#host.request("queue.update", {
+      guildId: this.guildId,
+      id: itemId,
+      ...(times.startTime === undefined ? {} : { startTime: ms(times.startTime) }),
+      ...(times.endTime === undefined ? {} : { endTime: ms(times.endTime) }),
+    });
+    this.#apply(info);
+    return info;
   }
 
   /**

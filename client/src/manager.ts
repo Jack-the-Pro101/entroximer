@@ -13,6 +13,7 @@ import type { Track } from "./generated/Track.js";
 import type { Upload } from "./generated/Upload.js";
 import { Player } from "./player.js";
 import type { JoinOptions, PlayerHost } from "./player.js";
+import { parseLinkTimes } from "./times.js";
 
 /** The voice state update a bot sends on Discord's gateway to join or leave a voice channel. */
 export interface GatewayVoiceStateUpdate {
@@ -139,10 +140,26 @@ export class Entroximer extends Emitter<ManagerEvents> {
   /**
    * Loads a link (a track or a playlist), a search (`ytsearch:...`, or plain text for the
    * engine's default search) or, if the engine allows it, a path on its host. Search results and
-   * playlist tracks carry metadata only; the engine resolves them when they play.
+   * playlist tracks carry metadata only; the engine resolves them when they play. A link's start
+   * and end times (see `parseLinkTimes`) become those of the track it points at, which keeps
+   * them when played or queued.
    */
-  load(query: string): Promise<LoadResult> {
-    return this.connection.request("tracks.load", { query });
+  async load(query: string): Promise<LoadResult> {
+    const { query: link, ...times } = parseLinkTimes(query);
+    const result = await this.connection.request("tracks.load", { query: link });
+    const withTimes = (track: Track): Track => ({ ...track, ...times });
+    switch (result.type) {
+      case "track":
+        return { ...result, track: withTimes(result.track) };
+      case "playlist": {
+        const at = result.playlist.selectedTrack;
+        return at === null
+          ? result
+          : { ...result, tracks: result.tracks.map((track, index) => (index === at ? withTimes(track) : track)) };
+      }
+      default:
+        return result;
+    }
   }
 
   /** Searches one source; see `SearchOptions`. Results are cached by the engine for a while. */

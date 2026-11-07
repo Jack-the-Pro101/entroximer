@@ -172,7 +172,7 @@ fn a_replay_plays_from_what_was_downloaded() {
     h.render(1.0);
 
     // the replay outlives the player it came from, as a repeated track does
-    let replay = h.player.replay();
+    let replay = h.player.replay(None);
     drop(std::mem::replace(&mut h.player, replay));
     let audio = h.render(10.5);
     assert_playing_second(&audio[at(0.3) as usize * 2..at(0.5) as usize * 2], 0.3);

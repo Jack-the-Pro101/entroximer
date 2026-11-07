@@ -1,8 +1,8 @@
-// The queue: /queue, /skip, /remove, /move, /shuffle, /clear, /repeat, /crossfade.
+// The queue: /queue, /skip, /remove, /move, /trim, /shuffle, /clear, /repeat, /crossfade.
 import type { Player, QueueItem, Repeat } from "entroximer-client";
 
 import { queueMessage } from "../embeds";
-import { describeItem, describeTrack } from "../format";
+import { TIME_RANGE_HELP, describeItem, describeTrack, parseTimeRange } from "../format";
 import { UserError, command } from "./command";
 import type { Command } from "./command";
 import { existingPlayer } from "./players";
@@ -75,6 +75,45 @@ export const queueCommands: Command[] = [
       const to = Math.min(interaction.options.getInteger("to", true), player.queue.length);
       await player.queue.move(item.id, to - 1);
       await interaction.reply(`Moved ${describeItem(item)} to position ${to}.`);
+    },
+  ),
+  command(
+    (b) =>
+      b
+        .setName("trim")
+        .setDescription("Change the part of the current track, or of a queued one, that plays")
+        .addStringOption((o) =>
+          o
+            .setName("time")
+            .setDescription("1:30 (from), 1:30-2:45 (from-to) or -2:45 (to); 0 is the beginning, end the end")
+            .setMaxLength(40)
+            .setRequired(true),
+        )
+        .addIntegerOption((o) =>
+          o.setName("position").setDescription("Its position in the queue; the current track if absent").setMinValue(1),
+        ),
+    async (interaction, engine) => {
+      const player = existingPlayer(interaction, engine);
+      const range = parseTimeRange(interaction.options.getString("time", true));
+      if (range === null) {
+        throw new UserError(TIME_RANGE_HELP);
+      }
+      const position = interaction.options.getInteger("position");
+      const queued = position === null ? null : itemAt(player, position);
+      const id = queued?.id ?? player.itemId;
+      if (id === null) {
+        throw new UserError("Nothing is playing; give the position of a queued track.");
+      }
+      const info = await player.setTimes(id, range);
+      if (queued !== null) {
+        // its new times came with the queue's change
+        const item = player.queue.items.find((candidate) => candidate.id === id) ?? queued;
+        await interaction.reply(`Position ${position} now plays ${describeItem(item)}.`);
+        return;
+      }
+      // it plays on from where it is
+      const later = range.startTime !== undefined ? " Its new start applies the next time it plays." : "";
+      await interaction.reply(`Now playing ${info.track ? describeTrack(info.track) : "nothing"}.${later}`);
     },
   ),
   command(

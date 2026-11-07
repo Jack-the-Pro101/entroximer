@@ -31,7 +31,7 @@ use crate::sources::QUERY_SOURCE;
 use backoff::Backoff;
 use loop_cache::LoopCache;
 use queue::{Pending, QueueItem};
-use tracks::{Loaded, TrackCache, decode, stand_in, with_user_data};
+use tracks::{Loaded, TrackCache, decode, for_selector, stand_in};
 
 #[derive(Clone, Debug)]
 pub struct NodeSettings {
@@ -189,21 +189,26 @@ impl Node {
                     .await?
             }
         };
-        Ok(with_user_data(loaded, selector.user_data()))
+        for_selector(loaded, selector)
     }
 
     /// The item a selector adds to a queue: an encoded track ready to queue (it is resolved
     /// when it comes up), a query (or a stand-in for one) as a loading item, which the player
     /// loads in the background.
     pub fn queue_item(&self, selector: &TrackSelector) -> Result<QueueItem, ApiError> {
+        let times = selector.times();
         Ok(match selector {
-            TrackSelector::Encoded { encoded, user_data } => {
+            TrackSelector::Encoded {
+                encoded, user_data, ..
+            } => {
                 let found = decode(encoded)?;
-                let track = Track {
+                let track = times.apply(Track {
                     encoded: encoded.clone(),
                     info: found.info,
                     user_data: user_data.clone(),
-                };
+                    start_time: None,
+                    end_time: None,
+                })?;
                 if found.reference.source == QUERY_SOURCE {
                     let query = found.reference.uri;
                     let pending = Pending {
@@ -220,13 +225,15 @@ impl Node {
                 query,
                 start_index,
                 user_data,
+                ..
             } => {
                 let query = query.trim();
                 if query.is_empty() {
                     return Err(ApiError::new(ErrorCode::BadRequest, "a query is empty"));
                 }
+                // checked against the track once it loads
                 QueueItem::loading(
-                    stand_in(query, user_data.as_ref()),
+                    times.apply(stand_in(query, user_data.as_ref()))?,
                     Pending {
                         query: query.to_owned(),
                         start_index: as_index(*start_index),

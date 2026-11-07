@@ -11,6 +11,7 @@ import {
 import type {
   EntroximerOptions,
   GatewayVoiceStateUpdate,
+  QueueChange,
   Track,
   TrackEndReason,
 } from "../src/index.js";
@@ -272,6 +273,36 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
     await player.skip();
     await ended.called;
     expect(player.track).toBeNull();
+    await player.destroy();
+  });
+
+  test("changes the part a queued or playing track plays", async () => {
+    const manager = client();
+    await manager.connect();
+    const track = await loadTrack(manager, engine.tone);
+    const player = manager.player("13");
+    const started = nextCall<[Track, string]>();
+    player.once("trackStart", started.listener);
+    const added = await player.queue.add([track, track], { startTime: 1000 });
+    const [first, second] = added.items.map((item) => item.id);
+    if (first === undefined || second === undefined) {
+      throw new Error("two items were added");
+    }
+    expect((await started.called)[0].startTime).toBe(1000);
+
+    // a queued item's new times arrive as a change; a time left out stays
+    const changed = nextCall<[QueueChange]>();
+    player.queue.once("change", changed.listener);
+    await player.setTimes(second, { endTime: 20_000.4 });
+    expect((await changed.called)[0].type).toBe("updated");
+    expect(player.queue.items[0]?.track).toMatchObject({ startTime: 1000, endTime: 20_000 });
+
+    // the playing one's show in the player's track
+    await player.setTimes(first, { startTime: null, endTime: 25_000 });
+    expect(player.track?.startTime).toBeUndefined();
+    expect(player.track?.endTime).toBe(25_000);
+    expect((await failure(player.setTimes(second, { startTime: 21_000 }))).code).toBe("bad_request");
+    expect((await failure(player.setTimes("nope", { endTime: 5 }))).code).toBe("not_found");
     await player.destroy();
   });
 

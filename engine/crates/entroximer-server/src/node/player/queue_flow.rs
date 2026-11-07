@@ -12,8 +12,12 @@
 //! A queue item that cannot be loaded is reported with `trackError` and removed, and the queue
 //! goes on; after [`MAX_FAILURES`] in a row it waits for the client to change something. A
 //! loading item (see `loading`) is prepared once it has loaded; a skip to one waits for that.
+//!
+//! An item plays the part of its track that its `startTime` and `endTime` mark, every time it
+//! plays (repeated, or from the loop cache, too).
 
 use super::*;
+use crate::api::protocol::{Times, UpdateItem};
 
 impl GuildPlayer {
     pub(super) fn skip_locked(&self, state: &mut State, to: Option<&str>) -> Result<(), ApiError> {
@@ -78,6 +82,43 @@ impl GuildPlayer {
         }
         // the skip's target loads first, and the items skipped stop loading
         self.plan_loads(state);
+        Ok(())
+    }
+
+    /// Changes the times of the item `update.id`: the playing one (its start applies the next
+    /// time it plays, its end now), or one in the queue. A prepared next track playing it is
+    /// prepared again.
+    pub(super) fn update_item_locked(
+        &self,
+        state: &mut State,
+        update: &UpdateItem,
+    ) -> Result<(), ApiError> {
+        let id = update.id.as_str();
+        let current = self.deck().current().map(|t| t.id);
+        let playing = current.filter(|track| state.items.get(track).is_some_and(|i| i.id == id));
+        if let Some(track_id) = playing {
+            let item = &state.items[&track_id];
+            let track = update
+                .changed(Times::of(&item.track))
+                .apply(item.track.clone())?;
+            let end_at = Times::of(&track).end_ticks();
+            if let Some(item) = state.items.get_mut(&track_id) {
+                item.track = track;
+            }
+            // it plays on from where it is; an end it has passed ends it at once
+            self.deck().set_end_at(end_at);
+        } else {
+            let item = state.queue.get(id).ok_or_else(|| no_item(id))?;
+            let track = update
+                .changed(Times::of(&item.track))
+                .apply(item.track.clone())?;
+            let change = state.queue.update(id, track);
+            self.report(&state.queue, change);
+        }
+        // e.g. the replay of a repeated track, which would play the old times
+        if state.prepared.as_ref().is_some_and(|(_, item)| item == id) {
+            self.drop_prepared(state);
+        }
         Ok(())
     }
 
@@ -235,17 +276,30 @@ impl GuildPlayer {
             let Some(preparation) = state.preparing.take_if(|p| p.attempt == attempt) else {
                 return; // cancelled meanwhile
             };
+            // its times as they are now (`queue.update` may have changed them meanwhile), which
+            // must fit the length resolving tells
+            if let Some(queued) = state.queue.get(&item.id) {
+                item.track.start_time = queued.track.start_time;
+                item.track.end_time = queued.track.end_time;
+            }
+            let loaded = loaded.and_then(|loaded| {
+                Times::of(&item.track).apply(loaded.track.clone())?;
+                Ok(loaded)
+            });
             match loaded {
                 Ok(loaded) => {
                     // resolving can tell more, e.g. a YouTube Music result's artist and length
                     let track = Track {
                         user_data: item.track.user_data.take(),
+                        start_time: item.track.start_time,
+                        end_time: item.track.end_time,
                         ..loaded.track.clone()
                     };
                     let change = state.queue.update(&item.id, track.clone());
                     self.report(&state.queue, change);
+                    let times = Times::of(&track);
                     item.track = track;
-                    let deck_track = self.deck_track(node, loaded, None, None);
+                    let deck_track = self.deck_track(node, loaded, times);
                     self.set_prepared(&mut state, item, deck_track, preparation.skip);
                 }
                 Err(error) => {
@@ -291,11 +345,13 @@ impl GuildPlayer {
         if playing.id != item.id || current.player.caps().live {
             return None;
         }
+        let times = Times::of(&item.track);
         Some(DeckTrack {
             id: self.next_track.fetch_add(1, Ordering::Relaxed),
             length: current.length,
-            player: current.player.replay(),
-            end_at: None,
+            player: current.player.replay(times.start_ticks()),
+            start: times.start_ticks().unwrap_or(0),
+            end_at: times.end_ticks(),
         })
     }
 

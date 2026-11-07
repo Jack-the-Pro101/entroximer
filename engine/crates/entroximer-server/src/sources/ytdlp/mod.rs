@@ -687,9 +687,6 @@ impl Media {
     }
 }
 
-/// What yt-dlp names the media it downloads to a directory, before the extension.
-const MEDIA_STEM: &str = "media";
-
 /// Downloads with yt-dlp (or ffmpeg, for HLS), and re-opens at an offset through ffmpeg.
 struct YtDlpProducer {
     download: Arc<dyn Producer>,
@@ -768,18 +765,14 @@ impl YtDlpProducer {
                     Some(id) => format!("{id}/bestaudio"),
                     None => "bestaudio".to_owned(),
                 };
-                // fixups remux the finished file through another one, which nothing reads; the
-                // stdout download gets none either
-                args.extend(["--no-playlist", "--fixup", "never", "-f"].map(String::from));
-                args.push(formats);
+                args.extend(["--no-playlist".to_owned(), "-f".to_owned(), formats]);
                 let page = page.to_owned();
                 Arc::new(GrowingFileProducer::new(
                     ctx.work_dir().to_owned(),
-                    MEDIA_STEM,
                     caps,
                     hint,
                     move |_, dir: &Path| {
-                        let template = dir.join(format!("{MEDIA_STEM}.%(ext)s"));
+                        let template = dir.join("media.%(ext)s");
                         let spec = ytdlp
                             .clone()
                             .args(args.clone())

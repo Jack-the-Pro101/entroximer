@@ -31,10 +31,13 @@ export interface ClipOptions {
   clipId?: string;
   /** Percent of the layer's volume, up to 1000; 100 if absent. */
   volume?: number;
-  /** Where in the track to start, in milliseconds. */
-  startAt?: number;
-  /** Where in the track to stop, in milliseconds. */
-  endAt?: number;
+  /**
+   * Where in the track to start, in milliseconds, in place of the link's start time (see
+   * `parseLinkTimes`) or the track's own; `null` (or 0) plays from the beginning.
+   */
+  startAt?: number | null;
+  /** Where in the track to stop, in milliseconds, in place of the link's or the track's; `null` plays to the end. */
+  endAt?: number | null;
   /** Milliseconds to fade in, up to 10 000. */
   fadeIn?: number;
   /** Milliseconds to fade out when stopped or replaced, up to 10 000. */
@@ -157,10 +160,8 @@ export class Layer extends Emitter<LayerEvents> {
         guildId: this.guildId,
         layer: this.name,
         clipId,
-        track: selector(track, options.userData),
+        track: selector(track, { userData: options.userData, startTime: options.startAt, endTime: options.endAt }),
         ...(options.volume === undefined ? {} : { volume: whole(options.volume) }),
-        ...(options.startAt === undefined ? {} : { position: whole(options.startAt) }),
-        ...(options.endAt === undefined ? {} : { endTime: whole(options.endAt) }),
         ...(options.fadeIn === undefined ? {} : { fadeIn: whole(options.fadeIn) }),
         ...(options.fadeOut === undefined ? {} : { fadeOut: whole(options.fadeOut) }),
         ...(options.loop === undefined ? {} : { loop: options.loop }),

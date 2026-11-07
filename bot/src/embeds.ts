@@ -2,7 +2,7 @@
 import { AttachmentBuilder, EmbedBuilder } from "discord.js";
 import type { Entroximer, Player, Track } from "entroximer-client";
 
-import { describeItem, describeTrack, escape, formatTime, truncate } from "./format";
+import { describeItem, describeTrack, escape, formatTime, playedLength, trackLength, truncate } from "./format";
 
 const COLOR = 0x2bb3a0;
 /** Queue items per page of `/queue`: a message holds ten embeds, one of them the header. */
@@ -69,10 +69,14 @@ export async function nowPlayingMessage(manager: Entroximer, player: Player, tra
   if (author) {
     embed.setDescription(`by ${escape(author)}`);
   }
+  // the bar spans the part that plays
+  const start = track.startTime ?? 0;
+  const end = track.endTime ?? length;
+  const part = start > 0 || track.endTime !== undefined ? ` (playing ${trackLength(track)})` : "";
   const progress =
-    isStream || length === null
-      ? formatTime(position)
-      : `${progressBar(position / length)} ${formatTime(position)} / ${formatTime(length)}`;
+    isStream || end === null
+      ? `${formatTime(position)}${part}`
+      : `${progressBar((position - start) / Math.max(1, end - start))} ${formatTime(position)} / ${formatTime(end)}${part}`;
   embed.addFields({ name: isStream ? "Live for" : "Position", value: progress });
 
   const next = player.queue.items[0];
@@ -111,8 +115,9 @@ export async function queueMessage(manager: Entroximer, player: Player, page: nu
   if (onPage.length === 0) {
     header.setDescription("Nothing queued.");
   }
-  const known = items.filter((item) => item.track.info.length !== null);
-  const total = known.reduce((sum, item) => sum + (item.track.info.length ?? 0), 0);
+  const lengths = items.map((item) => playedLength(item.track));
+  const known = lengths.filter((length) => length !== null);
+  const total = known.reduce((sum, length) => sum + length, 0);
   const duration = `${formatTime(total)}${known.length < items.length ? "+" : ""}`;
   const loading = player.queue.loading;
   const count = `${items.length} tracks${loading > 0 ? ` (${loading} loading)` : ""}`;

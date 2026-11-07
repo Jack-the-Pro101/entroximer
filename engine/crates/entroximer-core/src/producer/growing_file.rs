@@ -2,8 +2,7 @@
 //!
 //! yt-dlp's SABR downloader (yt-dlp PR #13515) cannot write to stdout, so it is pointed at an
 //! empty per-open directory and whatever media appears there is read while it grows, until the
-//! process exits. Only files named after the media (`<stem>.…`) count: the SABR downloader also
-//! saves its progress there through a temporary file (`tmpritx0d36`) renamed to `<name>.state`.
+//! process exits:
 //!
 //! - a plain download writes one `<name>.part`, renamed to `<name>` when done; the open file
 //!   descriptor survives the rename;
@@ -36,7 +35,6 @@ const IGNORED_SUFFIXES: &[&str] = &[".json", ".ytdl", ".state", ".txt", ".log"];
 pub struct GrowingFileProducer<F> {
     build: F,
     work_dir: PathBuf,
-    stem: String,
     caps: ProducerCaps,
     hint: Option<String>,
     pub poll: Duration,
@@ -47,19 +45,11 @@ where
     F: Fn(Option<Ticks>, &Path) -> (ProcessSpec, TimestampMode) + Send + Sync + 'static,
 {
     /// `build` receives the requested start and an empty directory to write into, which is
-    /// created under `work_dir` and removed when the stream is dropped. The process must name
-    /// the media `<stem>.<ext>` there; other files are left alone.
-    pub fn new(
-        work_dir: PathBuf,
-        stem: impl Into<String>,
-        caps: ProducerCaps,
-        hint: Option<String>,
-        build: F,
-    ) -> Self {
+    /// created under `work_dir` and removed when the stream is dropped.
+    pub fn new(work_dir: PathBuf, caps: ProducerCaps, hint: Option<String>, build: F) -> Self {
         Self {
             build,
             work_dir,
-            stem: stem.into(),
             caps,
             hint,
             poll: Duration::from_millis(50),
@@ -71,7 +61,6 @@ impl<F> std::fmt::Debug for GrowingFileProducer<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GrowingFileProducer")
             .field("work_dir", &self.work_dir)
-            .field("stem", &self.stem)
             .field("caps", &self.caps)
             .field("hint", &self.hint)
             .field("poll", &self.poll)
@@ -92,12 +81,11 @@ where
             let (spec, timestamps) = (self.build)(start, dir.path());
             Ok((dir, spec.spawn(Stdio::null())?, timestamps))
         });
-        let (stem, hint, poll) = (self.stem.clone(), self.hint.clone(), self.poll);
+        let (hint, poll) = (self.hint.clone(), self.poll);
         Box::pin(async move {
             let (dir, proc, timestamps) = opened?;
             let tail = Tail {
                 dir,
-                stem,
                 proc,
                 reading: None,
                 sent: 0,
@@ -120,8 +108,6 @@ where
 
 struct Tail {
     dir: tempfile::TempDir,
-    /// What the media's file names start with, before the first dot.
-    stem: String,
     proc: RunningProcess,
     /// The piece being read.
     reading: Option<(Piece, tokio::fs::File)>,
@@ -156,7 +142,7 @@ impl Tail {
                     Err(e) => return self.fail(e),
                 }
             }
-            let pieces = match Pieces::list(self.dir.path(), &self.stem).await {
+            let pieces = match Pieces::list(self.dir.path()).await {
                 Ok(pieces) => pieces,
                 Err(e) => return self.fail(e),
             };
@@ -238,12 +224,8 @@ enum Piece {
 }
 
 impl Piece {
-    /// `None` for files that are not the media named `<stem>.…`, or not yet part of it.
-    fn of(name: &str, stem: &str) -> Option<Self> {
-        let named_after_media = name
-            .strip_prefix(stem)
-            .is_some_and(|rest| rest.starts_with('.'));
-        if !named_after_media || IGNORED_SUFFIXES.iter().any(|s| name.ends_with(s)) {
+    fn of(name: &str) -> Option<Self> {
+        if IGNORED_SUFFIXES.iter().any(|s| name.ends_with(s)) {
             return None;
         }
         let Some(stem) = name.strip_suffix(".part") else {
@@ -274,11 +256,11 @@ struct Pieces {
 }
 
 impl Pieces {
-    async fn list(dir: &Path, stem: &str) -> io::Result<Self> {
+    async fn list(dir: &Path) -> io::Result<Self> {
         let mut pieces = Self::default();
         let mut entries = tokio::fs::read_dir(dir).await?;
         while let Some(entry) = entries.next_entry().await? {
-            let Some(piece) = Piece::of(&entry.file_name().to_string_lossy(), stem) else {
+            let Some(piece) = Piece::of(&entry.file_name().to_string_lossy()) else {
                 continue;
             };
             // gone since listing: the next listing tells
@@ -378,7 +360,6 @@ mod tests {
         // writes three chunks with pauses, via a .part file renamed at the end like yt-dlp does
         let producer = GrowingFileProducer::new(
             work.path().to_owned(),
-            "x",
             ProducerCaps::default(),
             None,
             |_, dir: &Path| {
@@ -410,7 +391,6 @@ mod tests {
         let script = script.into();
         let producer = GrowingFileProducer::new(
             work.to_owned(),
-            "x",
             ProducerCaps::default(),
             None,
             move |_, dir: &Path| {
@@ -493,37 +473,15 @@ mod tests {
         assert_eq!(joined(stream_of("printf abc > x.webm").await), b"abc");
     }
 
-    #[tokio::test]
-    async fn the_sabr_state_being_saved_is_not_the_media() {
-        // the SABR downloader saves its state after each segment through a temporary file
-        let chunks = stream_of(format!(
-            "printf II > x.webm.sqi.part && printf aaa > x.webm.sq1.part \
-             && printf state > tmpritx0d36 && sleep 0.3 && mv tmpritx0d36 x.webm.state \
-             && {SABR_JOIN}"
-        ))
-        .await;
-        assert_eq!(joined(chunks), b"IIaaa");
-    }
-
     #[test]
     fn names_tell_the_pieces() {
-        let of = |name| Piece::of(name, "x");
-        assert_eq!(of("x.webm.sqi.part"), Some(Piece::Init));
-        assert_eq!(of("x.webm.sq12.part"), Some(Piece::Run(12)));
-        assert_eq!(of("x.webm.sg12.part"), None);
-        assert_eq!(of("x.webm.sgi.part"), None);
-        assert_eq!(of("x.webm.state"), None);
-        assert_eq!(of("x.webm.part"), Some(Piece::Partial));
-        assert_eq!(of("x.webm"), Some(Piece::Finished));
-    }
-
-    #[test]
-    fn only_files_named_after_the_media_count() {
-        let of = |name| Piece::of(name, "x");
-        assert_eq!(of("tmpritx0d36"), None);
-        assert_eq!(of("xy.webm"), None);
-        assert_eq!(of("x"), None);
-        assert_eq!(of("a.webm"), None);
+        assert_eq!(Piece::of("x.webm.sqi.part"), Some(Piece::Init));
+        assert_eq!(Piece::of("x.webm.sq12.part"), Some(Piece::Run(12)));
+        assert_eq!(Piece::of("x.webm.sg12.part"), None);
+        assert_eq!(Piece::of("x.webm.sgi.part"), None);
+        assert_eq!(Piece::of("x.webm.state"), None);
+        assert_eq!(Piece::of("x.webm.part"), Some(Piece::Partial));
+        assert_eq!(Piece::of("x.webm"), Some(Piece::Finished));
     }
 
     #[tokio::test]
@@ -531,7 +489,6 @@ mod tests {
         let work = tempfile::tempdir().unwrap();
         let producer = GrowingFileProducer::new(
             work.path().to_owned(),
-            "x",
             ProducerCaps::default(),
             None,
             |_, dir: &Path| {

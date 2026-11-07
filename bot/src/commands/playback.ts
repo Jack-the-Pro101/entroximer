@@ -33,12 +33,12 @@ export const playbackCommands: Command[] = [
         .setName("seek")
         .setDescription("Jump to a position in the current track")
         .addStringOption((o) =>
-          o.setName("position").setDescription("Like 90, 1:30 or 1:02:03").setRequired(true),
+          o.setName("position").setDescription("Like 90, 1:30, 1:02:03 or 1m30s").setRequired(true),
         ),
     async (interaction, engine) => {
       const position = parseTime(interaction.options.getString("position", true));
       if (position === null) {
-        throw new UserError("Give the position as seconds, `m:ss` or `h:mm:ss`.");
+        throw new UserError("Give the position as seconds, `m:ss`, `h:mm:ss` or `1m30s`.");
       }
       const player = existingPlayer(interaction, engine);
       if (!player.track) {

@@ -105,7 +105,8 @@ pub enum QueueChange {
     Shuffled {
         order: Vec<String>,
     },
-    /// An item's track got fuller metadata, e.g. once resolved for playback.
+    /// An item's track got fuller metadata, e.g. once resolved for playback, or new times
+    /// (`queue.update`).
     Updated {
         item: Box<QueueItem>,
     },
@@ -344,6 +345,8 @@ mod tests {
                     source_name: "test".to_owned(),
                 },
                 user_data: None,
+                start_time: None,
+                end_time: None,
             },
         }
     }

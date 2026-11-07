@@ -43,6 +43,7 @@ export interface Results {
   "queue.shuffle": QueueState;
   "queue.skip": PlayerInfo;
   "queue.configure": QueueState;
+  "queue.update": PlayerInfo;
   "layer.update": LayerInfo;
   "layer.remove": null;
   "clip.play": ClipInfo;

@@ -112,10 +112,11 @@ order: the events a request causes always arrive before its response.
 | `player.update` | Creates or changes a guild's player: `track` (plays now; `null` stops), `position`, `endTime`, `paused`, `volume`, `graph` or `preset` (effects), `voice`. These are the music's; a refused update changes nothing |
 | `player.get` / `player.destroy` | Reads a player, or stops it and leaves the voice channel |
 | `queue.get` | A page of a player's queue |
-| `queue.add` | Adds tracks at an index and answers at once: encoded tracks as they are, queries (with an optional playlist `startIndex`) as loading items that load in the background; with nothing playing, the first item starts once it is ready |
+| `queue.add` | Adds tracks at an index and answers at once: encoded tracks as they are, queries (with an optional playlist `startIndex`) as loading items that load in the background; with nothing playing, the first item starts once it is ready. Each track can play only part of itself, from its `startTime` to its `endTime` (see [Start and end times](#start-and-end-times)) |
 | `queue.remove` / `queue.move` / `queue.clear` / `queue.shuffle` | Edit the queue |
 | `queue.skip` | Plays the next item (or `toItem`), instantly if it is prepared |
 | `queue.configure` | Sets `repeat` (`off`, `track` or `queue`) and `crossfade` (ms, up to 12 000) |
+| `queue.update` | Changes an item's `startTime` and `endTime` (`null` clears one): an item in the queue, or the playing one |
 | `layer.update` / `layer.remove` | Creates or changes a layer besides the music (`volume`, `graph` or `preset`, `paused`, `mode`, `maxClips`, `duck`), or removes it; see [Layers and clips](#layers-and-clips) |
 | `clip.play` / `clip.stop` | Plays a sound on a layer, outside the queue (`volume`, `position`, `endTime`, `fadeIn`, `fadeOut`, `loop`), or stops one or all of a layer's |
 | `session.configure` | Sets how long players wait, paused, for a disconnected client to resume |
@@ -356,6 +357,28 @@ An item that fails to load is reported with `trackError` and removed, and the qu
 after five failures in a row it waits until the client changes something. Clients mirror the
 queue from `queueChanged` events and fetch it again (`queue.get`) when a version is skipped.
 Queues live in memory: they survive client reconnects but not engine restarts.
+
+### Start and end times
+
+Any track selector (in `queue.add`, `player.update` or `clip.play`) can take a `startTime` and an
+`endTime` in milliseconds: the track then plays only that part, every time it plays (repeated, or
+from the loop cache, too), and ends there as `finished`, so the queue goes on as after its end.
+The track carries them in every event and queue change (`track.startTime`, `track.endTime`, beside
+`userData`, outside its `encoded` form); `info.length` stays the whole track's. A query's times
+apply to the track it finds, or to the first of a playlist's. The start must come before the end;
+a start at or past a track's known length, or any start on a stream, is refused (for a queued
+query, once it has loaded: `trackError`, and the item is removed). A `player.update` with a
+`track` takes its `position` and `endTime` as the track's times; an `endTime` on its own changes
+the playing track's.
+
+`queue.update` changes an item's times after it was added: an item in the queue (a loading one
+too) reports them as an `updated` change, the playing one in the result's `track`. The playing
+track plays on from where it is: a new start applies the next time it plays (repeated, or in the
+queue's next round), a new end at once, and an end it has passed ends it now.
+
+The engine does not read times from links: what a parameter means depends on the site, so
+clients do (the TypeScript client's `parseLinkTimes` reads YouTube's `?t=`, Twitch's, media
+fragments like `#t=90`, and so on, and sends them as `startTime` and `endTime`).
 
 ### Loading queries
 

@@ -53,11 +53,12 @@ change.
 | Method | Does |
 |---|---|
 | `connect(channelId)` | Joins (or moves to) a voice channel through the gateway |
-| `play(track, { startAt, endAt, userData, onlyIfIdle })` | Plays a track now, in place of the current one; the queue goes on afterwards. `track` is a loaded `Track` or a URL/search to load |
+| `play(track, { startAt, endAt, userData, onlyIfIdle })` | Plays a track now, in place of the current one; the queue goes on afterwards. `track` is a loaded `Track` or a URL/search to load; `startAt` and `endAt` replace the link's or the track's own times (see [Start and end times](#start-and-end-times)) |
 | `skip(toItem?)` | Plays the queue's next item (or `toItem`, dropping the ones before it); stops if the queue is empty |
 | `seek(ms)`, `pause()`, `resume()` | Control playback |
 | `stop()` | Stops playback; the queue waits until something plays again |
 | `setVolume(percent)`, `setEndTime(ms)` | 100 % leaves the audio unchanged, up to 1000 % |
+| `setTimes(itemId, { startTime, endTime })` | Changes the part of a queued or the playing track (`itemId`) that plays; see [Start and end times](#start-and-end-times) |
 | `setPreset(name, params?)` | Effects from one of the engine's presets, e.g. `setPreset("nightcore")` or `setPreset("bass_boost", { gain_db: 9 })` |
 | `setGraph(graph)` | Effects, e.g. `chain({ type: "lowpass", params: { cutoff: 800 } })` or `parseChain("lowpass(800) => reverb", info.nodes)`; `null` removes them |
 | `update(changes)` | Several changes in one request |
@@ -169,7 +170,7 @@ other without a gap.
 
 | Method | Does |
 |---|---|
-| `add(tracks, { index, userData, startIndex })` | Adds loaded tracks, or queries, which load in the background: a search adds its first result, a playlist link its tracks (from the one at `startIndex`, counted from 0, if given) |
+| `add(tracks, { index, userData, startIndex, startTime, endTime })` | Adds loaded tracks, or queries, which load in the background: a search adds its first result, a playlist link its tracks (from the one at `startIndex`, counted from 0, if given). Each plays from its `startTime` to its `endTime`: the options', else its link's or its own (see [Start and end times](#start-and-end-times)) |
 | `whenLoaded(id)` | Resolves once a loading item has loaded, with the items in its place (and the `playlist` they came from); rejects with its error |
 | `remove(...ids)`, `move(id, index)`, `clear()`, `shuffle()` | Edit the queue |
 | `setRepeat("off" \| "track" \| "queue")` | Repeat the current track, or send finished tracks to the end |
@@ -196,6 +197,40 @@ and removed.
 // links from several sites, one per line; blank lines and `#` comments are left out
 const added = await player.queue.add(parseQueries(text), { userData: { by: user.id } });
 const { items, playlist } = await player.queue.whenLoaded(added.items[0]!.id);
+```
+
+### Start and end times
+
+A track can play only part of itself: from its `startTime` to its `endTime` (milliseconds, on
+`Track` beside `userData`; `info.length` stays the whole track's). The engine plays that part
+every time the track plays, also when repeated, and its `trackEnd` is `finished` at the end time.
+The engine never reads times from links, so the client does: `queue.add`, `play`, `layer.play`
+and `load` take a link's times out of it with `parseLinkTimes` and send them along, and a `Track`
+keeps its own when queued again. Given times replace both: `{ startTime: 0 }` (or `null`) plays
+from the beginning whatever the link says, `{ endTime: null }` to the end.
+
+`player.setTimes(itemId, { startTime, endTime })` changes them later, for an item in the queue
+(it arrives as an `updated` change) or the playing one (`player.itemId`; `player.track` shows
+them); a time left out stays, `null` clears it. The playing track plays on from where it is: a new
+start applies the next time it plays (repeated, or in the queue's next round), a new end right
+away, and an end it has passed ends it now.
+
+| Link | Gives |
+|---|---|
+| YouTube (`youtube.com`, `youtu.be`, YouTube Music, embeds) | `t=90`, `t=1m30s`, `start=`, `time_continue=` as the start and `end=` as the end, in the query or the fragment |
+| Twitch videos (`twitch.tv/videos/...`) | `t=1h2m3s` |
+| Dailymotion | `start=90` |
+| bilibili | `t=90` |
+| Any other link, e.g. SoundCloud, Vimeo, a media file | A media fragment: `#t=90`, `#t=1:23`, `#t=1m30s`, `#t=10,20` (from and to) or `#t=,20` (to) |
+
+Other query parameters named `t` (often cache busters) are left alone. `parseDuration(text)`
+reads the times these use, and what people type: `90`, `90.5`, `90s`, `1m30s`, `1h2m3s`, `1:30` or
+`1:02:03`, in milliseconds (`null` if it is none of these).
+
+```ts
+parseLinkTimes("https://youtu.be/I-sH53vXP2A?t=1m30s");
+// { query: "https://youtu.be/I-sH53vXP2A", startTime: 90000 }
+await player.queue.add("https://youtu.be/I-sH53vXP2A?t=1m30s", { endTime: parseDuration("2:45")! });
 ```
 
 With a crossfade, the next track's `trackStart` comes when the fade starts, right after the

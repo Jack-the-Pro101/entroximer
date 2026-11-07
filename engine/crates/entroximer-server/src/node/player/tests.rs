@@ -234,6 +234,8 @@ impl Harness {
                 query: self.media.link(name),
                 start_index: None,
                 user_data: None,
+                start_time: None,
+                end_time: None,
             };
             let item = self.node.queue_item(&selector).unwrap();
             assert!(item.is_loading());
@@ -916,3 +918,4 @@ async fn the_prepared_item_follows_the_head_of_the_queue() {
 
 mod layers;
 mod loading;
+mod times;

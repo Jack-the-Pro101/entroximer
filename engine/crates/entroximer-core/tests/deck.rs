@@ -43,6 +43,7 @@ impl Bench {
                 PlayerConfig::default(),
                 start,
             ),
+            start: start.unwrap_or(0),
             end_at: None,
             length: None,
         }
@@ -368,6 +369,29 @@ fn with_a_rate_a_crossfade_lasts_as_long_and_takes_more_of_the_track() {
     };
     // a second of output takes 1.25 s of the track, so the fade starts 1.25 s before its end
     let expected = at(51.0 - 1.25);
+    assert!(
+        (switched_at - expected).abs() < at(0.05),
+        "faded from {:.3} s",
+        switched_at as f64 / 48_000.0
+    );
+}
+
+#[test]
+fn a_crossfade_takes_at_most_half_of_what_plays_from_the_tracks_start() {
+    // the first track plays from 48 s to 51 s
+    let mut bench = Bench::crossfading(2.5);
+    let mut block = vec![0.0; BLOCK_FRAMES * 2];
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let switched_at = loop {
+        let before = bench.deck.current().unwrap().player.position();
+        bench.deck.render(&mut block);
+        if bench.deck.current().unwrap().id == 2 {
+            break before;
+        }
+        assert!(std::time::Instant::now() < deadline, "no crossfade");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    let expected = at(51.0 - 1.5);
     assert!(
         (switched_at - expected).abs() < at(0.05),
         "faded from {:.3} s",

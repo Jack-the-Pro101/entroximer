@@ -266,10 +266,12 @@ impl GuildPlayer {
                 "clipId must be 1 to {MAX_CLIP_ID} characters"
             )));
         }
+        // in place of its track's times
+        let times = clip.track.times();
         let options = ClipOptions {
             volume: f32::from(clip.volume.unwrap_or(100)) / 100.0,
-            position: clip.position.map(Millis::to_ticks),
-            end_at: clip.end_time.map(Millis::to_ticks),
+            position: clip.position.or(times.start).map(Millis::to_ticks),
+            end_at: clip.end_time.or(times.end).map(Millis::to_ticks),
             fade_in: frames(clip.fade_in.unwrap_or_default()),
             fade_out: frames(clip.fade_out.unwrap_or_default()),
             looping: clip.looping == Some(true),
@@ -680,6 +682,7 @@ impl GuildPlayer {
                 id: self.next_track.fetch_add(1, Ordering::Relaxed) | CLIP_ID,
                 length: loaded.track.info.length.map(Millis::to_ticks),
                 player: Player::new(Handle::current(), loaded.producer, config, options.position),
+                start: options.position.unwrap_or(0),
                 end_at: options.end_at,
             },
             volume: options.volume,

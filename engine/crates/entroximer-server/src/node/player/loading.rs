@@ -18,6 +18,7 @@
 use std::time::Instant;
 
 use super::*;
+use crate::api::protocol::Times;
 use crate::node::queue::Pending;
 use crate::node::tracks::{load_error, to_track};
 use crate::sources::background::{self, Promotion};
@@ -66,6 +67,14 @@ impl Found {
             tracks: vec![track],
             ..Self::default()
         }
+    }
+
+    /// Puts the part to play on the first track found; refused if that track cannot play it.
+    pub(super) fn with_times(mut self, times: Times) -> Result<Self, ApiError> {
+        if let Some(first) = self.tracks.first_mut() {
+            *first = times.apply(first.clone())?;
+        }
+        Ok(self)
     }
 }
 
@@ -184,6 +193,7 @@ impl GuildPlayer {
                 state.loads.remove(item_id);
                 return;
             };
+            let found = found.and_then(|found| found.with_times(Times::of(&item.track)));
             let refused = found
                 .as_ref()
                 .is_err_and(|e| matches!(e.code, ErrorCode::RateLimited | ErrorCode::BotCheck));
@@ -238,7 +248,8 @@ impl GuildPlayer {
         self.sync_output();
     }
 
-    /// Puts what `item`'s query found in its place.
+    /// Puts what `item`'s query found in its place. The first track found already has the
+    /// item's times.
     pub(super) fn loaded(&self, state: &mut State, node: &Node, item: &QueueItem, found: Found) {
         let Found {
             mut tracks,

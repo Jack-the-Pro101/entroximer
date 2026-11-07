@@ -43,6 +43,7 @@ impl Bench {
                 PlayerConfig::default(),
                 start,
             ),
+            start: start.unwrap_or(0),
             end_at: None,
             length: None,
         }

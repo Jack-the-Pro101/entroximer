@@ -12,7 +12,7 @@ use entroximer_core::producer::Producer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::api::protocol::{ApiError, ErrorCode, LoadResult, SearchResult, Track};
+use crate::api::protocol::{ApiError, ErrorCode, LoadResult, SearchResult, Track, TrackSelector};
 use crate::config::MediaContext;
 use crate::expiring::Expiring;
 use crate::sources::spotify::SpotifyError;
@@ -84,6 +84,8 @@ pub fn decode_track(encoded: &str) -> Result<Track, ApiError> {
         encoded: encoded.to_owned(),
         info: decode(encoded)?.info,
         user_data: None,
+        start_time: None,
+        end_time: None,
     })
 }
 
@@ -93,6 +95,8 @@ pub fn to_track(found: FoundTrack) -> Track {
         encoded: encode(&found),
         info: found.info,
         user_data: None,
+        start_time: None,
+        end_time: None,
     }
 }
 
@@ -302,10 +306,12 @@ fn reuse_for(valid_until: Option<SystemTime>, now: SystemTime) -> Option<Duratio
         .map(|left| left.min(KEEP_RESOLVED_FOR))
 }
 
-/// Attaches the client's data to a loaded track.
-pub fn with_user_data(mut loaded: Loaded, user_data: Option<&Value>) -> Loaded {
-    loaded.track.user_data = user_data.cloned();
-    loaded
+/// Attaches what a selector asks of the track to the loaded track: the client's data, and the
+/// part of it to play (refused if the track cannot play it).
+pub fn for_selector(mut loaded: Loaded, selector: &TrackSelector) -> Result<Loaded, ApiError> {
+    loaded.track.user_data = selector.user_data().cloned();
+    loaded.track = selector.times().apply(loaded.track)?;
+    Ok(loaded)
 }
 
 /// Maps a load failure to a stable error code.

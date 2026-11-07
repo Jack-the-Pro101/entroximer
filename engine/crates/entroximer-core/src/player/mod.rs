@@ -215,15 +215,15 @@ impl Player {
         Self::reading(rt, source, cfg, timeline, start.unwrap_or(0).max(0))
     }
 
-    /// Plays the same media again from the start, from what this player has downloaded: only
-    /// what is missing is loaded again. Both players keep what they are near.
-    pub fn replay(&self) -> Self {
+    /// Plays the same media again from `start` (the beginning if `None`), from what this player
+    /// has downloaded: only what is missing is loaded again. Both players keep what they are near.
+    pub fn replay(&self, start: Option<Ticks>) -> Self {
         Self::reading(
             self.rt.clone(),
             Arc::clone(&self.source),
             self.cfg.clone(),
             Arc::clone(self.timeline()),
-            0,
+            start.unwrap_or(0).max(0),
         )
     }
 
@@ -236,14 +236,14 @@ impl Player {
         }
     }
 
-    /// Plays kept media from the start, from what was downloaded.
-    pub fn from_kept(rt: Handle, kept: &Kept) -> Self {
+    /// Plays kept media from `start` (the beginning if `None`), from what was downloaded.
+    pub fn from_kept(rt: Handle, kept: &Kept, start: Option<Ticks>) -> Self {
         Self::reading(
             rt,
             Arc::clone(&kept.source),
             kept.cfg.clone(),
             Arc::clone(&kept.timeline),
-            0,
+            start.unwrap_or(0).max(0),
         )
     }
 

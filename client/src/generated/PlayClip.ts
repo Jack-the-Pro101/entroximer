@@ -14,11 +14,11 @@ clipId?: string,
  */
 volume?: number, 
 /**
- * Where in the track it starts.
+ * Where in the track it starts; its `startTime` if absent.
  */
 position?: Millis, 
 /**
- * Where in the track it ends.
+ * Where in the track it ends; its `endTime` if absent.
  */
 endTime?: Millis, 
 /**

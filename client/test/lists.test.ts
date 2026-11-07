@@ -14,12 +14,12 @@ test("lists of queries keep their order and leave out blanks and comments", () =
 });
 
 test("a start index goes with queries only", () => {
-  expect(selector("https://example.com/list", { by: "me" }, 4.6)).toEqual({
+  expect(selector("https://example.com/list", { userData: { by: "me" }, startIndex: 4.6 })).toEqual({
     query: "https://example.com/list",
     startIndex: 5,
     userData: { by: "me" },
   });
-  expect(selector("ytsearch:x", undefined)).toEqual({ query: "ytsearch:x" });
+  expect(selector("ytsearch:x")).toEqual({ query: "ytsearch:x" });
   const track = { encoded: "abc", info: {} as never };
-  expect(selector(track, undefined, 3)).toEqual({ encoded: "abc" });
+  expect(selector(track, { startIndex: 3 })).toEqual({ encoded: "abc" });
 });
