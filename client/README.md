@@ -63,6 +63,7 @@ change.
 | `setPreset(name, params?)` | Effects from one of the engine's presets, e.g. `setPreset("nightcore")` or `setPreset("bass_boost", { gain_db: 9 })` |
 | `setGraph(graph)` | Effects, e.g. `chain({ type: "lowpass", params: { cutoff: 800 } })` or `parseChain("lowpass(800) => reverb", info.nodes)`; `null` removes them |
 | `update(changes)` | Several changes in one request |
+| `view({ collapse? })` | The signal flow laid out for drawing, one node a row with box-drawing wires: each layer's source, effects and volume into the mix (see the engine's [Viewing the signal flow](../engine/README.md#viewing-the-signal-flow)). Effects are named by `layer`, `id` and `graphTag` |
 | `setTextChannel(channelId)` | Where the bot posts about this player (`textChannelId`); `null` for nowhere |
 | `destroy()` | Stops playback, leaves the voice channel and removes the player |
 

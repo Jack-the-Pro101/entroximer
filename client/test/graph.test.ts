@@ -111,8 +111,11 @@ describe("building on graphs", () => {
     expect("rate" in withRate(fast, 1)).toBe(false);
   });
 
-  test("ids stay unique", () => {
+  test("ids stay unique and can be written anywhere", () => {
     expect(() => append(branched, { type: "lowpass", id: "low" })).toThrow("already has a node `low`");
+    for (const id of ["Low", "low pass", "low:1", "", "x".repeat(33)]) {
+      expect(() => append(branched, { type: "lowpass", id })).toThrow("must be 1 to 32");
+    }
     const graph = append(chain({ type: "lowpass" }, { type: "lowpass" }), { type: "lowpass" });
     expect(new Set(graph.nodes.map((node) => node.id)).size).toBe(3);
   });

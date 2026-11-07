@@ -5,6 +5,7 @@ import type { Engine } from "../engine";
 import { channelCommands } from "./channels";
 import { failureText } from "./command";
 import type { Command, GuildAutocomplete, GuildInteraction } from "./command";
+import { graphCommands } from "./graph";
 import { infoCommands } from "./info";
 import { playCommands } from "./play";
 import { playbackCommands } from "./playback";
@@ -17,6 +18,7 @@ export const commands: readonly Command[] = [
   ...queueCommands,
   ...playbackCommands,
   ...soundCommands,
+  ...graphCommands,
   ...infoCommands,
 ];
 

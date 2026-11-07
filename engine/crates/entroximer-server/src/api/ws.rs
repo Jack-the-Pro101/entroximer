@@ -25,6 +25,7 @@ use super::protocol::{
 use super::{Authorized, HttpError};
 use crate::node::player::{ClipTurn, GuildPlayer};
 use crate::node::{Node, Session, tracks};
+use crate::view;
 
 /// Queue items `queue.get` returns unless asked otherwise, and at most.
 const QUEUE_PAGE: u32 = 100;
@@ -266,6 +267,10 @@ async fn dispatch(
                 .map_err(|e| ApiError::new(ErrorCode::BadRequest, display_chain(&e)))?,
         ),
         Call::GetPlayer(params) => to_value(player(session, params.guild_id)?.info()),
+        Call::ViewPlayer(params) => to_value(view::player_view(
+            &player(session, params.guild_id)?.info(),
+            params.collapse.as_deref().unwrap_or_default(),
+        )),
         Call::UpdatePlayer(update) => {
             let player = session.player_or_create(node, update.guild_id);
             to_value(player.update(node, *update).await?)

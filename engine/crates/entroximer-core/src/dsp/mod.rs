@@ -31,7 +31,7 @@ pub use chain::{ChainError, parse_chain};
 pub use effects::Effects;
 pub use graph::{
     CHANNELS, Edge, Endpoint, GRAPH_INPUT, GRAPH_OUTPUT, GraphError, GraphSpec, MAX_EDGES,
-    MAX_NODES, NodeSpec,
+    MAX_ID_LEN, MAX_NODES, NodeSpec, is_valid_id,
 };
 pub use presets::{PresetDescriptor, PresetError, PresetFactory, PresetRegistry, PresetSelection};
 pub use ramp::{Curve, Ramp};

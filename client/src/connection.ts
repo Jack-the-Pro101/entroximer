@@ -8,6 +8,7 @@ import type { LayerInfo } from "./generated/LayerInfo.js";
 import type { LoadResult } from "./generated/LoadResult.js";
 import type { NodeInfo } from "./generated/NodeInfo.js";
 import type { PlayerInfo } from "./generated/PlayerInfo.js";
+import type { PlayerView } from "./generated/PlayerView.js";
 import type { QueueAdded } from "./generated/QueueAdded.js";
 import type { QueuePage } from "./generated/QueuePage.js";
 import type { QueueState } from "./generated/QueueState.js";
@@ -33,6 +34,7 @@ export interface Results {
   "tracks.decode": Track[];
   "presets.build": GraphSpec;
   "player.get": PlayerInfo;
+  "player.view": PlayerView;
   "player.update": PlayerInfo;
   "player.destroy": null;
   "queue.get": QueuePage;

@@ -138,6 +138,10 @@ pub enum Call {
     /// Result: [`PlayerInfo`].
     #[serde(rename = "player.get")]
     GetPlayer(GuildRef),
+    /// The player's signal flow laid out for drawing, one node a row: each layer's source,
+    /// effects and volume, joining in the mix. Result: [`PlayerView`].
+    #[serde(rename = "player.view")]
+    ViewPlayer(ViewPlayer),
     /// Creates the guild's player if needed and changes it. Result: [`PlayerInfo`].
     #[serde(rename = "player.update")]
     UpdatePlayer(Box<PlayerUpdate>),
@@ -272,6 +276,17 @@ pub struct DecodeTracks {
 #[serde(rename_all = "camelCase")]
 pub struct GuildRef {
     pub guild_id: Snowflake,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewPlayer {
+    pub guild_id: Snowflake,
+    /// Layers (`main` for the music) whose effect graphs show as one `graph` row each, instead
+    /// of node by node.
+    #[serde(default)]
+    #[ts(optional)]
+    pub collapse: Option<Vec<String>>,
 }
 
 /// Changes to a player; absent fields are left alone. Its `paused`, `volume`, `clipping`, `graph`
@@ -941,6 +956,85 @@ pub struct ClipInfo {
     pub status: ClipStatus,
     /// Position in the clip's track.
     pub position: Millis,
+}
+
+/// A player's signal flow as rows to draw from top to bottom, the way `git log --graph` draws
+/// history: one node a row, after every node feeding it, with the wires running down a gutter
+/// on the left. Each layer starts at its source and ends at its volume, and the layers join in
+/// the mix:
+///
+/// ```text
+/// ■      main · Song
+/// ●      low · lowpass · cutoff 220
+/// ○      volume 80%
+/// │ ■    sfx · 2 clips playing
+/// │ ○    volume 100%
+/// ├─┘
+/// □      mix · limiter
+/// ```
+///
+/// Effect graphs that branch fork (`├─┐`) and join (`├─┘`) inside their layer.
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PlayerView {
+    pub guild_id: Snowflake,
+    /// The most wires side by side; every gutter is `2 * lanes - 1` characters wide.
+    pub lanes: u8,
+    pub rows: Vec<ViewRow>,
+}
+
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewRow {
+    /// The wires, for a monospace font, padded to the same width in every row. Wire `i` runs down
+    /// column `2 * i`, as `│`; the columns between carry `─` across. `├` with `┐` (`┬` between)
+    /// forks a wire, `├` with `┘` (`┴` between) joins wires, and `┼` is a wire crossing another.
+    /// The node sits on its wire as `■` (a source), `●` (an effect), `◊` (a collapsed graph),
+    /// `○` (the rate or the volume) or `□` (the mix). Only these characters and spaces appear, so
+    /// a client can draw them otherwise.
+    pub gutter: String,
+    /// `null` on rows where wires only fork or join.
+    pub node: Option<ViewNode>,
+}
+
+/// One node of a [`PlayerView`]. A layer's `effect` is named by its `layer`, `id` and
+/// `graphTag`; the other kinds by their `layer` and `kind`.
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewNode {
+    pub kind: ViewNodeKind,
+    /// The layer it belongs to, `main` for the music; `null` for the `mix`.
+    pub layer: Option<String>,
+    /// For an `effect`: its node's id in the layer's graph.
+    pub id: Option<String>,
+    /// For an `effect` and a `graph`: the tag of the layer's graph, which changes whenever the
+    /// graph does. It tells a node picked from a view from one of the same id in a graph that
+    /// has replaced it since.
+    pub graph_tag: Option<String>,
+    /// What it is or plays: a track's title, an effect's node type, `volume 80%`.
+    pub label: String,
+    /// More about it: an effect's parameters, whether a layer is paused or ducked.
+    pub detail: Option<String>,
+    /// The rows of the nodes feeding it.
+    pub inputs: Vec<u16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum ViewNodeKind {
+    /// What a layer plays: the music's current track, or another layer's clips.
+    Source,
+    /// The playback rate the layer's graph sets.
+    Rate,
+    /// A node of the layer's effect graph.
+    Effect,
+    /// The layer's whole effect graph, collapsed into one row.
+    Graph,
+    /// The layer's volume, and its clipping.
+    Volume,
+    /// Every layer summed, through the master limiter, into the voice channel.
+    Mix,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]

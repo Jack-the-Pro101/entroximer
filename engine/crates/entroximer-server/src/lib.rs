@@ -14,4 +14,5 @@ pub mod render;
 pub mod serve;
 pub mod sources;
 pub mod uploads;
+pub mod view;
 pub mod youtube;

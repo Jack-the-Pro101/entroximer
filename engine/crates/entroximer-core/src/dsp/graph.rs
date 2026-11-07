@@ -1,5 +1,6 @@
 //! Graph descriptions sent by clients, and their compilation into fundsp networks.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::str::FromStr;
@@ -20,6 +21,8 @@ pub const GRAPH_OUTPUT: &str = "output";
 /// reverb about 5 MB), so this bounds what one player's effects can take.
 pub const MAX_NODES: usize = 16;
 pub const MAX_EDGES: usize = 64;
+/// The longest node id.
+pub const MAX_ID_LEN: usize = 32;
 /// Graphs process interleaved stereo.
 pub const CHANNELS: usize = 2;
 
@@ -62,9 +65,43 @@ pub struct GraphSpec {
     pub edges: Vec<Edge>,
 }
 
+impl GraphSpec {
+    /// The graph's edges: as given, or without any, the chain its nodes form.
+    pub fn wiring(&self) -> Cow<'_, [Edge]> {
+        if self.edges.is_empty() {
+            Cow::Owned(chain_edges(self))
+        } else {
+            Cow::Borrowed(&self.edges)
+        }
+    }
+
+    /// Identifies the graph as it is: equal graphs have equal tags, and any change to it changes
+    /// its tag (but for the collisions of a 64-bit hash). Together with a node's id, it names that
+    /// node in a way that cannot silently come to mean another one once the graph is replaced.
+    pub fn tag(&self) -> String {
+        let json = serde_json::to_string(self).expect("graphs serialize");
+        // FNV-1a, which unlike `DefaultHasher` gives the same tag in every build
+        let hash = json.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+        format!("{hash:016x}")
+    }
+}
+
+/// Whether `id` can name a node: 1 to [`MAX_ID_LEN`] of `a-z`, `0-9`, `_` and `-`, like a layer's
+/// name, so that it can be typed in a command and written in references (`layer:node`, or an
+/// edge's `node:port`) without ambiguity.
+pub fn is_valid_id(id: &str) -> bool {
+    (1..=MAX_ID_LEN).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeSpec {
+    /// `a-z`, `0-9`, `_` and `-`, up to 32, unique in its graph; not `input` or `output`.
     pub id: String,
     #[serde(rename = "type")]
     pub kind: String,
@@ -152,6 +189,8 @@ pub enum GraphError {
     DuplicateId(String),
     #[error("node id `{0}` is reserved for the graph's own ports")]
     ReservedId(String),
+    #[error("node id `{0}` must be 1 to {MAX_ID_LEN} of `a-z`, `0-9`, `_` and `-`")]
+    InvalidId(String),
     #[error("invalid parameters for node `{node}`")]
     Param {
         node: String,
@@ -236,6 +275,9 @@ impl NodeRegistry {
             if node.id == GRAPH_INPUT || node.id == GRAPH_OUTPUT {
                 return Err(GraphError::ReservedId(node.id.clone()));
             }
+            if !is_valid_id(&node.id) {
+                return Err(GraphError::InvalidId(node.id.clone()));
+            }
             if index.insert(&node.id, placed.len()).is_some() {
                 return Err(GraphError::DuplicateId(node.id.clone()));
             }
@@ -259,17 +301,9 @@ impl NodeRegistry {
             });
         }
 
-        let chained;
-        let edges = if spec.edges.is_empty() {
-            chained = chain_edges(spec);
-            &chained
-        } else {
-            &spec.edges
-        };
-
         // every target port with the sources feeding it, in a stable order
         let mut wiring: BTreeMap<Target, Vec<Source>> = BTreeMap::new();
-        for edge in edges {
+        for edge in spec.wiring().iter() {
             let sources = resolve_sources(&edge.from, &index, &placed)?;
             let targets = resolve_targets(&edge.to, &index, &placed)?;
             if sources.len() != targets.len() {
@@ -577,6 +611,15 @@ mod tests {
             compile(json!({ "rate": 3.0, "nodes": [] })),
             Some(GraphError::Rate(_))
         ));
+        for id in ["Low", "low pass", "low:1", "", &"x".repeat(MAX_ID_LEN + 1)] {
+            assert!(
+                matches!(
+                    compile(json!({ "nodes": [{ "id": id, "type": "volume" }] })),
+                    Some(GraphError::InvalidId(_))
+                ),
+                "`{id}` is no node id"
+            );
+        }
         let crowded: Vec<_> = (0..=MAX_NODES)
             .map(|i| json!({ "id": format!("n{i}"), "type": "volume" }))
             .collect();
@@ -584,6 +627,39 @@ mod tests {
             compile(json!({ "nodes": crowded })),
             Some(GraphError::TooLarge { what: "nodes", .. })
         ));
+    }
+
+    #[test]
+    fn tags_follow_the_graph() {
+        let graph = spec(
+            json!({ "nodes": [{ "id": "low", "type": "lowpass", "params": { "cutoff": 400 } }] }),
+        );
+        let tag = graph.tag();
+        assert_eq!(tag.len(), 16);
+        assert_eq!(graph.clone().tag(), tag, "equal graphs, equal tags");
+        let mut changed = graph.clone();
+        changed.nodes[0].params.insert("cutoff".into(), json!(500));
+        assert_ne!(changed.tag(), tag);
+        let mut renamed = graph;
+        renamed.nodes[0].id = "low2".into();
+        assert_ne!(renamed.tag(), tag);
+    }
+
+    #[test]
+    fn wiring_is_the_chain_without_edges() {
+        let chained = spec(
+            json!({ "nodes": [{ "id": "a", "type": "volume" }, { "id": "b", "type": "volume" }] }),
+        );
+        let pairs: Vec<_> = chained
+            .wiring()
+            .iter()
+            .map(|e| (e.from.to_string(), e.to.to_string()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [("input", "a"), ("a", "b"), ("b", "output")]
+                .map(|(f, t)| (f.to_owned(), t.to_owned()))
+        );
     }
 
     #[test]

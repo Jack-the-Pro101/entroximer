@@ -4,7 +4,7 @@ import type { Entroximer, Player, Track } from "entroximer-client";
 
 import { describeItem, describeTrack, escape, formatTime, playedLength, trackLength, truncate } from "./format";
 
-const COLOR = 0x2bb3a0;
+export const COLOR = 0x2bb3a0;
 /** Queue items per page of `/queue`: a message holds ten embeds, one of them the header. */
 export const QUEUE_PAGE = 9;
 

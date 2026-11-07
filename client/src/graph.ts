@@ -9,13 +9,18 @@ export interface Effect {
   type: string;
   /** Parameters by name; missing ones take their defaults. */
   params?: Record<string, number>;
-  /** The node's id in the graph, to change it later; `type` and a number if absent. */
+  /**
+   * The node's id in the graph, to change it later: `a-z`, `0-9`, `_` and `-`, up to 32; `type`
+   * and a number if absent.
+   */
   id?: string;
 }
 
 /** The graph's own ports, which edges start and end at. */
 const INPUT = "input";
 const OUTPUT = "output";
+/** What the engine takes as a node's id. */
+const NODE_ID = /^[a-z0-9_-]{1,32}$/;
 
 /** A graph running `effects` one after another. */
 export function chain(...effects: Effect[]): GraphSpec {
@@ -146,6 +151,8 @@ function nodesFor(graph: GraphSpec, effects: readonly Effect[]): NodeSpec[] {
         number++;
       }
       id = `${effect.type}${number}`;
+    } else if (!NODE_ID.test(id)) {
+      throw badRequest(`node id \`${id}\` must be 1 to 32 of \`a-z\`, \`0-9\`, \`_\` and \`-\``);
     } else if (taken.has(id)) {
       throw badRequest(`the graph already has a node \`${id}\``);
     }

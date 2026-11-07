@@ -193,6 +193,42 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
     await player.destroy();
   });
 
+  test("views the signal flow with effects bound to their graph", async () => {
+    const manager = client();
+    await manager.connect();
+    const player = manager.player("9");
+    await player.setPreset("karaoke");
+    await player.layer("sfx").configure({ volume: 50 });
+
+    const view = await player.view();
+    expect(view.lanes).toBe(2);
+    const nodes = view.rows.flatMap((row) => (row.node ? [row.node] : []));
+    expect(nodes[0]).toMatchObject({ kind: "source", layer: "main", label: "nothing playing" });
+    expect(nodes.at(-1)).toMatchObject({ kind: "mix", layer: null });
+    expect(nodes.find((node) => node.layer === "sfx" && node.kind === "volume")?.label).toBe("volume 50%");
+    const effects = nodes.filter((node) => node.kind === "effect");
+    expect(effects.map((node) => node.id)).toEqual(player.graph!.nodes.map((node) => node.id));
+    const tag = effects[0]!.graphTag;
+    expect(tag).toMatch(/^[0-9a-f]{16}$/);
+    expect(effects.every((node) => node.layer === "main" && node.graphTag === tag)).toBe(true);
+    const widths = new Set(view.rows.map((row) => [...row.gutter].length));
+    expect([...widths]).toEqual([2 * view.lanes - 1]);
+
+    // the same graph keeps its tag; another one, even with the same ids, does not
+    await player.setPreset("karaoke");
+    expect((await player.view()).rows.find((row) => row.node?.kind === "effect")?.node?.graphTag).toBe(tag);
+    await player.setPreset("karaoke", { band: 300 });
+    expect((await player.view()).rows.find((row) => row.node?.kind === "effect")?.node?.graphTag).not.toBe(tag);
+
+    const collapsed = await player.view({ collapse: ["main"] });
+    expect(collapsed.rows.filter((row) => row.node?.layer === "main").map((row) => row.node?.kind)).toEqual([
+      "source",
+      "graph",
+      "volume",
+    ]);
+    await player.destroy();
+  });
+
   test("finds artwork on the web and on the engine", async () => {
     const manager = client();
     await manager.connect();

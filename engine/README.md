@@ -112,6 +112,7 @@ order: the events a request causes always arrive before its response.
 | `presets.build` | The effect graph a preset builds (`name`, optional `params`), without applying it |
 | `player.update` | Creates or changes a guild's player: `track` (plays now; `null` stops), `position`, `endTime`, `paused`, `volume`, `clipping`, `graph` or `preset` (effects), `voice`. These are the music's; a refused update changes nothing |
 | `player.get` / `player.destroy` | Reads a player, or stops it and leaves the voice channel |
+| `player.view` | The player's signal flow laid out for drawing, one node a row (`collapse` folds layers' graphs into one row each); see [Viewing the signal flow](#viewing-the-signal-flow) |
 | `queue.get` | A page of a player's queue |
 | `queue.add` | Adds tracks at an index and answers at once: encoded tracks as they are, queries (with an optional playlist `startIndex`) as loading items that load in the background; with nothing playing, the first item starts once it is ready. Each track can play only part of itself, from its `startTime` to its `endTime` (see [Start and end times](#start-and-end-times)) |
 | `queue.remove` / `queue.move` / `queue.clear` / `queue.shuffle` | Edit the queue |
@@ -247,7 +248,9 @@ their parameters and ranges:
 ```
 
 Without `edges` the nodes form a chain; with them, any graph (see `GraphSpec` in
-`crates/entroximer-core/src/dsp/graph.rs`). `rate` (0.5 to 2) plays the tracks faster and higher
+`crates/entroximer-core/src/dsp/graph.rs`). Node ids are 1 to 32 of `a-z`, `0-9`, `_` and `-`,
+like layer names, unique in their graph and not `input` or `output`, so that a node can always
+be written as `layer:node` or typed in a command. `rate` (0.5 to 2) plays the tracks faster and higher
 or slower and lower, like a turntable: it resamples what feeds the graph, so the playhead moves
 `rate` times as fast, and it carries across tracks without gaps.
 
@@ -260,6 +263,36 @@ about the loudness of the music they play, apart from what they add on purpose, 
 `rest` (`high1`, `high2`) to make room, and ends in a `limiter`. `player.update` with `preset`
 applies one, and the player's `graph` then shows its nodes, ready to be changed or extended and set
 again as `graph`; `presets.build` returns the graph without applying it.
+
+### Viewing the signal flow
+
+`player.view` lays out what a player's audio goes through for a client to draw, the way
+`git log --graph` draws history: one node a row, after every node feeding it, with the wires
+running down a gutter of box-drawing characters on the left. Each layer runs from its source
+through its rate, effects and volume, and the layers join in the mix:
+
+```text
+■   main · nothing playing
+├─┐
+● │ low · lowpass · cutoff 220
+│ ● high · highpass · cutoff 220
+│ ● cancel · channel_mix
+├─┘
+○   volume 80% · ducked by announcements
+│ ■ announcements · no clips · ducks main to 25%
+│ ○ volume 100%
+├─┘
+□   mix · limiter
+```
+
+The engine draws only the gutter (padded to `2 * lanes - 1` characters in every row, from a small
+fixed set of characters a client can swap for others) and describes each row's node: its `kind`,
+`layer`, `label` (a title, a node type, `volume 80%`), `detail` and the rows feeding it
+(`inputs`). Clients put the text together as they like; `collapse` folds the graphs of the layers
+it names into a `graph` row each, for when the whole would not fit. An effect carries its node's
+`id` and its graph's `graphTag`, which changes whenever the graph does: together with the
+`layer`, they name the node so that a client acting on a node it was shown can tell when the
+graph has been replaced since, even by one reusing the id.
 
 ## Layers and clips
 

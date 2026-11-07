@@ -6,6 +6,7 @@ import type { GraphSpec } from "./generated/GraphSpec.js";
 import type { PlayerInfo } from "./generated/PlayerInfo.js";
 import type { PlayerState } from "./generated/PlayerState.js";
 import type { PlayerUpdate } from "./generated/PlayerUpdate.js";
+import type { PlayerView } from "./generated/PlayerView.js";
 import type { Track } from "./generated/Track.js";
 import type { TrackEndReason } from "./generated/TrackEndReason.js";
 import type { VoiceState } from "./generated/VoiceState.js";
@@ -299,6 +300,17 @@ export class Player extends Emitter<PlayerEvents> {
     const info = await this.#host.request("player.update", { ...changes, guildId: this.guildId });
     this.#apply(info);
     return info;
+  }
+
+  /**
+   * The player's signal flow laid out for drawing, one node a row: each layer's source, effects
+   * and volume, joining in the mix. The graphs of the layers in `collapse` (`main` for the music)
+   * show as one row each. Effects are named by their `layer`, `id` and `graphTag`, so a node
+   * picked from a view can be told from one of the same id in a graph that replaced it since.
+   */
+  view(options: { collapse?: string[] } = {}): Promise<PlayerView> {
+    this.#ensureUsable();
+    return this.#host.request("player.view", { ...options, guildId: this.guildId });
   }
 
   /** Fetches the player's state and queue again, e.g. after events were missed. */
