@@ -41,7 +41,8 @@ pub(crate) struct Voice {
 }
 
 impl Voice {
-    pub(crate) fn new(track: DeckTrack) -> Self {
+    pub(crate) fn new(mut track: DeckTrack) -> Self {
+        track.player.set_end_at(track.end_at);
         Self {
             track,
             volume: 1.0,

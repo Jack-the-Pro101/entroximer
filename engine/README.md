@@ -375,10 +375,12 @@ Each player plays its queue by itself. Once the current track has less than
 it follows without a gap, whatever the client does meanwhile; if the queue changes so that
 another item comes next, that one is prepared instead. Items leave the queue when they start.
 Repeating a `track` plays it again from what was downloaded, without loading it again;
-repeating the `queue` sends finished (and skipped) tracks to its end. Those whose whole media is
-on disk are kept there for the next round (`ENTROXIMER_LOOP_CACHE_MB`, 1 GiB across the engine,
-besides `ENTROXIMER_DISK_TOTAL_MB`), so that it plays them without loading them again: no yt-dlp
-run, no download. A full loop cache keeps what it has rather than making room by age, since a
+repeating the `queue` sends finished (and skipped) tracks to its end. Those whose media is on
+disk as far as they play it (all of it, or from their start time to their end time) are kept
+there for the next round (`ENTROXIMER_LOOP_CACHE_MB`, 1 GiB across the engine, besides
+`ENTROXIMER_DISK_TOTAL_MB`), so that it plays them without loading them again: no yt-dlp run, no
+download. A track's kept media plays any part of it that downloaded, so changed times load it
+again only for a part that is missing, which then takes its place. A full loop cache keeps what it has rather than making room by age, since a
 queue played in a cycle would otherwise drop each track just before it comes round; only
 YouTube's tracks (Spotify's too, which play from YouTube) take the place of others. Local files
 and uploads are not kept, as they load again for free. Kept tracks hold nothing in RAM, and go

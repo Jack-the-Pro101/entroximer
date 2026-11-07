@@ -186,6 +186,7 @@ impl Deck {
     pub fn set_end_at(&mut self, end_at: Option<Ticks>) {
         if let Some(voice) = &mut self.tracks.current {
             voice.track.end_at = end_at;
+            voice.track.player.set_end_at(end_at);
         }
     }
 

@@ -135,6 +135,8 @@ pub struct Player {
     pcm_end: Option<Ticks>,
     /// Pending seek: audio before it is decoded (preroll) but dropped.
     seek_target: Option<Ticks>,
+    /// Where playback stops short of the end of the media; see [`Self::set_end_at`].
+    end_at: Option<Ticks>,
     decoded: Vec<f32>,
     resampled: Vec<f32>,
     producer_failures: u32,
@@ -177,16 +179,17 @@ pub struct Kept {
 }
 
 impl Kept {
-    /// The bytes it takes on disk, if the whole media is there; see
-    /// [`Timeline::complete_on_disk`].
-    pub fn size(&self) -> Option<u64> {
-        self.timeline.complete_on_disk()
+    /// The bytes it takes on disk, if the media from `start` to `end` (the end of the media if
+    /// `None`) is there; see [`Timeline::on_disk`].
+    pub fn size(&self, start: Ticks, end: Option<Ticks>) -> Option<u64> {
+        self.timeline.on_disk(start, end)
     }
 
-    /// Keeps the media for playing later, out of the cache budget the tracks playing share; see
-    /// [`Timeline::park`]. `None` unless the whole media is on disk.
-    pub fn park(&self) -> Option<u64> {
-        self.timeline.park()
+    /// Keeps the media for playing from `start` to `end` later, out of the cache budget the
+    /// tracks playing share, and stops its downloads; see [`Timeline::park`]. `None` unless that
+    /// part is on disk.
+    pub fn park(&self, start: Ticks, end: Option<Ticks>) -> Option<u64> {
+        self.timeline.park(start, end)
     }
 
     /// Where the media ends, once known.
@@ -269,6 +272,7 @@ impl Player {
             pcm: VecDeque::new(),
             pcm_end: None,
             seek_target: None,
+            end_at: None,
             decoded: Vec::new(),
             resampled: Vec::new(),
             producer_failures: 0,
@@ -321,6 +325,13 @@ impl Player {
             Some(pending) => self.cover(pending, self.cursor),
             None => Ok(()),
         }
+    }
+
+    /// Where playback stops short of the end of the media (`None`: it plays to the end). Its
+    /// owner stops rendering there; the player fetches nothing after it ahead of time, so that
+    /// media kept on disk up to there plays without loading anything.
+    pub fn set_end_at(&mut self, end_at: Option<Ticks>) {
+        self.end_at = end_at;
     }
 
     /// Media time of the next frame `render` will output.
@@ -548,7 +559,10 @@ impl Player {
         let Some((_, end, RangeState::Truncated)) = self.timeline().range_at(self.cursor) else {
             return Ok(());
         };
-        if end - self.cursor > ticks(self.cfg.coverage.prefetch) {
+        // playback stops before the gap
+        if end - self.cursor > ticks(self.cfg.coverage.prefetch)
+            || self.end_at.is_some_and(|end_at| end >= end_at)
+        {
             return Ok(());
         }
         match self.timeline().pending_at(end) {

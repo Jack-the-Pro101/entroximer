@@ -99,6 +99,68 @@ async fn a_repeated_queue_keeps_each_items_times() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_repeated_queue_plays_the_part_it_kept_whatever_its_times() {
+    let mut h = Harness::new(Duration::from_secs(1)).await;
+    h.player
+        .configure_queue(Some(Repeat::Queue), None)
+        .await
+        .unwrap();
+    let mut tracks = h.linked_tones(&["a", "b"]).await;
+    tracks[0].start_time = Some(Millis(1000));
+    tracks[0].end_time = Some(ONE_AND_A_HALF);
+    let encoded = tracks[0].encoded.clone();
+    h.add(tracks, None).await;
+    h.events_until("start").await;
+    h.play(Duration::from_millis(600)).await;
+
+    // a downloaded from shortly before its start time, and is kept from there
+    assert_eq!(h.player.state().kept.len(), 1);
+    let kept = h.node.loop_cache.get(&encoded, Times::default());
+    assert!(kept.is_none(), "its beginning is not on disk");
+    // a later start is
+    let a = id_of(&h, "a");
+    h.player
+        .update_item(&times_of(&a, serde_json::json!({ "startTime": 1200 })))
+        .await
+        .unwrap();
+    h.until("b downloads", |p| {
+        p.deck()
+            .current()
+            .is_some_and(|current| current.player.media_end().is_some())
+    })
+    .await;
+    // loading them again would fail now
+    for name in ["a", "b"] {
+        std::fs::remove_file(h.dir.path().join(format!("{name}.webm"))).unwrap();
+    }
+
+    let batches = h.play(WHOLE_TONE).await;
+    assert_eq!(
+        batches,
+        [
+            strings(["updated a"]),
+            strings(["end b finished", "added b", "advanced a", "start a"])
+        ]
+    );
+    assert!(
+        (Millis(1200)..Millis(1400)).contains(&position(&h)),
+        "at {:?}",
+        position(&h)
+    );
+    let batches = h.play(Duration::from_millis(400)).await;
+    assert_eq!(
+        batches,
+        [strings([
+            "end a finished",
+            "added a",
+            "advanced b",
+            "start b"
+        ])]
+    );
+    assert_eq!(h.player.state().kept.len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_query_loads_into_a_track_with_its_times() {
     let mut h = Harness::new(Duration::from_secs(1)).await;
     h.tone_file("a").await;

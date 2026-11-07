@@ -27,8 +27,9 @@
 //! track plays again from what it downloaded, even while it crossfades into itself. Distances are
 //! measured from the nearest playhead: what any reader is near is kept.
 //!
-//! A timeline whose whole media is on disk can be *parked* to play again later, e.g. the next
-//! time a repeated queue comes round: it leaves the shared budget and, while nobody reads it, holds
+//! A timeline holding on disk the part of the media that plays (all of it, or from a start time
+//! to an end time) can be *parked* to play that again later, e.g. the next time a repeated queue
+//! comes round: its downloads stop, it leaves the shared budget and, while nobody reads it, holds
 //! nothing in RAM but its block index.
 
 use std::cmp::Reverse;
@@ -91,9 +92,6 @@ fn nearest_distance(readers: &[Reader], forward_bias: f64, start: Ticks, end: Ti
 
 /// A producer's packet that lands this far past its own range's end starts a new range.
 const MAX_HOLE: Ticks = TICKS_PER_SECOND / 10;
-
-/// A range starting this close to zero starts where the media starts.
-const MEDIA_START: Ticks = MAX_HOLE;
 
 /// How often (in playhead movement) payloads outside the RAM window are released.
 const SWEEP_INTERVAL: Ticks = TICKS_PER_SECOND;
@@ -605,15 +603,7 @@ impl Timeline {
 
     /// Stops accepting packets from `producer`; its range becomes `Truncated`.
     pub fn cancel(&self, producer: ProducerId) {
-        let mut g = self.lock();
-        if let Some(p) = g.producers.get_mut(&producer) {
-            p.cancelled = true;
-        }
-        if let Some(i) = g.filled_by(producer) {
-            g.end_filling(i, RangeState::Truncated);
-            g.enforce_caps();
-        }
-        drop(g);
+        self.lock().cancel(producer);
         self.changed.notify_all();
     }
 
@@ -744,23 +734,36 @@ impl Timeline {
         self.lock().media_end
     }
 
-    /// The bytes on disk, if the whole media is there: one complete range from the start of the
-    /// media, every block of it spilled. `None` while it downloads, without spill, or once some
-    /// of it was evicted.
-    pub fn complete_on_disk(&self) -> Option<u64> {
-        self.lock().complete_on_disk()
+    /// The bytes it takes on disk, if one range holds the media from `from` to `to` (the end of
+    /// the media if `None`) and everything is spilled, or will be once its downloads stop. `None`
+    /// without spill, or while some of that part is missing (not downloaded yet, or evicted).
+    pub fn on_disk(&self, from: Ticks, to: Option<Ticks>) -> Option<u64> {
+        self.lock().on_disk(from, to)
     }
 
-    /// Keeps the media for playing later, if it is [complete on disk](Self::complete_on_disk):
-    /// the timeline leaves the shared budget, so that it no longer takes a share from those
-    /// playing (its own caps still apply), and holds no payloads in RAM while nobody reads it.
-    /// Returns its bytes on disk.
-    pub fn park(&self) -> Option<u64> {
+    /// Keeps the media for playing from `from` to `to` later, if it is [on disk](Self::on_disk):
+    /// downloads stop, as that part needs nothing more, and the timeline leaves the shared
+    /// budget, so that it no longer takes a share from those playing (its own caps still apply),
+    /// and holds no payloads in RAM while nobody reads it. Returns its bytes on disk.
+    pub fn park(&self, from: Ticks, to: Option<Ticks>) -> Option<u64> {
         let mut g = self.lock();
-        let bytes = g.complete_on_disk()?;
+        g.on_disk(from, to)?;
+        let live: Vec<ProducerId> = g
+            .producers
+            .iter()
+            .filter(|(_, p)| !p.cancelled)
+            .map(|(&id, _)| id)
+            .collect();
+        for producer in live {
+            g.cancel(producer);
+        }
         g.parked = true;
         g.share = None;
         g.release_unread();
+        let bytes = g.disk_bytes;
+        drop(g);
+        // paused producers see that they are cancelled
+        self.changed.notify_all();
         Some(bytes)
     }
 
@@ -786,18 +789,31 @@ impl Timeline {
 }
 
 impl Inner {
-    fn complete_on_disk(&self) -> Option<u64> {
-        let [range] = self.ranges.as_slice() else {
-            return None;
-        };
-        let complete = range.state == RangeState::Complete
-            && range.start() <= MEDIA_START
-            && self.unwritten.is_empty()
-            && range.blocks.iter().all(|b| b.sealed && b.disk.is_some());
-        complete.then_some(self.disk_bytes)
+    /// With spill, every block is on disk once it is sealed, or on its way there: the blocks
+    /// being filled are sealed when their downloads stop.
+    fn on_disk(&self, from: Ticks, to: Option<Ticks>) -> Option<u64> {
+        // a range starting this close to `from` holds it, as one this close to 0 starts where
+        // the media starts
+        let held = self.ranges.iter().any(|r| {
+            r.start() <= from + MAX_HOLE
+                && (r.state == RangeState::Complete || to.is_some_and(|to| r.end() >= to))
+        });
+        (held && self.spill_active()).then_some(self.disk_bytes)
     }
 
-    /// A parked timeline that nobody reads holds no payloads in RAM: they are all on disk.
+    /// See [`Timeline::cancel`].
+    fn cancel(&mut self, producer: ProducerId) {
+        if let Some(p) = self.producers.get_mut(&producer) {
+            p.cancelled = true;
+        }
+        if let Some(i) = self.filled_by(producer) {
+            self.end_filling(i, RangeState::Truncated);
+            self.enforce_caps();
+        }
+    }
+
+    /// A parked timeline that nobody reads holds no payloads in RAM: they are on disk (blocks
+    /// still on their way there let go of theirs once written).
     fn release_unread(&mut self) {
         if !self.parked || !self.readers.is_empty() {
             return;
@@ -1167,7 +1183,9 @@ impl Inner {
             self.retain_blocks(|b| !is_it(b));
             return;
         }
-        let keep = self.in_memory_window(start, end) && self.memory_bytes <= self.memory_cap();
+        let unread = self.parked && self.readers.is_empty();
+        let keep =
+            !unread && self.in_memory_window(start, end) && self.memory_bytes <= self.memory_cap();
         let block = &mut self.ranges[range].blocks[block];
         block.disk = Some(loc);
         if keep {
@@ -1654,13 +1672,13 @@ mod tests {
         let reader = tl.add_reader(0);
         let p = tl.register_producer(None);
         fill(&tl, p, 0..packets_in(30));
-        assert_eq!(tl.complete_on_disk(), None, "still downloading");
-        assert_eq!(tl.park(), None);
+        assert_eq!(tl.on_disk(0, None), None, "still downloading");
+        assert_eq!(tl.park(0, None), None);
         tl.finish(p, Finish::Eof);
-        let bytes = tl.complete_on_disk().expect("all of it is on disk");
+        let bytes = tl.on_disk(0, None).expect("all of it is on disk");
         assert_eq!(bytes, tl.stats().disk_bytes);
 
-        assert_eq!(tl.park(), Some(bytes));
+        assert_eq!(tl.park(0, None), Some(bytes));
         assert_eq!(
             budget.timelines.load(Ordering::Relaxed),
             1,
@@ -1686,13 +1704,61 @@ mod tests {
         let p = tl.register_producer(Some(10 * TICKS_PER_SECOND));
         fill(&tl, p, packets_in(10)..packets_in(30));
         tl.finish(p, Finish::Eof);
-        assert_eq!(tl.complete_on_disk(), None, "the first 10 s are missing");
+        assert_eq!(tl.on_disk(0, None), None, "the first 10 s are missing");
+        assert!(tl.on_disk(10 * TICKS_PER_SECOND, None).is_some());
 
         let memory = Timeline::new(memory_only());
         let p = memory.register_producer(None);
         fill(&memory, p, 0..packets_in(5));
         memory.finish(p, Finish::Eof);
-        assert_eq!(memory.park(), None, "without spill nothing is on disk");
+        assert_eq!(
+            memory.park(0, None),
+            None,
+            "without spill nothing is on disk"
+        );
+    }
+
+    #[test]
+    fn the_part_that_plays_parks_while_the_rest_downloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let budget = Arc::new(CacheBudget::new(1 << 30, 1 << 30));
+        let tl = Timeline::new(RetentionConfig {
+            budget: Some(Arc::clone(&budget)),
+            ..spill_into(&dir, 1 << 30, 1 << 20)
+        });
+        let s = |s: i64| s * TICKS_PER_SECOND;
+        // a track playing from 10 s to 20 s, its download (opened a little earlier) at 25.01 s
+        let reader = tl.add_reader(s(10));
+        let p = tl.register_producer(Some(s(9)));
+        fill(&tl, p, packets_in(9)..packets_in(25) + 1);
+        assert_eq!(tl.on_disk(s(10), Some(s(30))), None, "not there yet");
+        assert_eq!(tl.on_disk(s(5), Some(s(20))), None, "begins too late");
+        assert_eq!(tl.on_disk(s(10), None), None, "the end is missing");
+        assert!(tl.on_disk(s(10), Some(s(20))).is_some());
+
+        let bytes = tl.park(s(10), Some(s(20))).expect("10 s to 20 s are there");
+        assert_eq!(
+            budget.timelines.load(Ordering::Relaxed),
+            0,
+            "left the budget"
+        );
+        assert!(
+            matches!(tl.push(p, pkt(packets_in(25) + 1)), PushResult::Stop),
+            "its download stops"
+        );
+        assert_eq!(tl.buffered(), [(s(9), s(25) + PKT)]);
+        tl.remove_reader(reader);
+        // the download's last block reaches the disk as it finishes, and leaves RAM then
+        tl.finish(p, Finish::Stopped);
+        assert_eq!(bytes, tl.stats().disk_bytes);
+        assert_eq!(tl.stats().memory_bytes, 0, "nobody reads it");
+
+        let again = tl.add_reader(s(10));
+        for i in packets_in(10)..packets_in(20) {
+            assert_eq!(ready(&tl, i * PKT), pkt(i));
+        }
+        tl.remove_reader(again);
+        assert_eq!(tl.stats().memory_bytes, 0);
     }
 
     #[test]
