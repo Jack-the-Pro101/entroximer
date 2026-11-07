@@ -7,8 +7,8 @@ import type { TrackSelector } from "./TrackSelector.js";
 import type { VoiceState } from "./VoiceState.js";
 
 /**
- * Changes to a player; absent fields are left alone. Its `paused`, `volume`, `graph` and
- * `preset` are the music's: its other layers, changed with `layer.update`, have their own.
+ * Changes to a player; absent fields are left alone. Its `paused`, `volume`, `clipping`, `graph`
+ * and `preset` are the music's: its other layers, changed with `layer.update`, have their own.
  */
 export type PlayerUpdate = { guildId: Snowflake, 
 /**
@@ -38,6 +38,11 @@ paused?: boolean,
  * Percent: 100 leaves the audio unchanged, up to 1000.
  */
 volume?: number, 
+/**
+ * Hard clips the audio after the volume, so that a volume above 100 distorts it, for fun,
+ * instead of the limiter keeping it at full scale.
+ */
+clipping?: boolean, 
 /**
  * The effect graph; `null` removes it.
  */

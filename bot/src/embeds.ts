@@ -86,7 +86,7 @@ export async function nowPlayingMessage(manager: Entroximer, player: Player, tra
   });
   const buffered = player.state?.buffered ?? [];
   const details = [
-    `volume ${player.volume}%`,
+    `volume ${player.volume}%${player.clipping ? " (clipping)" : ""}`,
     `repeat ${player.queue.repeat}`,
     ...(player.state?.buffering ? ["buffering"] : []),
     ...(buffered.length > 0

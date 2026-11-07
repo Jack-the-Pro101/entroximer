@@ -274,8 +274,8 @@ pub struct GuildRef {
     pub guild_id: Snowflake,
 }
 
-/// Changes to a player; absent fields are left alone. Its `paused`, `volume`, `graph` and
-/// `preset` are the music's: its other layers, changed with `layer.update`, have their own.
+/// Changes to a player; absent fields are left alone. Its `paused`, `volume`, `clipping`, `graph`
+/// and `preset` are the music's: its other layers, changed with `layer.update`, have their own.
 #[derive(Debug, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerUpdate {
@@ -304,6 +304,10 @@ pub struct PlayerUpdate {
     /// Percent: 100 leaves the audio unchanged, up to 1000.
     #[ts(optional)]
     pub volume: Option<u16>,
+    /// Hard clips the audio after the volume, so that a volume above 100 distorts it, for fun,
+    /// instead of the limiter keeping it at full scale.
+    #[ts(optional)]
+    pub clipping: Option<bool>,
     /// The effect graph; `null` removes it.
     #[serde(default, deserialize_with = "present")]
     #[ts(optional)]
@@ -584,6 +588,9 @@ pub struct LayerUpdate {
     /// Percent: 100 leaves the audio unchanged, up to 1000.
     #[ts(optional)]
     pub volume: Option<u16>,
+    /// Hard clips the layer's audio after its volume, as `player.update`'s does the music's.
+    #[ts(optional)]
+    pub clipping: Option<bool>,
     /// The layer's own effect graph; `null` removes it.
     #[serde(default, deserialize_with = "present")]
     #[ts(optional)]
@@ -899,6 +906,8 @@ pub struct PlayerInfo {
     pub queue: QueueState,
     pub paused: bool,
     pub volume: u16,
+    /// Whether the audio is hard clipped after the volume.
+    pub clipping: bool,
     /// The effect graph, as set or as a preset built it.
     pub graph: Option<GraphSpec>,
     pub state: PlayerState,
@@ -914,6 +923,7 @@ pub struct LayerInfo {
     pub mode: ClipMode,
     pub max_clips: u8,
     pub volume: u16,
+    pub clipping: bool,
     pub paused: bool,
     pub graph: Option<GraphSpec>,
     pub duck: Option<Duck>,

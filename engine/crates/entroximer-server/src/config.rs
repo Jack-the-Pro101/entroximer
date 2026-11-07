@@ -76,11 +76,12 @@ pub struct MediaConfig {
     pub no_spill: bool,
 
     /// Seconds of audio behind the playhead kept in RAM.
-    #[arg(long, env = "ENTROXIMER_MEMORY_BEHIND_SECS", default_value_t = 15)]
+    #[arg(long, env = "ENTROXIMER_MEMORY_BEHIND_SECS", default_value_t = 30)]
     pub memory_behind_secs: u64,
 
-    /// How much more is kept ahead of the playhead than behind it, in RAM and on disk.
-    #[arg(long, env = "ENTROXIMER_FORWARD_BIAS", default_value_t = 4.0)]
+    /// How much more is kept ahead of the playhead than behind it, in RAM and on disk: with
+    /// the defaults, 240 s ahead in RAM.
+    #[arg(long, env = "ENTROXIMER_FORWARD_BIAS", default_value_t = 8.0)]
     pub forward_bias: f64,
 
     /// RAM cap for one track's cached audio, in MiB.

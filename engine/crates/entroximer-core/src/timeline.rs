@@ -126,8 +126,8 @@ pub struct RetentionConfig {
     /// How far behind the playhead payloads are kept in RAM.
     pub memory_behind: Duration,
     /// Distance ahead of the playhead counts `1 / forward_bias` as much as distance behind it,
-    /// for the RAM window, RAM eviction and disk eviction alike. `4.0` with a 15 s
-    /// `memory_behind` keeps 60 s ahead in RAM.
+    /// for the RAM window, RAM eviction and disk eviction alike. `8.0` with a 30 s
+    /// `memory_behind` keeps 240 s ahead in RAM.
     pub forward_bias: f64,
     /// Cap on payload bytes held in RAM per timeline. With spill, the blocks being filled (one
     /// per download) and the block being played can exceed it.
@@ -150,8 +150,8 @@ pub struct SpillConfig {
 impl Default for RetentionConfig {
     fn default() -> Self {
         Self {
-            memory_behind: Duration::from_secs(15),
-            forward_bias: 4.0,
+            memory_behind: Duration::from_secs(30),
+            forward_bias: 8.0,
             memory_max_bytes: 8 << 20,
             spill: Some(SpillConfig::default()),
             budget: None,
@@ -1408,8 +1408,11 @@ mod tests {
         s * TICKS_PER_SECOND / PKT
     }
 
+    /// 15 s behind and bias 4, which the tests' numbers assume, whatever the defaults.
     fn memory_only() -> RetentionConfig {
         RetentionConfig {
+            memory_behind: Duration::from_secs(15),
+            forward_bias: 4.0,
             spill: None,
             ..Default::default()
         }
@@ -1422,7 +1425,7 @@ mod tests {
                 max_bytes,
                 segment_bytes,
             }),
-            ..Default::default()
+            ..memory_only()
         }
     }
 

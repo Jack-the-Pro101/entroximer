@@ -117,6 +117,7 @@ struct State {
     /// misses nothing.
     client_away: bool,
     volume: u16,
+    clipping: bool,
     graph: Option<GraphSpec>,
     voice: Option<VoiceState>,
     connected: bool,
@@ -242,6 +243,10 @@ impl GuildPlayer {
         if let Some(volume) = update.volume {
             self.deck().set_volume(f32::from(volume) / 100.0);
             self.state().volume = volume;
+        }
+        if let Some(clipping) = update.clipping {
+            self.deck().set_clipping(clipping);
+            self.state().clipping = clipping;
         }
         if let Some((graph, effects)) = effects {
             self.deck().set_effects(effects);
@@ -445,6 +450,7 @@ impl GuildPlayer {
             queue: queue_state(&state.queue),
             paused: state.paused,
             volume: state.volume,
+            clipping: state.clipping,
             graph: state.graph.clone(),
             state: player_state,
             layers: self.layer_infos(&state),

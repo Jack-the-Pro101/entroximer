@@ -39,11 +39,19 @@ export const soundCommands: Command[] = [
             .setName("layer")
             .setDescription("What to change; the music if absent")
             .addChoices(...LAYER_CHOICES),
+        )
+        .addBooleanOption((o) =>
+          o
+            .setName("clipping")
+            .setDescription("Let a volume above 100 clip and distort instead of being held at full scale"),
         ),
     async (interaction, engine) => {
       const percent = interaction.options.getInteger("percent", true);
-      await layerOf(interaction, existingPlayer(interaction, engine)).setVolume(percent);
-      await interaction.reply(`Volume of ${layerName(interaction)} set to ${percent}%.`);
+      const clipping = interaction.options.getBoolean("clipping");
+      const target = layerOf(interaction, existingPlayer(interaction, engine));
+      await target.setVolume(percent, clipping === null ? {} : { clipping });
+      const how = target.clipping ? ", clipping" : "";
+      await interaction.reply(`Volume of ${layerName(interaction)} set to ${percent}%${how}.`);
     },
   ),
   command(

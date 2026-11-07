@@ -70,6 +70,8 @@ export class Layer extends Emitter<LayerEvents> {
   maxClips = 8;
   /** Percent; 100 leaves the audio unchanged. */
   volume = 100;
+  /** Whether the audio is hard clipped after the volume; see `setClipping`. */
+  clipping = false;
   paused = false;
   graph: GraphSpec | null = null;
   /** The layers this one lowers while its clips are heard. */
@@ -107,9 +109,14 @@ export class Layer extends Emitter<LayerEvents> {
     return info;
   }
 
-  /** Percent: 100 leaves the audio unchanged, up to 1000. */
-  setVolume(percent: number): Promise<LayerInfo> {
-    return this.configure({ volume: whole(percent) });
+  /** Percent: 100 leaves the audio unchanged, up to 1000; with `clipping`, also sets that. */
+  setVolume(percent: number, options: { clipping?: boolean } = {}): Promise<LayerInfo> {
+    return this.configure({ volume: whole(percent), ...options });
+  }
+
+  /** Hard clips this layer's audio after its volume, as the player's `setClipping` does the music's. */
+  setClipping(clipping: boolean): Promise<LayerInfo> {
+    return this.configure({ clipping });
   }
 
   setGraph(graph: GraphSpec | null): Promise<LayerInfo> {
@@ -210,6 +217,7 @@ export class Layer extends Emitter<LayerEvents> {
     this.mode = info?.mode ?? "queue";
     this.maxClips = info?.maxClips ?? 8;
     this.volume = info?.volume ?? 100;
+    this.clipping = info?.clipping ?? false;
     this.paused = info?.paused ?? false;
     this.graph = info?.graph ?? null;
     this.duck = info?.duck ?? null;

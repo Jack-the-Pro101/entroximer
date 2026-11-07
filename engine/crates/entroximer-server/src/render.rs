@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::Args;
 use entroximer_core::dsp::{
-    CHANNELS, Effects, GraphSpec, NodeRegistry, PresetRegistry, PresetSelection, parse_chain,
+    CHANNELS, Effects, GraphSpec, NodeRegistry, PresetRegistry, PresetSelection, Strip, parse_chain,
 };
 use entroximer_core::player::{PlaybackError, Player, SAMPLE_RATE, Status};
 use entroximer_core::timeline::{Ticks, duration, ticks};
@@ -53,6 +53,14 @@ pub struct RenderArgs {
     /// A preset, optionally with parameters as JSON: `nightcore` or `bass_boost={"gain_db": 9}`.
     #[arg(long)]
     preset: Option<String>,
+
+    /// Percent, after the effects, as `player.update` sets it.
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(0..=1000))]
+    volume: u16,
+
+    /// Hard clip after the volume, as `player.update`'s `clipping` does.
+    #[arg(long)]
+    clipping: bool,
 }
 
 pub async fn run(args: RenderArgs, ctx: &MediaContext) -> anyhow::Result<()> {
@@ -163,7 +171,7 @@ impl PlayerSource {
 
 fn render_to_wav(
     player: Player,
-    mut effects: Option<Effects>,
+    effects: Option<Effects>,
     args: &RenderArgs,
 ) -> anyhow::Result<()> {
     let spec = WavSpec {
@@ -181,6 +189,11 @@ fn render_to_wav(
     let limit = args.duration.map(|d| ticks(d.0));
     let mut written: Ticks = 0;
     let mut block = vec![0.0; BLOCK_FRAMES * CHANNELS];
+    // as a deck plays it
+    let mut strip = Strip::new();
+    strip.set_effects(effects);
+    strip.set_volume(f32::from(args.volume) / 100.0);
+    strip.set_clipping(args.clipping);
     // as a guild's mixer keeps its sum within full scale
     let mut master = Effects::limiter();
     let mut source = PlayerSource {
@@ -208,10 +221,7 @@ fn render_to_wav(
         }
 
         let block = &mut block[..frames * CHANNELS];
-        match &mut effects {
-            Some(effects) => effects.render(block, |input| source.fill(input)),
-            None => source.fill(block),
-        }
+        strip.render(block, |input| source.fill(input));
         if let Some(error) = source.error.take() {
             return Err(error.into());
         }

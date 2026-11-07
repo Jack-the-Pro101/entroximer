@@ -12,6 +12,10 @@ export type PlayerInfo = { guildId: Snowflake, track: Track | null,
  */
 itemId: string | null, queue: QueueState, paused: boolean, volume: number, 
 /**
+ * Whether the audio is hard clipped after the volume.
+ */
+clipping: boolean, 
+/**
  * The effect graph, as set or as a preset built it.
  */
 graph: GraphSpec | null, state: PlayerState, 

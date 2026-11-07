@@ -92,6 +92,8 @@ export class Player extends Emitter<PlayerEvents> {
   paused = false;
   /** Percent; 100 leaves the audio unchanged. */
   volume = 100;
+  /** Whether the audio is hard clipped after the volume; see `setClipping`. */
+  clipping = false;
   graph: GraphSpec | null = null;
   /** The engine's latest report; see also `position`. */
   state: PlayerState | null = null;
@@ -236,9 +238,17 @@ export class Player extends Emitter<PlayerEvents> {
     return this.update({ track: null });
   }
 
-  /** Percent: 100 leaves the audio unchanged, up to 1000. */
-  setVolume(percent: number): Promise<PlayerInfo> {
-    return this.update({ volume: whole(percent) });
+  /** Percent: 100 leaves the audio unchanged, up to 1000; with `clipping`, also sets that. */
+  setVolume(percent: number, options: { clipping?: boolean } = {}): Promise<PlayerInfo> {
+    return this.update({ volume: whole(percent), ...options });
+  }
+
+  /**
+   * Hard clips the audio after the volume, so that a volume above 100 distorts it, for fun,
+   * instead of the engine's limiter keeping it at full scale.
+   */
+  setClipping(clipping: boolean): Promise<PlayerInfo> {
+    return this.update({ clipping });
   }
 
   /** Where the current track stops, in milliseconds; `null` plays it to the end. */
@@ -433,6 +443,7 @@ export class Player extends Emitter<PlayerEvents> {
     this.queue._handleState(info.queue);
     this.paused = info.paused;
     this.volume = info.volume;
+    this.clipping = info.clipping;
     this.graph = info.graph;
     this.#setState(info.state);
     for (const layer of info.layers) {

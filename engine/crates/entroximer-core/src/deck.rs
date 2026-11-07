@@ -210,6 +210,12 @@ impl Deck {
         self.strip.set_volume(volume);
     }
 
+    /// Whether the audio is hard clipped after the volume: a volume above 1 then distorts it,
+    /// rather than the master limiter keeping it at full scale.
+    pub fn set_clipping(&mut self, clipping: bool) {
+        self.strip.set_clipping(clipping);
+    }
+
     /// Clears the effects' state, such as reverb tails.
     pub fn reset_effects(&mut self) {
         self.strip.reset();

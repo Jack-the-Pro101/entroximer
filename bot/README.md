@@ -34,7 +34,7 @@ guild, permission to view, connect to and speak in voice channels.
 | `/pause`, `/resume` | Control playback |
 | `/stop` | Stops playback; `/skip` continues with the queue |
 | `/seek position` | Jumps to `90`, `1:30`, `1:02:03` or `1m30s` |
-| `/volume percent [layer]` | 0 to 1000; 100 leaves the audio unchanged. The music's, or the sound effects' or announcements' |
+| `/volume percent [layer] [clipping]` | 0 to 1000; 100 leaves the audio unchanged. The music's, or the sound effects' or announcements'. Above 100 it is held at full scale, unless `clipping` is on: then it clips and distorts, for fun, until turned off again |
 | `/effects [preset] [chain] [layer]` | Applies a preset (suggested as you type, e.g. `nightcore`, `bass_boost`, `karaoke`), a chain such as `lowpass(800) => reverb(10, 2)`, or a preset followed by a chain; with neither, removes effects. To the music, or to the sound effects or announcements |
 | `/sfx play [file] [url] [loop] [volume]`, `/sfx stop` | Plays an attached audio file or a link over the music, up to 8 at once, on a loop if asked; stops them |
 | `/announce [file] [url]` | Plays an announcement over the music, lowering it to a quarter meanwhile; announcements play one after another |

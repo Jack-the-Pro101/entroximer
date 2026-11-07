@@ -25,6 +25,7 @@ cargo run -p entroximer-server -- render "https://www.youtube.com/watch?v=dQw4w9
 `render` accepts URLs (anything yt-dlp supports), searches such as `ytsearch:artist - title`,
 and local files. Effects can also be a graph, `--graph '{"nodes": [...], "edges": [...]}'`, or a
 preset, `--preset nightcore` or `--preset 'bass_boost={"gain_db": 9}'` (see [Effects](#effects)).
+`--volume 300` and `--clipping` apply after them, as a player's `volume` and `clipping` do.
 
 Requires `ffmpeg`, a JavaScript runtime (Deno) for YouTube, and yt-dlp, either on the `PATH` or
 managed by the engine (below).
@@ -109,7 +110,7 @@ order: the events a request causes always arrive before its response.
 | `tracks.search` | Searches one source by its prefix (`ytsearch`, `ytmsearch`, `scsearch`, `spsearch`), up to 50 results |
 | `tracks.decode` | Reads tracks back from their `encoded` form |
 | `presets.build` | The effect graph a preset builds (`name`, optional `params`), without applying it |
-| `player.update` | Creates or changes a guild's player: `track` (plays now; `null` stops), `position`, `endTime`, `paused`, `volume`, `graph` or `preset` (effects), `voice`. These are the music's; a refused update changes nothing |
+| `player.update` | Creates or changes a guild's player: `track` (plays now; `null` stops), `position`, `endTime`, `paused`, `volume`, `clipping`, `graph` or `preset` (effects), `voice`. These are the music's; a refused update changes nothing |
 | `player.get` / `player.destroy` | Reads a player, or stops it and leaves the voice channel |
 | `queue.get` | A page of a player's queue |
 | `queue.add` | Adds tracks at an index and answers at once: encoded tracks as they are, queries (with an optional playlist `startIndex`) as loading items that load in the background; with nothing playing, the first item starts once it is ready. Each track can play only part of itself, from its `startTime` to its `endTime` (see [Start and end times](#start-and-end-times)) |
@@ -117,7 +118,7 @@ order: the events a request causes always arrive before its response.
 | `queue.skip` | Plays the next item (or `toItem`), instantly if it is prepared |
 | `queue.configure` | Sets `repeat` (`off`, `track` or `queue`) and `crossfade` (ms, up to 12 000) |
 | `queue.update` | Changes an item's `startTime` and `endTime` (`null` clears one): an item in the queue, or the playing one |
-| `layer.update` / `layer.remove` | Creates or changes a layer besides the music (`volume`, `graph` or `preset`, `paused`, `mode`, `maxClips`, `duck`), or removes it; see [Layers and clips](#layers-and-clips) |
+| `layer.update` / `layer.remove` | Creates or changes a layer besides the music (`volume`, `clipping`, `graph` or `preset`, `paused`, `mode`, `maxClips`, `duck`), or removes it; see [Layers and clips](#layers-and-clips) |
 | `clip.play` / `clip.stop` | Plays a sound on a layer, outside the queue (`volume`, `position`, `endTime`, `fadeIn`, `fadeOut`, `loop`), or stops one or all of a layer's |
 | `session.configure` | Sets how long players wait, paused, for a disconnected client to resume |
 | `node.info` / `node.stats` | Versions, sources and their searches, effect node types and presets, the YouTube session state; load and cache usage |
@@ -268,6 +269,13 @@ and pause, mixed *after* the music's effects: a sound on its own layer does not 
 music's nightcore preset or its volume. Pausing the music (`player.update`) leaves the other
 layers playing; a client that disconnects pauses them all, as it does the music. The sum goes
 through a limiter that keeps it within full scale, so a loud clip over loud music does not clip.
+
+The limiter also means a volume above 100 only makes a track louder until its peaks reach full
+scale; past that it lowers the track as much as the volume raised it. For the distortion of a
+volume pushed further, on purpose, `clipping` (on `player.update` for the music, `layer.update`
+for a layer) hard clips that layer's audio after its volume, just below where the limiter starts,
+so the limiter leaves it alone. Other layers stay clean, and the limiter still keeps their sum
+within full scale.
 
 Layers play *clips*: sounds outside the queue, from any source a track comes from (Discord
 attachment links play through `http`), with an id the client may choose (`clipId`) and their
@@ -528,8 +536,8 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_UPLOAD_KEEP_MINS` | `60` | How long an upload is kept after it was last used |
 | `ENTROXIMER_CACHE_DIR` | `$TMPDIR/entroximer` | Spilled packets and downloads; keep it on fast disk, not tmpfs |
 | `ENTROXIMER_NO_SPILL` | off | Keep the cache in RAM only |
-| `ENTROXIMER_MEMORY_BEHIND_SECS` | `15` | Seconds kept in RAM behind the playhead |
-| `ENTROXIMER_FORWARD_BIAS` | `4` | How much more is kept ahead than behind |
+| `ENTROXIMER_MEMORY_BEHIND_SECS` | `30` | Seconds kept in RAM behind the playhead |
+| `ENTROXIMER_FORWARD_BIAS` | `8` | How much more is kept ahead than behind: 240 s ahead in RAM with the 30 s behind |
 | `ENTROXIMER_MEMORY_MAX_MB` / `ENTROXIMER_DISK_MAX_MB` | `8` / `1024` | Per-track caps |
 | `ENTROXIMER_MEMORY_TOTAL_MB` / `ENTROXIMER_DISK_TOTAL_MB` | `128` / `3072` | Caps for all tracks together; each track playing, preparing or sounding as a clip may take an equal share, up to its own caps |
 | `ENTROXIMER_LOOP_CACHE_MB` | `1024` | Disk for repeated queues' tracks once they have played, besides `ENTROXIMER_DISK_TOTAL_MB`, so that their next round plays from disk; `0` keeps none (see [Queues](#queues)) |

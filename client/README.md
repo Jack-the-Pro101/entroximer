@@ -57,7 +57,8 @@ change.
 | `skip(toItem?)` | Plays the queue's next item (or `toItem`, dropping the ones before it); stops if the queue is empty |
 | `seek(ms)`, `pause()`, `resume()` | Control playback |
 | `stop()` | Stops playback; the queue waits until something plays again |
-| `setVolume(percent)`, `setEndTime(ms)` | 100 % leaves the audio unchanged, up to 1000 % |
+| `setVolume(percent, { clipping? })`, `setEndTime(ms)` | 100 % leaves the audio unchanged, up to 1000 % |
+| `setClipping(clipping)` | Hard clips the audio after the volume, so that above 100 % it distorts, for fun, instead of the engine's limiter holding it at full scale |
 | `setTimes(itemId, { startTime, endTime })` | Changes the part of a queued or the playing track (`itemId`) that plays; see [Start and end times](#start-and-end-times) |
 | `setPreset(name, params?)` | Effects from one of the engine's presets, e.g. `setPreset("nightcore")` or `setPreset("bass_boost", { gain_db: 9 })` |
 | `setGraph(graph)` | Effects, e.g. `chain({ type: "lowpass", params: { cutoff: 800 } })` or `parseChain("lowpass(800) => reverb", info.nodes)`; `null` removes them |
@@ -65,8 +66,8 @@ change.
 | `setTextChannel(channelId)` | Where the bot posts about this player (`textChannelId`); `null` for nowhere |
 | `destroy()` | Stops playback, leaves the voice channel and removes the player |
 
-A player keeps the engine's view of `track` (and its queue `itemId`), `paused`, `volume`, `graph`
-and `state` (buffered ranges, connection, buffering), and estimates `position` between updates.
+A player keeps the engine's view of `track` (and its queue `itemId`), `paused`, `volume`,
+`clipping`, `graph` and `state` (buffered ranges, connection, buffering), and estimates `position` between updates.
 It emits `trackStart`, `trackEnd`, `trackError`, `trackStuck` (each with the track's item id),
 `queueEnd`, `update`, `voiceClosed`, `textChannelChange`, `error` and `destroyed`; its errors
 reach the client's `error` event too, with the guild ID. Leaving the voice channel in Discord
@@ -128,8 +129,8 @@ await sfx.play("https://example.com/rain.ogg", { loop: true, fadeIn: 2_000 });
 |---|---|
 | `play(track, { clipId, volume, startAt, endAt, fadeIn, fadeOut, loop, userData })` | Plays a sound on the layer; resolves with its `ClipInfo` (`playing`, or `waiting` its turn) |
 | `stop(clipId?, fadeOut?)` | Stops a clip, or every clip of the layer, waiting ones too |
-| `configure(changes)` | Several changes in one request: `volume`, `graph` or `preset`, `paused`, `mode`, `maxClips`, `duck` |
-| `setVolume(percent)`, `setGraph(graph)`, `setPreset(name, params?)`, `pause()`, `resume()` | As for the player, for this layer alone |
+| `configure(changes)` | Several changes in one request: `volume`, `clipping`, `graph` or `preset`, `paused`, `mode`, `maxClips`, `duck` |
+| `setVolume(percent, { clipping? })`, `setClipping(clipping)`, `setGraph(graph)`, `setPreset(name, params?)`, `pause()`, `resume()` | As for the player, for this layer alone |
 | `setDuck({ layers, volume, attack, release, hold })` | Lowers other layers (`main` is the music) while this one's clips are heard; `null` stops |
 | `remove()` | Removes the layer, ending its clips |
 
@@ -137,7 +138,7 @@ A layer's `mode` decides what a clip does while others play: `queue` (the defaul
 turn, `mix` plays over them (up to `maxClips`, 8; the oldest makes room), `replace` ends them.
 Pausing the player pauses only the music; layers pause on their own.
 
-A layer mirrors the engine's `mode`, `volume`, `paused`, `graph`, `duck` and `clips`, and emits
+A layer mirrors the engine's `mode`, `volume`, `clipping`, `paused`, `graph`, `duck` and `clips`, and emits
 `clipStart`, `clipEnd` (with a reason), `clipError` and `clipStuck`, each with the clip's id;
 the player emits them too, with the layer's name. Clip events never touch `player.track` or the
 queue. Every clip `play` resolved ends once with `clipEnd`; one that waited and was stopped never

@@ -291,7 +291,7 @@ async fn load_play_stop_destroy() {
     let id = client
         .call(
             "player.update",
-            json!({ "guildId": "1", "track": { "encoded": encoded, "userData": { "requester": "42" } }, "volume": 50 }),
+            json!({ "guildId": "1", "track": { "encoded": encoded, "userData": { "requester": "42" } }, "volume": 50, "clipping": true }),
         )
         .await;
     // the event a request causes arrives before its response
@@ -302,6 +302,7 @@ async fn load_play_stop_destroy() {
     let player = client.response(id).await["result"].clone();
     assert_eq!(player["track"]["info"]["title"], "tone");
     assert_eq!(player["volume"], 50);
+    assert_eq!(player["clipping"], true);
     assert_eq!(player["state"]["connected"], false);
 
     let id = client
@@ -841,10 +842,16 @@ async fn layers_and_clips_over_the_protocol() {
         .await;
     let layer = &layer["result"];
     assert_eq!(
-        (&layer["mode"], &layer["volume"], &layer["duck"]),
+        (
+            &layer["mode"],
+            &layer["volume"],
+            &layer["clipping"],
+            &layer["duck"]
+        ),
         (
             &json!("queue"),
             &json!(80),
+            &json!(false),
             &json!({ "layers": ["main"], "volume": 25, "attack": 50, "release": 500, "hold": 250 })
         )
     );

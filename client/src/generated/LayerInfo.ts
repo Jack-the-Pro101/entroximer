@@ -4,7 +4,7 @@ import type { ClipMode } from "./ClipMode.js";
 import type { Duck } from "./Duck.js";
 import type { GraphSpec } from "./GraphSpec.js";
 
-export type LayerInfo = { name: string, mode: ClipMode, maxClips: number, volume: number, paused: boolean, graph: GraphSpec | null, duck: Duck | null, 
+export type LayerInfo = { name: string, mode: ClipMode, maxClips: number, volume: number, clipping: boolean, paused: boolean, graph: GraphSpec | null, duck: Duck | null, 
 /**
  * The clips playing, then those waiting, in the order they were played.
  */

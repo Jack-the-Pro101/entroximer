@@ -393,6 +393,34 @@ fn the_sum_is_kept_within_full_scale() {
 }
 
 #[test]
+fn a_clipping_layer_is_cut_off_and_left_alone_by_the_limiter() {
+    let mut bench = Bench::new();
+    // ten times as loud as full scale allows: cut off flat rather than lowered
+    let music = bench.file(1, &tone(440, 0.5, 10), None);
+    let main = &mut bench.mixer.main_mut().deck;
+    main.set_volume(10.0);
+    main.set_clipping(true);
+    main.play(music);
+    bench.downloaded();
+    let audio = bench.render(1.0);
+    let heard = window(&audio, 0.5);
+    let peak = heard.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!((0.89..=0.9).contains(&peak), "peak {peak}");
+    // a sine pushed this far is nearly square: most of it sits at the ceiling
+    let flat = heard.iter().filter(|s| s.abs() >= 0.89).count();
+    assert!(flat * 10 > heard.len() * 8, "{flat} of {}", heard.len());
+
+    // without clipping the limiter lowers it back to a sine, only its crests that high
+    bench.mixer.main_mut().deck.set_clipping(false);
+    let audio = bench.render(1.0);
+    let heard = window(&audio, 0.5);
+    let flat = heard.iter().filter(|s| s.abs() >= 0.89).count();
+    assert!(flat * 5 < heard.len(), "{flat} of {}", heard.len());
+    let level = tone_level(heard, 440.0);
+    assert!(near(level, 0.9), "{level}");
+}
+
+#[test]
 fn a_loop_plays_again_until_it_is_ended() {
     let mut bench = Bench::new();
     let mut clip = bench.clip(1, 1000, 0.3);

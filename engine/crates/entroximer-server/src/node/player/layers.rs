@@ -42,6 +42,7 @@ pub(super) struct LayerState {
     mode: ClipMode,
     max_clips: u8,
     volume: u16,
+    clipping: bool,
     paused: bool,
     graph: Option<GraphSpec>,
     duck: Option<Duck>,
@@ -56,6 +57,7 @@ impl LayerState {
             mode: ClipMode::Queue,
             max_clips: MAX_MIXED,
             volume: 100,
+            clipping: false,
             paused: false,
             graph: None,
             duck: None,
@@ -180,6 +182,10 @@ impl GuildPlayer {
             if let Some(volume) = update.volume {
                 layer.volume = volume;
                 deck_layer.deck.set_volume(f32::from(volume) / 100.0);
+            }
+            if let Some(clipping) = update.clipping {
+                layer.clipping = clipping;
+                deck_layer.deck.set_clipping(clipping);
             }
             if let Some((graph, effects)) = effects {
                 layer.graph = graph;
@@ -565,6 +571,7 @@ impl GuildPlayer {
                     mode: layer.mode,
                     max_clips: layer.max_clips,
                     volume: layer.volume,
+                    clipping: layer.clipping,
                     paused: layer.paused,
                     graph: layer.graph.clone(),
                     duck: layer.duck.clone(),

@@ -83,6 +83,21 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
     expect((await manager.connection.connect()).sessionId).toBe(first.sessionId);
   });
 
+  test("clips the music and a layer only when asked", async () => {
+    const manager = client();
+    await manager.connect();
+    const player = manager.player("17");
+    expect(player.clipping).toBe(false);
+    const info = await player.setVolume(1000, { clipping: true });
+    expect([info.volume, info.clipping, player.clipping]).toEqual([1000, true, true]);
+    expect((await player.setVolume(500)).clipping).toBe(true);
+    expect((await player.setClipping(false)).clipping).toBe(false);
+    const sfx = player.layer("sfx");
+    expect((await sfx.setClipping(true)).clipping).toBe(true);
+    expect([sfx.clipping, player.clipping]).toEqual([true, false]);
+    await player.destroy();
+  });
+
   test("takes fractional milliseconds and percents", async () => {
     const manager = client();
     await manager.connect();

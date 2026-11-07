@@ -18,6 +18,10 @@ layer: string,
  */
 volume?: number, 
 /**
+ * Hard clips the layer's audio after its volume, as `player.update`'s does the music's.
+ */
+clipping?: boolean, 
+/**
  * The layer's own effect graph; `null` removes it.
  */
 graph?: GraphSpec | null, 
