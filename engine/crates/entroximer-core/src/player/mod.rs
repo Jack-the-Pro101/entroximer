@@ -376,6 +376,13 @@ impl Player {
         self.buffering_since
     }
 
+    /// When buffering began to take longer than its source said it would: `buffering_since`,
+    /// or the source's `available_at` if that is later.
+    pub fn overdue_since(&self) -> Option<Instant> {
+        let since = self.buffering_since?;
+        Some(self.source.available_at().map_or(since, |at| at.max(since)))
+    }
+
     /// Blocks until the timeline changes or `timeout` passes; for callers that render offline.
     pub fn wait_for_media(&self, timeout: Duration) {
         self.timeline().wait(timeout);

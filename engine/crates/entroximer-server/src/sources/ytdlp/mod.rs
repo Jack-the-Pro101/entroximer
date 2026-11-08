@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -865,6 +865,10 @@ impl Producer for YtDlpProducer {
             }
             None => opening,
         }
+    }
+
+    fn available_at(&self) -> Option<Instant> {
+        self.activation.as_ref()?.available_at()
     }
 }
 

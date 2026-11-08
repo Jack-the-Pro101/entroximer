@@ -5,6 +5,7 @@
 //! media far ahead of the downloaded data instead of waiting for it.
 
 use std::io;
+use std::time::Instant;
 
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
@@ -53,6 +54,13 @@ pub trait Producer: Send + Sync + 'static {
 
     /// Opens the media at `start` (best effort unless `caps().time_seek`), or at the beginning.
     fn open(&self, start: Option<Ticks>) -> BoxFuture<'static, io::Result<ProducerStream>>;
+
+    /// For a source that holds its media back at first, as YouTube does during a video's
+    /// pre-roll ad: when it let the media through, or while it still holds it back, when it
+    /// expects to. Waiting for media until then is expected, so it is not reported as a stall.
+    fn available_at(&self) -> Option<Instant> {
+        None
+    }
 }
 
 /// How much a producer reads at once from a pipe or file: large enough that a fast download does

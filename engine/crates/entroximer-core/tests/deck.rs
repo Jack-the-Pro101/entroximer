@@ -1,7 +1,8 @@
 //! The deck: tracks back to back without gaps, events, volume, stalls.
 
+use std::io;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use entroximer_core::deck::{Deck, DeckEvent, DeckTrack};
 use entroximer_core::dsp::{GraphSpec, NodeRegistry};
@@ -9,8 +10,9 @@ use entroximer_core::player::{Player, PlayerConfig};
 use entroximer_core::producer::Producer;
 use entroximer_core::producer::ffmpeg::FfmpegProducer;
 use entroximer_core::producer::process::{ProcessProducer, ProcessSpec};
-use entroximer_core::producer::{ProducerCaps, TimestampMode};
+use entroximer_core::producer::{ProducerCaps, ProducerStream, TimestampMode};
 use entroximer_core::timeline::Ticks;
+use futures_util::future::BoxFuture;
 
 mod common;
 use common::{
@@ -254,6 +256,55 @@ fn a_stalled_track_is_reported_once() {
     }
     let events = ids(&bench.deck.drain_events());
     assert_eq!(events, ["start 7", "stuck 7"]);
+}
+
+/// A source that holds its media back until `until`, and never sends any.
+struct Withheld {
+    until: Instant,
+}
+
+impl Producer for Withheld {
+    fn caps(&self) -> ProducerCaps {
+        ProducerCaps::default()
+    }
+
+    fn open(&self, _start: Option<Ticks>) -> BoxFuture<'static, io::Result<ProducerStream>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn available_at(&self) -> Option<Instant> {
+        Some(self.until)
+    }
+}
+
+#[test]
+fn a_wait_the_source_announced_is_not_a_stall() {
+    let mut bench = Bench::stuck_after(Duration::from_millis(100));
+    let started = Instant::now();
+    let until = started + Duration::from_millis(400);
+    bench.deck.play(bench.track(7, Withheld { until }, None));
+    let mut block = vec![0.0; BLOCK_FRAMES * 2];
+    let mut render_until = |deadline: Instant| {
+        while Instant::now() < deadline {
+            bench.deck.render(&mut block);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        bench.deck.drain_events()
+    };
+
+    // three times the threshold, but the source said it would take this long
+    let events = render_until(until - Duration::from_millis(100));
+    assert_eq!(ids(&events), ["start 7"]);
+
+    let events = render_until(until + Duration::from_millis(300));
+    assert_eq!(ids(&events), ["stuck 7"]);
+    let DeckEvent::Stuck(_, waiting) = events[0] else {
+        unreachable!()
+    };
+    assert!(
+        waiting >= until - started,
+        "the whole wait is reported: {waiting:?}"
+    );
 }
 
 #[test]

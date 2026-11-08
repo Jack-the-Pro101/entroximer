@@ -557,7 +557,7 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_PASSWORD` | none | What clients must send as `Authorization`; without it any client that can reach the engine may use it |
 | `ENTROXIMER_HOST` / `ENTROXIMER_PORT` | `127.0.0.1` / `2333` | Listen address (`0.0.0.0` in the image) |
 | `ENTROXIMER_PLAYER_UPDATE_SECS` | `5` | Interval of `playerUpdate` events |
-| `ENTROXIMER_STUCK_MS` | `10000` | Wait for media after which a track is reported stuck |
+| `ENTROXIMER_STUCK_MS` | `10000` | Wait for media after which a track is reported stuck, not counting YouTube holding a video's media back during its pre-roll ad |
 | `ENTROXIMER_RESUME_TIMEOUT_SECS` | `60` | How long a disconnected client's players wait, paused, before they are destroyed |
 | `ENTROXIMER_PRELOAD_SECS` | `30` | How long before a track ends the next item of the queue starts loading |
 | `ENTROXIMER_DEFAULT_SEARCH` | `ytsearch` | Search for queries that are neither links nor prefixed |

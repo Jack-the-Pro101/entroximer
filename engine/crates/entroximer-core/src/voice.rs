@@ -163,17 +163,14 @@ impl Voice {
         !self.reported && self.gain.is_settled() && self.gain.target() == 0.0
     }
 
-    /// How long it has waited for media, once per stall that lasts `after` or longer.
+    /// How long it has waited for media, once per stall that lasts `after` or longer, not
+    /// counting the wait its source announced (see `Producer::available_at`).
     pub(crate) fn check_stuck(&mut self, after: Duration) -> Option<Duration> {
-        match self
-            .track
-            .player
-            .buffering_since()
-            .map(|since| since.elapsed())
-        {
-            Some(waiting) if waiting >= after && !self.stuck_reported => {
+        let player = &self.track.player;
+        match player.buffering_since().zip(player.overdue_since()) {
+            Some((since, overdue)) if overdue.elapsed() >= after && !self.stuck_reported => {
                 self.stuck_reported = true;
-                Some(waiting)
+                Some(since.elapsed())
             }
             Some(_) => None,
             None => {

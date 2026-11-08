@@ -796,8 +796,10 @@ pub enum Event {
         item_id: String,
         error: ApiError,
     },
-    /// The track has been waiting for media longer than the engine's threshold; reported once
-    /// per stall. Playback resumes by itself if the media arrives.
+    /// The track has been waiting for media longer than the engine's threshold, besides a wait
+    /// its source announced (YouTube holds a video's media back during its pre-roll ad);
+    /// reported once per stall, with the whole wait. Playback resumes by itself if the media
+    /// arrives.
     #[serde(rename_all = "camelCase")]
     TrackStuck {
         guild_id: Snowflake,
@@ -863,8 +865,8 @@ pub enum Event {
         track: Track,
         error: ApiError,
     },
-    /// The clip waited for media longer than the engine's threshold; it ends as `failed`, so
-    /// that the clips after it play.
+    /// The clip waited for media longer than the engine's threshold, besides a wait its source
+    /// announced (as for `trackStuck`); it ends as `failed`, so that the clips after it play.
     #[serde(rename_all = "camelCase")]
     ClipStuck {
         guild_id: Snowflake,
