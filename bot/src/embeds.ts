@@ -97,8 +97,15 @@ export async function nowPlayingMessage(manager: Entroximer, player: Player, tra
   return { embeds: [embed], files: art.file ? [art.file] : [] };
 }
 
+/** A page of the queue, with which one it is and how many there are. */
+export interface QueueMessage extends EmbedMessage {
+  /** From 1. */
+  page: number;
+  pages: number;
+}
+
 /** Page `page` (from 1) of the queue, a card with artwork per track; pages past the end show the last one. */
-export async function queueMessage(manager: Entroximer, player: Player, page: number): Promise<EmbedMessage> {
+export async function queueMessage(manager: Entroximer, player: Player, page: number): Promise<QueueMessage> {
   const items = player.queue.items;
   const pages = Math.max(1, Math.ceil(items.length / QUEUE_PAGE));
   const shown = Math.min(Math.max(1, page), pages);
@@ -131,7 +138,7 @@ export async function queueMessage(manager: Entroximer, player: Player, page: nu
     onPage.map((item) => item.track),
     (_, index) => `${first + index + 1}. ${onPage[index] ? describeItem(onPage[index]) : ""}`,
   );
-  return { embeds: [header, ...cards.embeds], files: [...files, ...cards.files] };
+  return { embeds: [header, ...cards.embeds], files: [...files, ...cards.files], page: shown, pages };
 }
 
 /** Search results, a card with artwork per track (at most ten, as a message holds). */

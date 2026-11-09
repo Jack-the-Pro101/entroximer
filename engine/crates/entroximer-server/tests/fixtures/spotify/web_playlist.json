@@ -1,0 +1,250 @@
+{
+ "data": {
+  "playlistV2": {
+   "__typename": "Playlist",
+   "content": {
+    "__typename": "PlaylistItemsPage",
+    "items": [
+     {
+      "addedAt": {
+       "isoString": "2026-09-08T01:20:52.393Z"
+      },
+      "addedBy": null,
+      "attributes": [],
+      "itemV2": {
+       "__typename": "TrackResponseWrapper",
+       "data": {
+        "__typename": "Track",
+        "albumOfTrack": {
+         "artists": {
+          "items": [
+           {
+            "profile": {
+             "name": "Fleetwood Mac"
+            },
+            "uri": "spotify:artist:08GQAI4eElDnROBrJRGE0X"
+           }
+          ]
+         },
+         "coverArt": {
+          "sources": [
+           {
+            "height": 300,
+            "url": "https://i.scdn.co/image/ab67616d00001e02e52a59a28efa4773dd2bfe1b",
+            "width": 300
+           },
+           {
+            "height": 64,
+            "url": "https://i.scdn.co/image/ab67616d00004851e52a59a28efa4773dd2bfe1b",
+            "width": 64
+           },
+           {
+            "height": 640,
+            "url": "https://i.scdn.co/image/ab67616d0000b273e52a59a28efa4773dd2bfe1b",
+            "width": 640
+           }
+          ]
+         },
+         "name": "Rumours (Super Deluxe)",
+         "uri": "spotify:album:0BwWUstDMUbgq2NYONRqlu"
+        },
+        "artists": {
+         "items": [
+          {
+           "profile": {
+            "name": "Fleetwood Mac"
+           },
+           "uri": "spotify:artist:08GQAI4eElDnROBrJRGE0X"
+          }
+         ]
+        },
+        "associationsV2": {
+         "totalCount": 0
+        },
+        "contentRating": {
+         "label": "NONE"
+        },
+        "discNumber": 1,
+        "trackDuration": {
+         "totalMilliseconds": 257800
+        },
+        "name": "Dreams - 2004 Remaster",
+        "playability": {
+         "playable": true,
+         "reason": "PLAYABLE"
+        },
+        "playcount": "3019511292",
+        "trackNumber": 2,
+        "uri": "spotify:track:0ofHAoxe9vBkTCp2UQIavz"
+       }
+      },
+      "uid": "542b4937586542464d6249"
+     },
+     {
+      "addedAt": {
+       "isoString": "2026-09-08T01:20:52.393Z"
+      },
+      "addedBy": null,
+      "attributes": [],
+      "itemV2": {
+       "__typename": "EpisodeResponseWrapper",
+       "data": {
+        "__typename": "Episode",
+        "name": "An episode",
+        "uri": "spotify:episode:512ojhOuo1ktJprKbVcKyQ"
+       }
+      },
+      "uid": "7a1f0e2c9b3d4e5f6a7b8c"
+     },
+     {
+      "addedAt": {
+       "isoString": "2026-09-08T01:20:52.393Z"
+      },
+      "addedBy": null,
+      "attributes": [],
+      "itemV2": {
+       "__typename": "TrackResponseWrapper",
+       "data": {
+        "__typename": "NotFound",
+        "message": "Track not found"
+       }
+      },
+      "uid": "8b2f1e3d0c4e5f6a7b8c9d"
+     },
+     {
+      "addedAt": {
+       "isoString": "2026-09-08T01:20:52.393Z"
+      },
+      "addedBy": null,
+      "attributes": [],
+      "itemV2": {
+       "__typename": "TrackResponseWrapper",
+       "data": {
+        "__typename": "Track",
+        "albumOfTrack": {
+         "artists": {
+          "items": [
+           {
+            "profile": {
+             "name": "Queen"
+            },
+            "uri": "spotify:artist:1dfeR4HaWDbWqFHLkxsg1d"
+           }
+          ]
+         },
+         "coverArt": {
+          "sources": [
+           {
+            "height": 300,
+            "url": "https://i.scdn.co/image/ab67616d00001e02c12b6aa3d50150032e455286",
+            "width": 300
+           },
+           {
+            "height": 64,
+            "url": "https://i.scdn.co/image/ab67616d00004851c12b6aa3d50150032e455286",
+            "width": 64
+           },
+           {
+            "height": 640,
+            "url": "https://i.scdn.co/image/ab67616d0000b273c12b6aa3d50150032e455286",
+            "width": 640
+           }
+          ]
+         },
+         "name": "Greatest Hits II",
+         "uri": "spotify:album:7rq68qYz66mNdPfidhIEFa"
+        },
+        "artists": {
+         "items": [
+          {
+           "profile": {
+            "name": "Queen"
+           },
+           "uri": "spotify:artist:1dfeR4HaWDbWqFHLkxsg1d"
+          },
+          {
+           "profile": {
+            "name": "David Bowie"
+           },
+           "uri": "spotify:artist:0oSGxfWSnnOXhD2fKuz2Gy"
+          }
+         ]
+        },
+        "associationsV2": {
+         "totalCount": 0
+        },
+        "contentRating": {
+         "label": "NONE"
+        },
+        "discNumber": 1,
+        "trackDuration": {
+         "totalMilliseconds": 236520
+        },
+        "name": "Under Pressure - Remastered 2011",
+        "playability": {
+         "playable": true,
+         "reason": "PLAYABLE"
+        },
+        "playcount": "2307597257",
+        "trackNumber": 2,
+        "uri": "spotify:track:2aSFLiDPreOVP6KHiWk4lF"
+       }
+      },
+      "uid": "724e434573717230646c45"
+     }
+    ],
+    "pagingInfo": {
+     "limit": 4,
+     "offset": 0
+    },
+    "totalCount": 200
+   },
+   "name": "Rock Classics",
+   "ownerV2": {
+    "data": {
+     "__typename": "User",
+     "avatar": {
+      "sources": [
+       {
+        "height": 64,
+        "url": "https://i.scdn.co/image/ab67757000003b8255c25988a6ac314394d3fbf5",
+        "width": 64
+       },
+       {
+        "height": 300,
+        "url": "https://i.scdn.co/image/ab6775700000ee8555c25988a6ac314394d3fbf5",
+        "width": 300
+       }
+      ]
+     },
+     "name": "Spotify",
+     "uri": "spotify:user:spotify",
+     "username": "spotify"
+    }
+   },
+   "images": {
+    "items": [
+     {
+      "extractedColors": {
+       "colorRaw": {
+        "hex": "#808080",
+        "isFallback": false
+       }
+      },
+      "sources": [
+       {
+        "height": null,
+        "url": "https://i.scdn.co/image/ab67706f00000002694bf33281695f3b7542a09a",
+        "width": null
+       }
+      ]
+     }
+    ]
+   },
+   "uri": "spotify:playlist:37i9dQZF1DWXRqgorJj26U",
+   "format": "editorial",
+   "description": "Rock legends & epic songs that continue to inspire generations. Cover: Ramones",
+   "followers": 13647038
+  }
+ }
+}

@@ -6,10 +6,19 @@
 //! recording [`mirror`] finds on YouTube, as Lavalink's LavaSrc does. Tracks keep Spotify's
 //! metadata: clients see the Spotify title, artists, artwork and link. Which recording a track
 //! played from is remembered for a day, so repeats do not search again.
+//!
+//! Playlists are listed as Spotify's [`web`] player lists them, or failing that, as its
+//! [`embed`]ded player does: the Web API only lists a playlist's tracks to its owner and
+//! collaborators, never to an app's own credentials, unless the app has extended quota.
 
 mod api;
+mod embed;
 mod mirror;
+mod script;
+mod web;
 
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -18,8 +27,10 @@ use serde::de::DeserializeOwned;
 
 pub use api::SpotifyError;
 pub(crate) use mirror::DEFAULT_SEARCHES as DEFAULT_MIRROR_SEARCHES;
+pub(crate) use web::DEFAULT_PLAYLIST_QUERY;
 
 use self::api::{Image, Paging, SpotifyApi, Track};
+use self::web::WebPlayer;
 use super::provider::{MAX_SEARCH_RESULTS, Provider, ProviderDescriptor};
 use super::{
     FoundTrack, Listing, LoadOutcome, PlaylistInfo, ResolveError, ResolvedTrack, TrackInfo,
@@ -44,6 +55,11 @@ pub(super) struct SpotifyProvider {
     mirror_searches: Vec<String>,
     /// The recording each Spotify track (by ID) played from.
     mirrors: Expiring<String, FoundTrack>,
+    /// Lists playlists.
+    web: WebPlayer,
+    /// Whether Spotify withholds ISRCs from the app, as from apps in development mode; they are
+    /// no longer looked up then.
+    isrcs_withheld: AtomicBool,
 }
 
 impl SpotifyProvider {
@@ -67,7 +83,9 @@ impl SpotifyProvider {
             },
             api: SpotifyApi::new(id, secret, config.market.clone()),
             mirror_searches: config.mirror.clone(),
+            web: WebPlayer::new(&config.playlist_query),
             mirrors: Expiring::new(REMEMBER_MIRRORS_FOR, REMEMBERED_MIRRORS),
+            isrcs_withheld: AtomicBool::new(false),
         })
     }
 
@@ -102,28 +120,28 @@ impl SpotifyProvider {
         listed(playlist, tracks, span)
     }
 
+    /// A playlist as Spotify's web player lists it; failing that, its first
+    /// [`embed::MOST_ITEMS`] items, as the embedded player lists them.
     async fn load_playlist(
         &self,
         id: &str,
         listing: Listing,
         ctx: &MediaContext,
     ) -> Result<LoadOutcome, ResolveError> {
-        let playlist = self.api.playlist(id).await?;
-        let first = playlist_items(playlist.items)?;
-        let total = first.total;
         let span = Span::new(listing, ctx);
-        let mut tracks = self.page_through(first, span, playlist_track).await?;
-        let artwork = largest(&playlist.images).map(str::to_owned);
-        artwork::inherit(&mut tracks, artwork.as_deref());
-        let info = PlaylistInfo {
-            name: playlist.name,
-            author: playlist.owner.and_then(|owner| owner.display_name),
-            uri: spotify_url(playlist.external_urls.as_ref()),
-            artwork_url: artwork,
-            selected_track: None,
-            total_tracks: total,
-        };
-        listed(info, tracks, span)
+        let fetch = |offset, limit| self.web.playlist(id, offset, limit);
+        match page_through_web(id, span, fetch).await {
+            Ok((info, tracks)) => listed(info, tracks, span),
+            Err(e @ SpotifyError::NotFound(_)) => Err(e.into()),
+            Err(e) => {
+                tracing::warn!(
+                    playlist = id,
+                    "listing only the first {} tracks, as Spotify's embedded player does: {e}",
+                    embed::MOST_ITEMS
+                );
+                load_embedded_playlist(id, span).await
+            }
+        }
     }
 
     /// The tracks of a paged listing from item `start` on, up to the span's limit; the listing
@@ -196,6 +214,17 @@ impl SpotifyProvider {
         })
     }
 
+    /// Notes, from a track Spotify described fully, whether it withholds ISRCs from the app: it
+    /// leaves them out of every track for apps in development mode.
+    fn note_isrcs(&self, full: &Track) {
+        if full.external_ids.is_none() && !self.isrcs_withheld.swap(true, Ordering::Relaxed) {
+            tracing::info!(
+                "Spotify withholds ISRCs from the engine's app (it is in development mode), so \
+                 tracks are found on YouTube by their artists and title only"
+            );
+        }
+    }
+
     /// Plays `track` from its recording on YouTube, keeping Spotify's metadata.
     async fn mirror(
         &self,
@@ -212,11 +241,15 @@ impl SpotifyProvider {
                 ),
             }
         }
-        // search results and album listings come without the ISRC that finds a track best
+        // search results and listings come without the ISRC that finds a track best, as do
+        // all tracks for apps in development mode, which are not asked again once that is known
         let mut wanted = track.info.clone();
-        if wanted.isrc.is_none() {
+        if wanted.isrc.is_none() && !self.isrcs_withheld.load(Ordering::Relaxed) {
             match self.api.track(id).await {
-                Ok(full) => wanted.isrc = full.external_ids.and_then(|ids| ids.isrc),
+                Ok(full) => {
+                    self.note_isrcs(&full);
+                    wanted.isrc = full.external_ids.and_then(|ids| ids.isrc);
+                }
                 Err(e) => tracing::debug!(track = %wanted.title, "cannot look up the ISRC: {e}"),
             }
         }
@@ -305,6 +338,7 @@ impl Provider for SpotifyProvider {
         let outcome = match link {
             Link::Track(id) => {
                 let track = self.api.track(&id).await?;
+                self.note_isrcs(&track);
                 let found = found_track(&track, None)
                     .ok_or_else(|| ResolveError::NoAudio(url.to_string()))?;
                 match listing {
@@ -383,8 +417,7 @@ impl Link {
             }
             _ => return None,
         };
-        // IDs go into API paths, so they must be what Spotify's are: base62
-        if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        if !is_id(id) {
             return None;
         }
         let id = id.to_owned();
@@ -396,6 +429,20 @@ impl Link {
             _ => return None,
         })
     }
+}
+
+/// Whether `id` is what Spotify's IDs are, base62: they go into API paths.
+fn is_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// The ID in a URI such as `spotify:track:<id>`, for `kind` `track`.
+fn uri_id<'a>(uri: &'a str, kind: &str) -> Option<&'a str> {
+    let id = uri
+        .strip_prefix("spotify:")?
+        .strip_prefix(kind)?
+        .strip_prefix(':')?;
+    is_id(id).then_some(id)
 }
 
 /// A Spotify track in the common model; `album` names (and pictures) the album of an album's
@@ -495,25 +542,101 @@ fn listed(
     Ok(LoadOutcome::Playlist { playlist, tracks })
 }
 
-/// A playlist's listing of its items, unless the app may not read them.
-fn playlist_items(
-    items: Option<Paging<api::PlaylistItem>>,
-) -> Result<Paging<api::PlaylistItem>, SpotifyError> {
-    items.ok_or(SpotifyError::Restricted(
-        "the tracks of playlists their users do not own",
-    ))
+/// A playlist as Spotify's embedded player lists it: only its first [`embed::MOST_ITEMS`]
+/// items, without albums (the playlist's picture stands in) or ISRCs.
+async fn load_embedded_playlist(id: &str, span: Span) -> Result<LoadOutcome, ResolveError> {
+    embedded_listing(id, embed::page(id).await?.playlist, span)
 }
 
-/// A playlist item as a track; podcast episodes and removed tracks are left out.
-fn playlist_track(item: api::PlaylistItem) -> Result<Option<FoundTrack>, SpotifyError> {
-    let Some(item) = item.item else {
-        return Ok(None);
-    };
-    if item.get("type").and_then(|t| t.as_str()) != Some("track") {
-        return Ok(None);
+fn embedded_listing(
+    id: &str,
+    playlist: embed::Playlist,
+    span: Span,
+) -> Result<LoadOutcome, ResolveError> {
+    let count = playlist.items.len();
+    // a full page may have been cut short
+    let complete = count < embed::MOST_ITEMS;
+    if !complete {
+        tracing::info!(
+            playlist = %playlist.name,
+            "Spotify's embedded player lists a playlist's first {count} tracks at most; this one may have more"
+        );
+        if span.start >= count {
+            return Err(SpotifyError::Embed("it lists only a playlist's first 100 tracks").into());
+        }
     }
-    let track: Track = serde_json::from_value(item).map_err(SpotifyError::Json)?;
-    Ok(found_track(&track, None))
+    let mut tracks: Vec<FoundTrack> = playlist
+        .items
+        .into_iter()
+        .skip(span.start)
+        .flatten()
+        .filter_map(|track| found_track(&track, None))
+        .take(span.limit)
+        .collect();
+    let artwork = largest(&playlist.images).map(str::to_owned);
+    artwork::inherit(&mut tracks, artwork.as_deref());
+    let info = PlaylistInfo {
+        name: playlist.name,
+        author: playlist.owner,
+        uri: Some(playlist_url(id)),
+        artwork_url: artwork,
+        selected_track: None,
+        total_tracks: complete.then(|| u32::try_from(count).ok()).flatten(),
+    };
+    listed(info, tracks, span)
+}
+
+/// A playlist's tracks from the span's start on, up to its limit, with its details; `fetch(offset,
+/// limit)` lists a page of its items as Spotify's web player does.
+async fn page_through_web<F, Fut>(
+    id: &str,
+    span: Span,
+    mut fetch: F,
+) -> Result<(PlaylistInfo, Vec<FoundTrack>), SpotifyError>
+where
+    F: FnMut(usize, usize) -> Fut,
+    Fut: Future<Output = Result<web::PlaylistPage, SpotifyError>>,
+{
+    let mut info = None;
+    let mut tracks = Vec::new();
+    let mut offset = span.start;
+    loop {
+        let wanted = (span.limit - tracks.len()).min(web::PAGE);
+        let page = fetch(offset, wanted).await?;
+        let count = page.items.len();
+        offset += count;
+        let total = page.total;
+        info.get_or_insert_with(|| PlaylistInfo {
+            name: page.name,
+            author: page.owner,
+            uri: Some(playlist_url(id)),
+            artwork_url: largest(&page.images).map(str::to_owned),
+            selected_track: None,
+            total_tracks: total,
+        });
+        tracks.extend(
+            page.items
+                .into_iter()
+                .flatten()
+                .filter_map(|track| found_track(&track, None)),
+        );
+        let at_end = count == 0
+            || match total {
+                Some(total) => offset >= total as usize,
+                None => count < wanted,
+            };
+        if at_end || tracks.len() >= span.limit {
+            break;
+        }
+    }
+    tracks.truncate(span.limit);
+    let info = info.expect("a page was listed");
+    artwork::inherit(&mut tracks, info.artwork_url.as_deref());
+    Ok((info, tracks))
+}
+
+fn playlist_url(id: &str) -> String {
+    format!("https://open.spotify.com/playlist/{id}")
 }
 
 fn artists(artists: &[api::ArtistRef]) -> Option<String> {
@@ -692,5 +815,311 @@ mod tests {
         )
         .unwrap();
         assert!(found_track(&local, None).is_none());
+    }
+
+    #[test]
+    fn stops_looking_up_isrcs_spotify_withholds() {
+        let provider = SpotifyProvider::new(&SpotifyConfig {
+            client_id: Some("unused".into()),
+            client_secret: Some(Secret::new("unused")),
+            ..cli_defaults()
+        })
+        .unwrap();
+        let mut track: Track =
+            serde_json::from_str(include_str!("../../../tests/fixtures/spotify/track.json"))
+                .unwrap();
+        provider.note_isrcs(&track);
+        assert!(
+            !provider.isrcs_withheld.load(Ordering::Relaxed),
+            "extended quota"
+        );
+        // as Spotify describes tracks to apps in development mode
+        track.external_ids = None;
+        provider.note_isrcs(&track);
+        assert!(provider.isrcs_withheld.load(Ordering::Relaxed));
+    }
+
+    fn embedded_playlist() -> embed::Playlist {
+        embed::parse(include_str!(
+            "../../../tests/fixtures/spotify/embed_playlist.html"
+        ))
+        .unwrap()
+        .playlist
+    }
+
+    #[test]
+    fn lists_playlists_from_the_embedded_player() {
+        let whole = Span {
+            start: 0,
+            limit: 1000,
+        };
+        let LoadOutcome::Playlist { playlist, tracks } =
+            embedded_listing("37i9dQZF1DXcBWIGoYBM5M", embedded_playlist(), whole).unwrap()
+        else {
+            panic!("a playlist");
+        };
+        assert_eq!(playlist.name, "Today’s Top Hits");
+        assert_eq!(playlist.author.as_deref(), Some("Spotify"));
+        assert_eq!(
+            playlist.uri.as_deref(),
+            Some("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M")
+        );
+        assert_eq!(playlist.total_tracks, Some(3), "the page lists them all");
+        let titles: Vec<_> = tracks.iter().map(|t| t.info.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            ["Stop The Wedding!", "expectations (feat. Chappell Roan)"],
+            "the podcast episode is left out"
+        );
+        let track = &tracks[1].info;
+        assert_eq!(
+            track.author.as_deref(),
+            Some("Olivia Rodrigo, Chappell Roan")
+        );
+        assert_eq!(track.length, Some(Millis(223_935)));
+        assert_eq!(
+            track.uri,
+            "https://open.spotify.com/track/3XmwAZpIMNpTJy8faw3ajD"
+        );
+        assert_eq!(
+            track.artwork_url, playlist.artwork_url,
+            "the playlist's picture"
+        );
+        assert!(track.isrc.is_none());
+
+        // items count from the playlist's first, the episode too
+        let from_third = Span { start: 2, limit: 1 };
+        let LoadOutcome::Playlist { tracks, .. } =
+            embedded_listing("37i9dQZF1DXcBWIGoYBM5M", embedded_playlist(), from_third).unwrap()
+        else {
+            panic!("a playlist");
+        };
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].info.identifier, "3XmwAZpIMNpTJy8faw3ajD");
+
+        let past_end = Span { start: 3, limit: 1 };
+        assert!(matches!(
+            embedded_listing("37i9dQZF1DXcBWIGoYBM5M", embedded_playlist(), past_end),
+            Err(ResolveError::PastEnd { total: 3 })
+        ));
+    }
+
+    #[test]
+    fn long_embedded_playlists_are_cut_short() {
+        let mut playlist = embedded_playlist();
+        let track = playlist.items.swap_remove(0);
+        let mut long = embed::Playlist {
+            items: Vec::new(),
+            ..playlist
+        };
+        long.items.resize_with(embed::MOST_ITEMS, || {
+            track.as_ref().map(|t| api::Track {
+                id: t.id.clone(),
+                name: t.name.clone(),
+                artists: Vec::new(),
+                album: None,
+                duration_ms: t.duration_ms,
+                external_ids: None,
+                is_local: false,
+            })
+        });
+        let whole = Span {
+            start: 0,
+            limit: 1000,
+        };
+        let LoadOutcome::Playlist { playlist, tracks } =
+            embedded_listing("37i9dQZF1DXcBWIGoYBM5M", long, whole).unwrap()
+        else {
+            panic!("a playlist");
+        };
+        assert_eq!(tracks.len(), embed::MOST_ITEMS);
+        assert_eq!(playlist.total_tracks, None, "there may be more");
+
+        let past_page = Span {
+            start: embed::MOST_ITEMS,
+            limit: 1,
+        };
+        let long = embed::Playlist {
+            items: (0..embed::MOST_ITEMS).map(|_| None).collect(),
+            ..embedded_playlist()
+        };
+        assert!(matches!(
+            embedded_listing("37i9dQZF1DXcBWIGoYBM5M", long, past_page),
+            Err(ResolveError::Spotify(SpotifyError::Embed(_)))
+        ));
+    }
+
+    /// Reads a playlist of Spotify's own from the real embedded player, which the Web API hides
+    /// from apps. Needs the network, so it only runs when asked: `cargo test -- --ignored embed`.
+    #[tokio::test]
+    #[ignore = "reads open.spotify.com"]
+    async fn reads_a_real_playlist_from_the_embedded_player() {
+        let whole = Span {
+            start: 0,
+            limit: 1000,
+        };
+        // Today's Top Hits
+        let LoadOutcome::Playlist { playlist, tracks } =
+            load_embedded_playlist("37i9dQZF1DXcBWIGoYBM5M", whole)
+                .await
+                .unwrap()
+        else {
+            panic!("a playlist");
+        };
+        assert_eq!(playlist.author.as_deref(), Some("Spotify"));
+        assert!(tracks.len() >= 10, "{} tracks", tracks.len());
+        assert!(
+            tracks
+                .iter()
+                .all(|t| t.info.author.is_some() && t.info.length.is_some())
+        );
+
+        let missing = load_embedded_playlist("0000000000000000000000", whole).await;
+        assert!(
+            matches!(
+                missing,
+                Err(ResolveError::Spotify(SpotifyError::NotFound(_)))
+            ),
+            "{missing:?}"
+        );
+    }
+
+    #[test]
+    fn reads_ids_from_uris() {
+        assert_eq!(
+            uri_id("spotify:track:4u7EnebtmKWzUH433cf5Qv", "track"),
+            Some("4u7EnebtmKWzUH433cf5Qv")
+        );
+        assert_eq!(
+            uri_id("spotify:episode:4u7EnebtmKWzUH433cf5Qv", "track"),
+            None
+        );
+        assert_eq!(uri_id("spotify:trackx:abc", "track"), None);
+        assert_eq!(uri_id("spotify:track:..%2Fme", "track"), None);
+        assert_eq!(uri_id("spotify:track:", "track"), None);
+    }
+
+    /// Lists a playlist of `total` items, every tenth a podcast episode, as the web player would,
+    /// with the pages asked for.
+    async fn list_web(
+        total: usize,
+        span: Span,
+    ) -> (PlaylistInfo, Vec<FoundTrack>, Vec<(usize, usize)>) {
+        let item = |n: usize| {
+            (n % 10 != 9).then(|| api::Track {
+                id: Some(format!("track{n}")),
+                name: format!("Track {n}"),
+                artists: Vec::new(),
+                album: None,
+                duration_ms: 1000,
+                external_ids: None,
+                is_local: false,
+            })
+        };
+        let mut asked = Vec::new();
+        let (info, tracks) = page_through_web("abc", span, |offset, limit| {
+            asked.push((offset, limit));
+            std::future::ready(Ok(web::PlaylistPage {
+                name: "Long".to_owned(),
+                owner: Some("Someone".to_owned()),
+                images: Vec::new(),
+                total: Some(total as u32),
+                items: (offset..total.min(offset + limit)).map(item).collect(),
+            }))
+        })
+        .await
+        .unwrap();
+        (info, tracks, asked)
+    }
+
+    #[tokio::test]
+    async fn pages_through_long_playlists() {
+        let whole = Span {
+            start: 0,
+            limit: 1000,
+        };
+        let (info, tracks, asked) = list_web(250, whole).await;
+        assert_eq!(asked, [(0, 100), (100, 100), (200, 100)]);
+        assert_eq!(tracks.len(), 225, "without the episodes");
+        assert_eq!(tracks[0].info.identifier, "track0");
+        assert_eq!(tracks[224].info.identifier, "track248");
+        assert_eq!(info.name, "Long");
+        assert_eq!(info.total_tracks, Some(250));
+        assert_eq!(
+            info.uri.as_deref(),
+            Some("https://open.spotify.com/playlist/abc")
+        );
+
+        // items count from the playlist's first, episodes too; a page asks for what is missing
+        let (_, tracks, asked) = list_web(
+            250,
+            Span {
+                start: 120,
+                limit: 30,
+            },
+        )
+        .await;
+        assert_eq!(asked, [(120, 30), (150, 3)]);
+        assert_eq!(tracks.len(), 30);
+        assert_eq!(tracks[0].info.identifier, "track120");
+        assert_eq!(tracks[29].info.identifier, "track152");
+
+        let (info, tracks, asked) = list_web(
+            50,
+            Span {
+                start: 60,
+                limit: 10,
+            },
+        )
+        .await;
+        assert_eq!(asked, [(60, 10)]);
+        assert!(tracks.is_empty());
+        assert!(matches!(
+            listed(
+                info,
+                tracks,
+                Span {
+                    start: 60,
+                    limit: 10
+                }
+            ),
+            Err(ResolveError::PastEnd { total: 50 })
+        ));
+    }
+
+    /// Lists a playlist of Spotify's own past its first hundred tracks, with the real web player.
+    /// Needs the network, so it only runs when asked: `cargo test -- --ignored web_player`.
+    #[tokio::test]
+    #[ignore = "reads open.spotify.com"]
+    async fn lists_a_real_long_playlist_as_the_web_player_does() {
+        let web = WebPlayer::new("");
+        let whole = Span {
+            start: 0,
+            limit: 1000,
+        };
+        // Rock Classics
+        let id = "37i9dQZF1DWXRqgorJj26U";
+        let (info, tracks) =
+            page_through_web(id, whole, |offset, limit| web.playlist(id, offset, limit))
+                .await
+                .unwrap();
+        let total = info.total_tracks.unwrap() as usize;
+        assert!(total > web::PAGE, "{total} tracks");
+        assert!(
+            tracks.len() > web::PAGE && tracks.len() <= total,
+            "{} tracks",
+            tracks.len()
+        );
+        assert!(tracks.iter().all(|t| t.info.album.is_some()
+            && t.info.artwork_url.is_some()
+            && t.info.author.is_some()
+            && t.info.length.is_some()));
+        assert_eq!(info.author.as_deref(), Some("Spotify"));
+
+        let missing = web.playlist("0000000000000000000000", 0, 1).await;
+        assert!(
+            matches!(missing, Err(SpotifyError::NotFound(_))),
+            "{missing:?}"
+        );
     }
 }

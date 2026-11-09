@@ -20,7 +20,7 @@ use crate::cache::CacheDir;
 use crate::managed_ytdlp::{ManagedYtDlp, YtDlpBinary};
 use crate::sources::Sources;
 use crate::sources::artwork::Artwork;
-use crate::sources::spotify::DEFAULT_MIRROR_SEARCHES;
+use crate::sources::spotify::{DEFAULT_MIRROR_SEARCHES, DEFAULT_PLAYLIST_QUERY};
 use crate::uploads::{UploadLimits, UploadStore};
 use crate::youtube::{AuthPolicy, YouTube};
 
@@ -222,7 +222,7 @@ pub struct SourcesConfig {
     #[arg(
         long = "playlist-limit",
         env = "ENTROXIMER_PLAYLIST_LIMIT",
-        default_value_t = 500
+        default_value_t = 1000
     )]
     pub playlist_limit: u32,
 
@@ -274,6 +274,16 @@ pub struct SpotifyConfig {
         default_values = DEFAULT_MIRROR_SEARCHES
     )]
     pub mirror: Vec<String>,
+
+    /// The hash of the query Spotify's web player lists playlists with, which the engine lists
+    /// them with too, to start with. Spotify changes it now and then; the engine then reads the
+    /// current one from the web player's script.
+    #[arg(
+        long = "spotify-playlist-query",
+        env = "ENTROXIMER_SPOTIFY_PLAYLIST_QUERY",
+        default_value = DEFAULT_PLAYLIST_QUERY
+    )]
+    pub playlist_query: String,
 }
 
 #[derive(Clone, Debug, Args)]

@@ -3,7 +3,10 @@
 //!
 //! Since February 2026 Spotify limits apps in development mode: searches return at most ten
 //! results per request, playlists only list their tracks to their owners (so never to client
-//! credentials), and artists' top tracks are gone. Apps with extended quota keep everything.
+//! credentials, which is why playlists are listed as the `web` player lists them), artists' top
+//! tracks are gone, and tracks come without their ISRCs. Such apps also have a quota, besides
+//! the rate limit, shared by every app of their developer. Apps with extended quota keep
+//! everything.
 
 use std::time::{Duration, Instant};
 
@@ -31,6 +34,12 @@ pub enum SpotifyError {
     Credentials,
     #[error("Spotify is rate limiting the engine; try again in {0} s")]
     RateLimited(u64),
+    #[error(
+        "the engine's Spotify app has used up its quota (apps in development mode share one per \
+         developer account){}",
+        again_in(*.0)
+    )]
+    QuotaExceeded(Option<u64>),
     #[error("Spotify has no such {0}")]
     NotFound(&'static str),
     #[error(
@@ -44,6 +53,10 @@ pub enum SpotifyError {
     Status { status: u16, message: String },
     #[error("Spotify returned unexpected JSON")]
     Json(#[source] serde_json::Error),
+    #[error("cannot read the playlist from Spotify's embedded player: {0}")]
+    Embed(&'static str),
+    #[error("cannot list the playlist as Spotify's web player does: {0}")]
+    Web(String),
 }
 
 #[derive(Debug)]
@@ -84,11 +97,6 @@ impl SpotifyApi {
 
     pub(super) async fn album(&self, id: &str) -> Result<Album, SpotifyError> {
         self.get(&self.url(&format!("albums/{id}"), &[]), "album")
-            .await
-    }
-
-    pub(super) async fn playlist(&self, id: &str) -> Result<Playlist, SpotifyError> {
-        self.get(&self.url(&format!("playlists/{id}"), &[]), "playlist")
             .await
     }
 
@@ -193,9 +201,15 @@ impl SpotifyApi {
                 let retry_after = response
                     .headers()
                     .get(RETRY_AFTER)
-                    .and_then(|value| value.to_str().ok()?.parse().ok())
-                    .unwrap_or(30);
-                return Err(SpotifyError::RateLimited(retry_after));
+                    .and_then(|value| value.to_str().ok()?.parse().ok());
+                let body = response.bytes().await.unwrap_or_default();
+                return Err(
+                    if error_reason(&body).as_deref() == Some("QUOTA_EXCEEDED") {
+                        SpotifyError::QuotaExceeded(retry_after)
+                    } else {
+                        SpotifyError::RateLimited(retry_after.unwrap_or(30))
+                    },
+                );
             }
             status if !status.is_success() => {
                 return Err(SpotifyError::Status {
@@ -261,6 +275,19 @@ impl SpotifyApi {
     }
 }
 
+/// The `reason` an error body gives, as `QUOTA_EXCEEDED` for an app that used up its quota.
+fn error_reason(body: &[u8]) -> Option<String> {
+    let body: serde_json::Value = serde_json::from_slice(body).ok()?;
+    [&body["error"]["reason"], &body["reason"]]
+        .into_iter()
+        .find_map(|reason| reason.as_str())
+        .map(str::to_owned)
+}
+
+fn again_in(seconds: Option<u64>) -> String {
+    seconds.map_or_else(String::new, |seconds| format!("; try again in {seconds} s"))
+}
+
 /// Spotify's own explanation in an error body, if it gave one.
 fn error_message(body: &[u8]) -> String {
     #[derive(Deserialize)]
@@ -295,7 +322,6 @@ struct TokenGrant {
 pub(super) struct Paging<T> {
     pub(super) items: Vec<T>,
     pub(super) next: Option<String>,
-    pub(super) total: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -349,32 +375,6 @@ pub(super) struct Album {
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct Playlist {
-    pub(super) name: String,
-    pub(super) owner: Option<Owner>,
-    #[serde(default, deserialize_with = "null_as_empty")]
-    pub(super) images: Vec<Image>,
-    pub(super) external_urls: Option<ExternalUrls>,
-    /// Absent unless the app may read the playlist's contents. Called `tracks` before the
-    /// February 2026 changes, and still for apps with extended quota.
-    #[serde(alias = "tracks")]
-    pub(super) items: Option<Paging<PlaylistItem>>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct PlaylistItem {
-    /// A track or a podcast episode; `null` for items Spotify removed. Called `track` before
-    /// the February 2026 changes.
-    #[serde(alias = "track")]
-    pub(super) item: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct Owner {
-    pub(super) display_name: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 pub(super) struct Artist {
     pub(super) name: String,
     #[serde(default)]
@@ -388,6 +388,7 @@ pub(super) struct Image {
     pub(super) width: Option<u32>,
 }
 
+/// Left out of tracks altogether for apps in development mode.
 #[derive(Debug, Deserialize)]
 pub(super) struct ExternalIds {
     pub(super) isrc: Option<String>,
@@ -396,14 +397,6 @@ pub(super) struct ExternalIds {
 #[derive(Debug, Deserialize)]
 pub(super) struct ExternalUrls {
     pub(super) spotify: Option<String>,
-}
-
-fn null_as_empty<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::<Vec<T>>::deserialize(deserializer).map(Option::unwrap_or_default)
 }
 
 /// A link to a page of a listing, as a response gives it.
@@ -442,21 +435,24 @@ mod tests {
     }
 
     #[test]
-    fn reads_playlists_before_and_after_the_2026_changes() {
-        let current: Playlist = serde_json::from_str(
-            r#"{"name": "Mine", "images": null, "items": {"items": [{"item": {"id": "a"}}], "next": null}}"#,
-        )
-        .unwrap();
-        assert!(current.images.is_empty());
-        assert!(current.items.unwrap().items[0].item.is_some());
-
-        let legacy: Playlist = serde_json::from_str(
-            r#"{"name": "Theirs", "tracks": {"items": [{"track": null}], "next": null}}"#,
-        )
-        .unwrap();
-        assert!(legacy.items.unwrap().items[0].item.is_none());
-
-        let restricted: Playlist = serde_json::from_str(r#"{"name": "Other"}"#).unwrap();
-        assert!(restricted.items.is_none());
+    fn tells_used_up_quotas_from_rate_limits() {
+        assert_eq!(
+            error_reason(
+                br#"{"error": {"status": 429, "message": "Quota exceeded", "reason": "QUOTA_EXCEEDED"}}"#
+            )
+            .as_deref(),
+            Some("QUOTA_EXCEEDED")
+        );
+        assert_eq!(
+            error_reason(br#"{"reason": "QUOTA_EXCEEDED"}"#).as_deref(),
+            Some("QUOTA_EXCEEDED")
+        );
+        assert_eq!(error_reason(br#"{"error": {"status": 429}}"#), None);
+        assert_eq!(error_reason(b"Too many requests"), None);
+        assert_eq!(
+            SpotifyError::QuotaExceeded(Some(3600)).to_string(),
+            "the engine's Spotify app has used up its quota (apps in development mode share one \
+             per developer account); try again in 3600 s"
+        );
     }
 }

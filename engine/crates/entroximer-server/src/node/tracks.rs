@@ -327,12 +327,14 @@ pub fn load_error(e: &ResolveError) -> ApiError {
         ResolveError::NoResults(_) | ResolveError::NoMirror(_) => ErrorCode::NoResults,
         ResolveError::PastEnd { .. } => ErrorCode::BadRequest,
         ResolveError::Spotify(error) => match error {
-            SpotifyError::RateLimited(_) => ErrorCode::RateLimited,
+            SpotifyError::RateLimited(_) | SpotifyError::QuotaExceeded(_) => ErrorCode::RateLimited,
             SpotifyError::NotFound(_) | SpotifyError::Restricted(_) => ErrorCode::Unavailable,
             SpotifyError::Credentials
             | SpotifyError::Http(_)
             | SpotifyError::Status { .. }
-            | SpotifyError::Json(_) => ErrorCode::LoadFailed,
+            | SpotifyError::Json(_)
+            | SpotifyError::Embed(_)
+            | SpotifyError::Web(_) => ErrorCode::LoadFailed,
         },
         ResolveError::NoAudio(_) => ErrorCode::NoAudio,
         ResolveError::NoLocalFile(_) => ErrorCode::NotFound,

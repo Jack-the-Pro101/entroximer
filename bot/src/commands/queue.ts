@@ -1,11 +1,18 @@
 // The queue: /queue, /skip, /remove, /move, /trim, /shuffle, /clear, /repeat, /crossfade.
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType } from "discord.js";
+import type { ButtonInteraction, Message, MessageActionRowComponentBuilder } from "discord.js";
 import type { Player, QueueItem, Repeat } from "entroximer-client";
 
 import { queueMessage } from "../embeds";
+import type { QueueMessage } from "../embeds";
+import type { Engine } from "../engine";
 import { TIME_RANGE_HELP, describeItem, describeTrack, parseTimeRange } from "../format";
-import { UserError, command } from "./command";
-import type { Command } from "./command";
+import { UserError, command, failureText } from "./command";
+import type { Command, GuildInteraction } from "./command";
 import { existingPlayer } from "./players";
+
+/** How long /queue's buttons turn its pages after their last use. */
+const PAGES_IDLE_MS = 10 * 60_000;
 
 export const queueCommands: Command[] = [
   command(
@@ -18,7 +25,8 @@ export const queueCommands: Command[] = [
       const player = existingPlayer(interaction, engine);
       // artwork on the engine is uploaded with the reply, which may take a moment
       await interaction.deferReply();
-      await interaction.editReply(await queueMessage(engine.manager, player, interaction.options.getInteger("page") ?? 1));
+      const shown = await queueMessage(engine.manager, player, interaction.options.getInteger("page") ?? 1);
+      turnPages(interaction, engine, await interaction.editReply(queueReply(shown)), shown);
     },
   ),
   command(
@@ -196,4 +204,64 @@ function itemAt(player: Player, position: number): QueueItem {
     throw new UserError(`The queue has ${player.queue.length} tracks.`);
   }
   return item;
+}
+
+/** A page of the queue as a reply, with the buttons that turn its pages. */
+function queueReply(shown: QueueMessage) {
+  const button = (id: string, emoji: string, disabled: boolean) =>
+    new ButtonBuilder().setCustomId(id).setStyle(ButtonStyle.Secondary).setEmoji(emoji).setDisabled(disabled);
+  const first = shown.page <= 1;
+  const last = shown.page >= shown.pages;
+  const row = new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+    button("first", "⏮️", first),
+    button("previous", "◀️", first),
+    button("refresh", "🔄", false),
+    button("next", "▶️", last),
+    button("last", "⏭️", last),
+  );
+  return { embeds: shown.embeds, files: shown.files, components: [row] };
+}
+
+/**
+ * Turns /queue's pages as anyone in the channel presses its buttons, showing the queue as it is then,
+ * until they go unused for a while; then they are taken away.
+ */
+function turnPages(interaction: GuildInteraction, engine: Engine, message: Message<true>, shown: QueueMessage): void {
+  const collector = message.createMessageComponentCollector({ componentType: ComponentType.Button, idle: PAGES_IDLE_MS });
+  let page = shown.page;
+  // one press at a time, so pages follow each other in the order pressed
+  let turning = Promise.resolve();
+  const turn = async (button: ButtonInteraction): Promise<void> => {
+    await button.deferUpdate();
+    // the bot may have left, or left and come back, since
+    const player = engine.manager.players.get(interaction.guildId);
+    if (!player) {
+      await button.editReply({ content: "Nothing is playing here.", embeds: [], components: [], attachments: [] });
+      collector.stop();
+      return;
+    }
+    // the queue may have grown or shrunk since: pages past the end show the last one
+    const targets: Record<string, number> = { first: 1, previous: page - 1, next: page + 1, last: Number.POSITIVE_INFINITY };
+    const wanted = targets[button.customId] ?? page;
+    try {
+      const next = await queueMessage(engine.manager, player, wanted);
+      page = next.page;
+      await button.editReply({ content: "", ...queueReply(next), attachments: [] });
+    } catch (error) {
+      await button.editReply({ content: `❌ ${failureText(error, "/queue")}` });
+    }
+  };
+  collector.on("collect", (button) => {
+    turning = turning
+      .then(() => turn(button))
+      .catch((error: unknown) => console.error("cannot turn /queue's page:", error));
+  });
+  collector.on("end", () => {
+    // the buttons stop working: take them away, through the channel once the command's reply
+    // can no longer be edited (15 minutes after it)
+    interaction
+      .editReply({ components: [] })
+      .catch(() => message.edit({ components: [] }))
+      .catch(() => {});
+  });
 }

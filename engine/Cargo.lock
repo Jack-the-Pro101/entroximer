@@ -869,6 +869,7 @@ dependencies = [
  "clap",
  "entroximer-core",
  "fastrand",
+ "flate2",
  "futures-util",
  "hound",
  "percent-encoding",

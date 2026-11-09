@@ -25,7 +25,7 @@ guild, permission to view, connect to and speak in voice channels.
 | `/next query [start_index] [time]` | Queues a track or playlist to play right after the current one |
 | `/bulk [file] [start_index]` | Queues a list of links or searches from anywhere, one per line, from a form (without `file`) or an attached `.txt`, from line `start_index` on; each link plays the part it points at (`?t=`, `#t=`, ...); the engine loads them in the background, in order, and the reply ends with what was queued and which lines failed |
 | `/search query [source]` | Searches YouTube, YouTube Music, SoundCloud or Spotify (if the engine has a Spotify app), shows the results with their artwork, and queues the ones you pick |
-| `/queue [page]` | Shows the queue, each track with its artwork; items still loading show their link, marked ⏳ |
+| `/queue [page]` | Shows the queue, nine tracks a page, each with its artwork; items still loading show their link, marked ⏳. Its buttons turn the pages (first, previous, refresh, next, last) for anyone in the channel, until unused for 10 minutes |
 | `/skip [to]` | Skips to the next track, or to a position in the queue |
 | `/remove position`, `/move from to`, `/shuffle`, `/clear` | Edit the queue |
 | `/trim time [position]` | Changes the part of the current track, or of the queued one at `position`, that plays, with `time` as `/play` takes it (a side left out stays). The current track plays on from where it is: a new start applies the next time it plays, e.g. when repeated |

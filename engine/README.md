@@ -207,7 +207,8 @@ Every track's `artworkUrl` comes from the first of these that has a picture, wha
 
 Spotify's audio is DRM-protected, so like Lavalink's LavaSrc the engine only reads Spotify's
 catalog and plays every Spotify track from its recording on YouTube. Tracks keep Spotify's title,
-artists, album, artwork, ISRC and link; only their length becomes that of what plays.
+artists, album, artwork and link (and ISRC, for apps with extended quota); only their length
+becomes that of what plays.
 
 1. Create an app at <https://developer.spotify.com/dashboard> (its owner needs Spotify Premium)
    and give the engine its credentials: `ENTROXIMER_SPOTIFY_CLIENT_ID` and
@@ -225,8 +226,25 @@ a day.
 
 Spotify restricts apps in its default development mode (since February 2026): searches return at
 most ten results per request (the engine pages through them), playlists only list their tracks to
-apps with extended quota (the engine then explains this instead of loading them), and artists'
-top tracks are unavailable, so an artist link loads what a search for the artist finds.
+their owners and collaborators (never to an app's own credentials), artists' top tracks are
+unavailable, so an artist link loads what a search for the artist finds, and tracks come without
+their ISRCs, so matching starts with the artist and title. The engine finds that out from the
+first track it looks up, logs it, and stops looking ISRCs up. Such apps also have a quota, shared
+by every app of their developer, besides the rate limit; the engine says which one Spotify
+enforces when a request is refused.
+
+Playlists are therefore not read through the API at all, but listed as Spotify's web player lists
+them: with its GraphQL API and the anonymous token Spotify's public embedded player
+(`open.spotify.com/embed/playlist/<id>`) hands every visitor, a hundred tracks at a time, up to
+`ENTROXIMER_PLAYLIST_LIMIT`. This works for Spotify's own playlists too (Today's Top Hits and the
+like, hidden from most apps), but it is Spotify's undocumented, internal API, not one apps are
+meant to use, so it may stop working or be refused without notice. It only runs queries Spotify
+has registered, by hash, and Spotify changes its playlist query now and then. When it no longer
+runs the one the engine has, the engine reads the current one from the web player's own script
+(listed on open.spotify.com), at most once an hour, and logs it; flags a new version of the query
+says it lacks are sent as `false`. `ENTROXIMER_SPOTIFY_PLAYLIST_QUERY` sets the hash the engine
+starts with. Whenever the web player's API fails, the engine lists a playlist's first 100 tracks
+from the embedded player's page instead, without their albums (the playlist's picture stands in).
 
 ## Effects
 
@@ -561,7 +579,7 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_RESUME_TIMEOUT_SECS` | `60` | How long a disconnected client's players wait, paused, before they are destroyed |
 | `ENTROXIMER_PRELOAD_SECS` | `30` | How long before a track ends the next item of the queue starts loading |
 | `ENTROXIMER_DEFAULT_SEARCH` | `ytsearch` | Search for queries that are neither links nor prefixed |
-| `ENTROXIMER_PLAYLIST_LIMIT` | `500` | Most tracks loaded from one playlist (for a queue, from its start track) |
+| `ENTROXIMER_PLAYLIST_LIMIT` | `1000` | Most tracks loaded from one playlist (for a queue, from its start track) |
 | `ENTROXIMER_LOCAL_FILES_DIR` | none | Let clients play the files within this directory; see [Local files](#local-files) |
 | `ENTROXIMER_ALLOW_LOCAL_FILES` | off | Let clients play any file on the engine's host that it can read |
 | `ENTROXIMER_ALLOW_PRIVATE_URLS` | off | Let clients play links to private networks, e.g. a media server on the LAN |
@@ -589,6 +607,7 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_SPOTIFY_CLIENT_ID` / `ENTROXIMER_SPOTIFY_CLIENT_SECRET` | none | A Spotify app's credentials, which enable Spotify links and `spsearch` |
 | `ENTROXIMER_SPOTIFY_MARKET` | `US` | Country whose Spotify catalog is read |
 | `ENTROXIMER_SPOTIFY_MIRROR` | see [Spotify](#spotify) | Comma-separated searches that find Spotify tracks on YouTube; `{isrc}`, `{title}`, `{artist}`, `{artists}` |
+| `ENTROXIMER_SPOTIFY_PLAYLIST_QUERY` | the web player's at release | Hash of the web player's playlist query to start with; the engine finds the current one itself when Spotify changes it, see [Spotify](#spotify) |
 | `ENTROXIMER_YOUTUBE_AUTH` | `fallback` | When to send the YouTube session: `fallback`, `always`, `never` |
 | `ENTROXIMER_YOUTUBE_COOKIES_FILE` | | cookies.txt imported whenever it changes, e.g. a secret |
 | `ENTROXIMER_YOUTUBE_CHECK_HOURS` | `12` | Session check interval; `0` disables it |
