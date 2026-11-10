@@ -262,14 +262,18 @@ impl YtDlpProvider {
             .filter(|_| format.transport() == Some(Transport::Stdout));
         slim_info_json(&mut json, keep_format);
         let valid_until = format.url.as_deref().and_then(net::url_expiry);
+        let extraction = Extraction {
+            page: &track.info.uri,
+            proxy: proxy_for(ctx, requested),
+            session,
+        };
         let producer = YtDlpProducer::new(
             ctx,
             Bytes::from(json.to_string()),
-            &track.info.uri,
+            extraction,
             &format,
             entry.is_live(),
             await_url,
-            session,
         );
         Ok(ResolvedTrack {
             track,
@@ -555,6 +559,20 @@ impl Purpose {
     }
 }
 
+/// The proxy yt-dlp reaches `target` through, as does whatever then downloads or plays what it
+/// found there. For YouTube it is the proxy set for YouTube, if any: without one YouTube is
+/// reached directly, as is its PO token provider, which is on a private address. For any other
+/// site it is the proxy for clients' links (see [`egress`](super::egress)), which keeps what a
+/// page leads to (a redirect, the media it names, an HLS playlist's segments) off the engine's
+/// own machine and private networks.
+fn proxy_for<'a>(ctx: &'a MediaContext, target: &str) -> Option<&'a Url> {
+    if is_youtube_target(target) {
+        ctx.youtube.proxy()
+    } else {
+        ctx.link_proxy()
+    }
+}
+
 /// Runs yt-dlp on `target` once its purpose's turn comes (a background turn for a background
 /// load). Warnings stay on so that yt-dlp can report a session YouTube ended.
 async fn run(
@@ -567,7 +585,7 @@ async fn run(
     let _turn = background::turn(purpose.turns(ctx), &ctx.ytdlp_runs.background).await;
     let mut command = ctx.ytdlp.command();
     command.args(&ctx.config.ytdlp.args.0).args(args);
-    if let Some(proxy) = ctx.youtube.proxy().filter(|_| is_youtube_target(target)) {
+    if let Some(proxy) = proxy_for(ctx, target) {
         command.arg("--proxy").arg(proxy.as_str());
     }
     if let Some(session) = session {
@@ -696,26 +714,38 @@ struct YtDlpProducer {
     activation: Option<Arc<UrlActivation>>,
 }
 
+/// How a track was extracted, which its downloads keep to.
+struct Extraction<'a> {
+    /// The track's page, for a download that extracts it again.
+    page: &'a str,
+    /// The proxy yt-dlp reached it through; see [`proxy_for`].
+    proxy: Option<&'a Url>,
+    /// The YouTube session it was signed in with, if any.
+    session: Option<Session>,
+}
+
 impl YtDlpProducer {
     fn new(
         ctx: &MediaContext,
         info_json: Bytes,
-        page: &str,
+        extraction: Extraction<'_>,
         format: &Format,
         live: bool,
         await_url: bool,
-        session: Option<Session>,
     ) -> Self {
+        let Extraction {
+            page,
+            proxy,
+            session,
+        } = extraction;
         let media = &ctx.config;
         let transport = format
             .transport()
             .expect("best_audio only picks supported protocols");
-        // YouTube's media URLs only work from the address that extracted them
-        let proxy = ctx
-            .youtube
-            .proxy()
-            .filter(|_| is_youtube_target(page))
-            .map(|proxy| proxy.to_string());
+        // YouTube's media URLs only work from the address that extracted them, and another
+        // site's must not lead to private networks
+        let through_youtube_proxy = proxy.is_some() && proxy == ctx.youtube.proxy();
+        let proxy = proxy.map(Url::to_string);
         let direct = format.url.as_ref().map(|url| FfmpegProducer {
             headers: format
                 .http_headers
@@ -795,7 +825,7 @@ impl YtDlpProducer {
             .and_then(|at| Duration::try_from_secs_f64(at).ok())
             .map(|since_epoch| UNIX_EPOCH + since_epoch);
         let activation = direct.as_ref().filter(|_| await_url).map(|direct| {
-            let client = if proxy.is_some() {
+            let client = if through_youtube_proxy {
                 ctx.youtube.client().clone()
             } else {
                 net::client().clone()

@@ -2,6 +2,10 @@
 //! files on the engine's host that its own demuxer does not read (see `local`). Their metadata
 //! comes from the files' own tags, read with ffprobe, and their artwork is the cover embedded in
 //! them, if any (see `artwork`).
+//!
+//! Links are fetched through the proxy for clients' links (see `egress`), by the engine, ffprobe
+//! and ffmpeg alike, so that neither they nor what they lead to (a redirect, an HLS playlist's
+//! segments) reach the engine's own machine or a private network. Files are read as they are.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -18,7 +22,7 @@ use serde::Deserialize;
 use super::provider::{Provider, ProviderDescriptor};
 use super::{
     FoundTrack, Listing, LoadOutcome, ResolveError, ResolvedTrack, TrackInfo, TrackRef, artwork,
-    local, net,
+    egress, local, net,
 };
 use crate::api::protocol::Millis;
 use crate::config::MediaContext;
@@ -63,7 +67,7 @@ impl Provider for HttpProvider {
             net::ensure_public(url).await?;
         }
         let by_extension = has_media_extension(url);
-        let head = match Head::fetch(url).await {
+        let head = match Head::fetch(url, ctx).await {
             Ok(head) => head,
             // perhaps a page that yt-dlp makes sense of
             Err(_) if !by_extension => return Ok(None),
@@ -86,7 +90,7 @@ impl Provider for HttpProvider {
         if !ctx.config.sources.allow_private_urls {
             net::ensure_public(&url).await?;
         }
-        let head = Head::fetch(&url).await?;
+        let head = Head::fetch(&url, ctx).await?;
         describe(url.as_str(), "http", Some(&head), ctx).await
     }
 }
@@ -111,8 +115,9 @@ struct Head {
 }
 
 impl Head {
-    async fn fetch(url: &Url) -> Result<Self, ResolveError> {
-        let response = net::client()
+    async fn fetch(url: &Url, ctx: &MediaContext) -> Result<Self, ResolveError> {
+        let response = ctx
+            .link_client()
             .get(url.clone())
             .header(RANGE, "bytes=0-0")
             .timeout(PROBE_TIMEOUT)
@@ -181,14 +186,22 @@ pub(super) async fn describe_file(
     describe(&file.to_string_lossy(), source, None, ctx).await
 }
 
-/// Reads `input`'s metadata with ffprobe and prepares ffmpeg to play it.
+/// The proxy ffprobe and ffmpeg read the input of `source` through: the one for clients'
+/// links, or none for a file on the engine's host.
+fn proxy_for<'a>(source: &str, ctx: &'a MediaContext) -> Option<&'a Url> {
+    ctx.link_proxy().filter(|_| source != local::SOURCE)
+}
+
+/// Reads `input`'s metadata with ffprobe and prepares ffmpeg to play it. `head` is what a link's
+/// server said about it; a file on the engine's host has none.
 async fn describe(
     input: &str,
     source: &str,
     head: Option<&Head>,
     ctx: &MediaContext,
 ) -> Result<ResolvedTrack, ResolveError> {
-    let probe = Probe::run(input, ctx).await?;
+    let proxy = proxy_for(source, ctx);
+    let probe = Probe::run(input, proxy, ctx).await?;
     if !probe.has_audio() {
         return Err(ResolveError::NoAudio(input.to_owned()));
     }
@@ -219,6 +232,7 @@ async fn describe(
     };
     let producer = FfmpegProducer {
         live,
+        http_proxy: proxy.map(Url::to_string),
         ..FfmpegProducer::new(&ctx.config.ffmpeg, input)
     };
     Ok(ResolvedTrack {
@@ -247,12 +261,17 @@ pub(super) async fn embedded_cover(
         }
         _ => return Ok(None),
     }
-    let probe = Probe::run(input, ctx).await?;
+    let proxy = proxy_for(&reference.source, ctx);
+    let probe = Probe::run(input, proxy, ctx).await?;
     let Some(stream) = probe.cover_stream().filter(|_| probe.has_audio()) else {
         return Ok(None);
     };
     let scale = format!("scale='min({COVER_WIDTH},iw)':-2");
-    let extracting = tokio::process::Command::new(&ctx.config.ffmpeg)
+    let mut ffmpeg = tokio::process::Command::new(&ctx.config.ffmpeg);
+    if let Some(proxy) = proxy {
+        egress::route_ffmpeg(&mut ffmpeg, proxy);
+    }
+    let extracting = ffmpeg
         .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"])
         .arg(input)
         .args([
@@ -366,9 +385,17 @@ struct Disposition {
 }
 
 impl Probe {
-    async fn run(input: &str, ctx: &MediaContext) -> Result<Self, ResolveError> {
-        let program = &ctx.config.ffprobe;
-        let probing = tokio::process::Command::new(program)
+    /// Runs ffprobe on `input`, through `proxy` if it has one.
+    async fn run(
+        input: &str,
+        proxy: Option<&Url>,
+        ctx: &MediaContext,
+    ) -> Result<Self, ResolveError> {
+        let mut ffprobe = tokio::process::Command::new(&ctx.config.ffprobe);
+        if let Some(proxy) = proxy {
+            egress::route_ffmpeg(&mut ffprobe, proxy);
+        }
+        let probing = ffprobe
             .args([
                 "-v",
                 "error",
@@ -442,7 +469,33 @@ impl Probe {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
     use super::*;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        media: crate::config::MediaConfig,
+    }
+
+    /// Past the check of the link as given, e.g. a name that resolved elsewhere a moment ago:
+    /// ffprobe reads the link through the proxy for clients' links, which refuses it.
+    #[tokio::test]
+    async fn ffprobe_reads_links_through_the_proxy_for_clients_links() {
+        let dirs = tempfile::tempdir().unwrap();
+        let path = |name: &str| dirs.path().join(name).to_string_lossy().into_owned();
+        let (data, cache) = (path("data"), path("cache"));
+        let args = ["entroximer", "--data-dir", &data, "--cache-dir", &cache];
+        let ctx = MediaContext::new(Cli::parse_from(args).media).unwrap();
+
+        // nothing listens there: unless the proxy refuses first, the connection is refused
+        let refused = describe("http://127.0.0.1:9/tone.mp3", "http", None, &ctx).await;
+        let Err(ResolveError::Probe { message, .. }) = refused else {
+            panic!("expected ffprobe to fail, got {refused:?}");
+        };
+        assert!(message.contains("403"), "{message}");
+    }
 
     #[test]
     fn titles_fall_back_to_the_file_name() {

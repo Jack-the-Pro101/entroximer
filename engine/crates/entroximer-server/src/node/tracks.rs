@@ -39,6 +39,88 @@ const URL_MARGIN: Duration = Duration::from_secs(30 * 60);
 const KEEP_SEARCHES_FOR: Duration = Duration::from_secs(10 * 60);
 const CACHE_CAPACITY: usize = 256;
 
+/// How much of a client's tracks the engine holds: what a client sends with a track stays for
+/// as long as the track is queued or playing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrackLimits {
+    /// The longest `encoded` form of a track, in bytes.
+    pub encoded_bytes: usize,
+    /// The largest `userData`, in bytes of JSON.
+    pub user_data_bytes: usize,
+    /// The longest query, in bytes.
+    pub query_bytes: usize,
+    /// What the items of one queue may take together; see [`TrackLimits::weigh`].
+    pub queue_bytes: usize,
+}
+
+impl Default for TrackLimits {
+    /// Many times what tracks take: an `encoded` form is around 600 bytes, and reaches a few
+    /// thousand only for a link with a long signed URL, which it holds three times over.
+    fn default() -> Self {
+        Self {
+            encoded_bytes: 16 << 10,
+            user_data_bytes: 4 << 10,
+            query_bytes: 4 << 10,
+            queue_bytes: 32 << 20,
+        }
+    }
+}
+
+impl TrackLimits {
+    /// Refuses a track that is larger than the engine holds.
+    pub fn check(&self, selector: &TrackSelector) -> Result<(), ApiError> {
+        match selector {
+            TrackSelector::Encoded { encoded, .. } => {
+                too_large("an encoded track", encoded.len(), self.encoded_bytes)?;
+            }
+            TrackSelector::Query { query, .. } => self.check_query(query)?,
+        }
+        match selector.user_data() {
+            Some(data) => too_large("`userData`", json_bytes(data), self.user_data_bytes),
+            None => Ok(()),
+        }
+    }
+
+    /// Refuses a query that is longer than the engine holds.
+    pub fn check_query(&self, query: &str) -> Result<(), ApiError> {
+        too_large("a query", query.len(), self.query_bytes)
+    }
+
+    /// What `track` counts for against [`Self::queue_bytes`]: the bytes of its `encoded` form
+    /// and of its `userData` as JSON, which is what a client sent for it.
+    pub fn weigh(track: &Track) -> usize {
+        track.encoded.len() + track.user_data.as_ref().map_or(0, json_bytes)
+    }
+}
+
+fn too_large(what: &str, bytes: usize, limit: usize) -> Result<(), ApiError> {
+    if bytes <= limit {
+        return Ok(());
+    }
+    Err(ApiError::new(
+        ErrorCode::BadRequest,
+        format!("{what} may be at most {limit} bytes; this one is {bytes}"),
+    ))
+}
+
+/// The length of `value` as JSON.
+fn json_bytes(value: &Value) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value).expect("JSON values serialize");
+    count.0
+}
+
 /// The `encoded` form: where to load the track again, plus its info for decoding.
 #[derive(Serialize, Deserialize)]
 struct Encoded {
@@ -392,6 +474,59 @@ mod tests {
                 source_name: "youtube".into(),
             },
         }
+    }
+
+    #[test]
+    fn tracks_larger_than_the_engine_holds_are_refused() {
+        let limits = TrackLimits {
+            encoded_bytes: 100,
+            user_data_bytes: 20,
+            query_bytes: 10,
+            queue_bytes: 1000,
+        };
+        let encoded = |encoded: String, user_data: Option<Value>| TrackSelector::Encoded {
+            encoded,
+            user_data,
+            start_time: None,
+            end_time: None,
+        };
+        let query = |query: &str, user_data: Option<Value>| TrackSelector::Query {
+            query: query.to_owned(),
+            start_index: None,
+            user_data,
+            start_time: None,
+            end_time: None,
+        };
+        let data = serde_json::json!({ "requester": "1234" });
+        assert_eq!(json_bytes(&data), r#"{"requester":"1234"}"#.len());
+        assert_eq!(json_bytes(&data), 20);
+
+        assert_eq!(
+            limits.check(&encoded("a".repeat(100), Some(data.clone()))),
+            Ok(())
+        );
+        assert_eq!(limits.check(&query("ten bytes!", None)), Ok(()));
+        let refused = |selector: TrackSelector| limits.check(&selector).unwrap_err().message;
+        assert_eq!(
+            refused(encoded("a".repeat(101), None)),
+            "an encoded track may be at most 100 bytes; this one is 101"
+        );
+        assert_eq!(
+            refused(query("eleven long", None)),
+            "a query may be at most 10 bytes; this one is 11"
+        );
+        let larger = serde_json::json!({ "requester": "12345" });
+        assert_eq!(
+            refused(query("short", Some(larger.clone()))),
+            "`userData` may be at most 20 bytes; this one is 21"
+        );
+        assert!(limits.check(&encoded("a".into(), Some(larger))).is_err());
+
+        let mut track = to_track(found());
+        let bare = TrackLimits::weigh(&track);
+        assert_eq!(bare, track.encoded.len());
+        track.user_data = Some(data);
+        assert_eq!(TrackLimits::weigh(&track), bare + 20);
     }
 
     #[test]

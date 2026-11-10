@@ -10,6 +10,7 @@ use std::collections::{HashSet, VecDeque};
 use serde::{Deserialize, Serialize, Serializer};
 use ts_rs::TS;
 
+use super::tracks::TrackLimits;
 use crate::api::protocol::{Millis, Track};
 use crate::sources::PlaylistInfo;
 
@@ -62,6 +63,12 @@ impl QueueItem {
 
     pub fn pending(&self) -> Option<&Pending> {
         self.pending.as_deref()
+    }
+
+    /// What the item counts for against a queue's size: its track (see [`TrackLimits::weigh`])
+    /// and the query it is still to load.
+    pub fn bytes(&self) -> usize {
+        TrackLimits::weigh(&self.track) + self.pending().map_or(0, |pending| pending.query.len())
     }
 }
 
@@ -129,6 +136,8 @@ pub enum QueueChange {
 #[derive(Debug, Default)]
 pub struct Queue {
     items: VecDeque<QueueItem>,
+    /// What the items count for together; see [`QueueItem::bytes`].
+    bytes: usize,
     repeat: Repeat,
     /// How long the end of each track overlaps the start of the next.
     crossfade: Millis,
@@ -146,6 +155,11 @@ impl Queue {
 
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// What the items count for together; see [`QueueItem::bytes`].
+    pub fn bytes(&self) -> usize {
+        self.bytes
     }
 
     pub fn repeat(&self) -> Repeat {
@@ -203,6 +217,7 @@ impl Queue {
         }
         let index = index.unwrap_or(self.items.len()).min(self.items.len());
         let mut after = self.items.split_off(index);
+        self.bytes += items.iter().map(QueueItem::bytes).sum::<usize>();
         self.items.extend(items.iter().cloned());
         self.items.append(&mut after);
         Some(self.changed(QueueChange::Added {
@@ -214,16 +229,20 @@ impl Queue {
     /// Removes the items with these ids; ids not in the queue are ignored.
     pub fn remove(&mut self, ids: &[String]) -> Option<QueueChange> {
         let ids: HashSet<&str> = ids.iter().map(String::as_str).collect();
-        let removed: Vec<String> = self
-            .items
-            .iter()
-            .filter(|item| ids.contains(item.id.as_str()))
-            .map(|item| item.id.clone())
-            .collect();
+        let mut removed = Vec::new();
+        let mut freed = 0;
+        self.items.retain(|item| {
+            let stays = !ids.contains(item.id.as_str());
+            if !stays {
+                freed += item.bytes();
+                removed.push(item.id.clone());
+            }
+            stays
+        });
         if removed.is_empty() {
             return None;
         }
-        self.items.retain(|item| !ids.contains(item.id.as_str()));
+        self.bytes -= freed;
         Some(self.changed(QueueChange::Removed { ids: removed }))
     }
 
@@ -244,6 +263,7 @@ impl Queue {
             return None;
         }
         self.items.clear();
+        self.bytes = 0;
         Some(self.changed(QueueChange::Cleared))
     }
 
@@ -271,8 +291,10 @@ impl Queue {
         if item.track == track {
             return None;
         }
+        let before = item.bytes();
         item.track = track;
         let item = item.clone();
+        self.bytes = self.bytes - before + item.bytes();
         Some(self.changed(QueueChange::Updated {
             item: Box::new(item),
         }))
@@ -288,7 +310,8 @@ impl Queue {
     ) -> Option<QueueChange> {
         let position = self.position(id)?;
         let mut after = self.items.split_off(position);
-        after.pop_front();
+        let replaced = after.pop_front().map_or(0, |item| item.bytes());
+        self.bytes = self.bytes - replaced + items.iter().map(QueueItem::bytes).sum::<usize>();
         self.items.extend(items.iter().cloned());
         self.items.append(&mut after);
         Some(self.changed(QueueChange::Loaded {
@@ -303,7 +326,7 @@ impl Queue {
         if self.head()?.id != started.id {
             return None;
         }
-        self.items.pop_front();
+        self.bytes -= self.items.pop_front().map_or(0, |item| item.bytes());
         Some(self.changed(QueueChange::Advanced {
             id: started.id.clone(),
         }))
@@ -357,6 +380,58 @@ mod tests {
             .into_iter()
             .map(|i| i.id)
             .collect()
+    }
+
+    #[test]
+    fn the_queue_keeps_count_of_what_its_items_take() {
+        let with_data = |name: &str, data: serde_json::Value| {
+            let mut item = item(name);
+            item.track.user_data = Some(data);
+            item
+        };
+        let loading = QueueItem {
+            pending: Some(Box::new(Pending {
+                query: "ytsearch:something".into(),
+                start_index: None,
+                now: false,
+            })),
+            ..item("query")
+        };
+        assert_eq!(item("abc").bytes(), 3, "its `encoded` form");
+        assert_eq!(
+            with_data("abc", serde_json::json!({ "by": "me" })).bytes(),
+            3 + r#"{"by":"me"}"#.len()
+        );
+        assert_eq!(loading.bytes(), 5 + "ytsearch:something".len());
+
+        let mut queue = Queue::default();
+        let counted = |queue: &Queue| queue.iter().map(QueueItem::bytes).sum::<usize>();
+        queue.add(
+            vec![
+                item("a"),
+                with_data("bb", serde_json::json!([1, 2, 3])),
+                loading,
+            ],
+            None,
+        );
+        assert_eq!(queue.bytes(), 1 + 2 + 7 + 5 + 18);
+        queue.add(vec![item("ccc")], Some(1));
+        assert_eq!(queue.bytes(), counted(&queue));
+        queue.replace("query", vec![item("query"), item("found")], None);
+        assert_eq!(queue.bytes(), counted(&queue));
+        queue.update("a", with_data("a", serde_json::json!("longer")).track);
+        assert_eq!(queue.bytes(), counted(&queue));
+        queue.move_item("found", 0);
+        queue.shuffle(&mut fastrand::Rng::with_seed(1));
+        assert_eq!(queue.bytes(), counted(&queue));
+        let head = queue.head().cloned().unwrap();
+        queue.advance(&head);
+        assert_eq!(queue.bytes(), counted(&queue));
+        queue.remove(&["bb".to_owned(), "gone".to_owned()]);
+        assert_eq!(queue.bytes(), counted(&queue));
+        assert!(queue.bytes() > 0);
+        queue.clear();
+        assert_eq!(queue.bytes(), 0);
     }
 
     #[test]

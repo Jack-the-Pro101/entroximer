@@ -123,6 +123,8 @@ pub struct Mixer {
     retiring: Vec<Layer>,
     /// Events of retired layers, until they are drained.
     retired_events: Vec<DeckEvent>,
+    /// Retiring layers that have faded out, until [`take_retired`](Self::take_retired).
+    retired: Vec<Layer>,
     /// Keeps the sum within full scale.
     master: Effects,
     /// Whether the last render had anything to play; the limiter's look-ahead still holds what
@@ -140,6 +142,7 @@ impl Mixer {
             layers: vec![Layer::new(MAIN, stuck_after)],
             retiring: Vec::new(),
             retired_events: Vec::new(),
+            retired: Vec::new(),
             master: Effects::limiter(),
             was_audible: false,
             asked: Vec::new(),
@@ -254,14 +257,20 @@ impl Mixer {
         }
         self.master.process(out);
 
-        let retired = &mut self.retired_events;
-        self.retiring.retain_mut(|layer| {
-            let sounds = layer.deck.is_audible();
-            if !sounds {
-                retired.extend(layer.deck.drain_events());
-            }
-            sounds
-        });
+        let faded_out = self
+            .retiring
+            .extract_if(.., |layer| !layer.deck.is_audible());
+        for mut layer in faded_out {
+            self.retired_events.extend(layer.deck.drain_events());
+            self.retired.push(layer);
+        }
+    }
+
+    /// The removed layers that have faded out since the last call, for their owner to drop:
+    /// rendering happens on the audio thread, which is no place to free their effects' delay
+    /// lines. Call it now and then, without the mixer's lock held when they are dropped.
+    pub fn take_retired(&mut self) -> Vec<Layer> {
+        std::mem::take(&mut self.retired)
     }
 
     /// Moves each layer's ducking gain towards the lowest one that a layer ducking it asks for,

@@ -457,6 +457,7 @@ fn a_removed_layer_ends_its_clips_and_fades_out() {
     assert!(bench.mixer.remove_layer("sfx"));
     assert!(!bench.mixer.remove_layer("main"), "the music stays");
     assert!(bench.mixer.layer("sfx").is_none());
+    assert!(bench.mixer.take_retired().is_empty(), "it still sounds");
     let mut block = vec![0.0; BLOCK_FRAMES * 2];
     bench.mixer.render(&mut block);
     assert!(block.iter().any(|&s| s.abs() > 0.05), "it fades out");
@@ -466,6 +467,11 @@ fn a_removed_layer_ends_its_clips_and_fades_out() {
         ids(&bench.mixer.drain_events()),
         ["start 1", "end 1 Stopped"]
     );
+    // rendering does not free it: its owner does, off the audio thread
+    let retired = bench.mixer.take_retired();
+    assert_eq!(retired.len(), 1);
+    assert_eq!(retired[0].name(), "sfx");
+    assert!(bench.mixer.take_retired().is_empty());
 }
 
 /// A node whose output is not a number.

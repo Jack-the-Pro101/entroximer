@@ -18,6 +18,12 @@
 //!   `forward_bias` times further ahead than behind, since listeners skip forward far more often
 //!   than they skip back. A block read back from disk stays in RAM until it leaves the window.
 //!
+//! Most of a long track is downloaded far ahead of the playhead, and so is only on disk by the
+//! time it plays. [`Timeline::lookup`] reads such a block back when playback reaches it, which
+//! is a disk read on the thread that renders; whoever plays a timeline has the blocks it is
+//! about to reach read back ahead of that, elsewhere ([`Timeline::spilled_around`] and
+//! [`Timeline::load`]).
+//!
 //! When a cap is hit, the unit with the largest *weighted distance* from the playhead is evicted,
 //! where distance ahead counts `1 / forward_bias` as much as distance behind. If the incoming
 //! packet would itself be the farthest unit, the producer is paused (backpressure) instead, so a
@@ -50,16 +56,23 @@ use crate::error::{CodecMismatch, CodecSummary, MediaError};
 /// Media time in 48 kHz sample units (Discord's output rate).
 pub type Ticks = i64;
 pub const TICKS_PER_SECOND: Ticks = 48_000;
+/// The latest media time the engine works with: far beyond any media (over a million years),
+/// and far enough from `Ticks::MAX` that sums and differences of media times cannot overflow.
+/// Times from outside, such as a client's position or a container's timestamps, are clamped to it.
+pub const MAX_TICKS: Ticks = Ticks::MAX / 4;
 
 pub type ProducerId = u64;
 pub type ReaderId = u64;
 
+/// `d` in ticks, at most [`MAX_TICKS`].
 pub fn ticks(d: Duration) -> Ticks {
-    (d.as_nanos() * TICKS_PER_SECOND as u128 / 1_000_000_000) as Ticks
+    let ticks = d.as_nanos() * TICKS_PER_SECOND as u128 / 1_000_000_000;
+    Ticks::try_from(ticks).map_or(MAX_TICKS, |ticks| ticks.min(MAX_TICKS))
 }
 
 pub fn duration(t: Ticks) -> Duration {
-    Duration::from_nanos((t.max(0) as u128 * 1_000_000_000 / TICKS_PER_SECOND as u128) as u64)
+    let nanos = t.max(0) as u128 * 1_000_000_000 / TICKS_PER_SECOND as u128;
+    Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
 }
 
 /// Packets whose boundaries are closer than this are treated as contiguous or identical.
@@ -271,6 +284,17 @@ pub struct TimelineStats {
     pub packets: usize,
     pub memory_bytes: usize,
     pub disk_bytes: u64,
+    /// Blocks that [`Timeline::lookup`] had to read back from disk itself.
+    pub disk_lookups: u64,
+}
+
+/// A block that is only on disk, for [`Timeline::load`] to read back.
+#[derive(Debug)]
+pub struct Spilled {
+    /// A time the block is found at.
+    at: Ticks,
+    loc: DiskLoc,
+    file: Arc<File>,
 }
 
 pub struct Timeline {
@@ -400,6 +424,8 @@ struct Inner {
     unwritten: Vec<Unwritten>,
     /// Kept for playing later; see [`Timeline::park`].
     parked: bool,
+    /// See [`TimelineStats::disk_lookups`].
+    disk_lookups: u64,
 }
 
 /// A sealed block on its way to disk. It stays in RAM until it is written and attached.
@@ -459,6 +485,7 @@ impl Timeline {
                 failure: None,
                 unwritten: Vec::new(),
                 parked: false,
+                disk_lookups: 0,
             }),
             changed: Condvar::new(),
         }
@@ -607,10 +634,11 @@ impl Timeline {
         self.changed.notify_all();
     }
 
-    /// The packet covering `t`, or why there is none. Reads spilled blocks from disk.
+    /// The packet covering `t`, or why there is none. Reads a spilled block from disk, unless
+    /// it was [loaded](Self::load) ahead of this.
     pub fn lookup(&self, t: Ticks) -> io::Result<Lookup> {
         let (file, loc) = {
-            let g = self.lock();
+            let mut g = self.lock();
             let (range, block) = match g.probe(t) {
                 Probe::Buffered { range, block } => (range, block),
                 Probe::Pending(pending) => return Ok(Lookup::Pending(pending)),
@@ -623,16 +651,32 @@ impl Timeline {
             let loc = block
                 .disk
                 .expect("blocks without their packets in RAM are on disk");
+            g.disk_lookups += 1;
             (g.segment_file(loc.segment), loc)
         };
 
-        // read without the lock; the file stays readable even if its segment is evicted meanwhile
-        let mut buf = vec![0; loc.len as usize];
-        file.read_exact_at(&mut buf, loc.offset)?;
-        let packets = decode_block(Bytes::from(buf))?;
+        // read without the lock
+        let packets = read_block(&file, loc)?;
         let packet = packet_at(&packets, t).clone();
         self.lock().keep_in_memory(t, loc, packets);
         Ok(Lookup::Ready(packet))
+    }
+
+    /// The blocks only on disk among those `reader` plays next, from `behind` before its
+    /// playhead to `ahead` past it, in the order they play. Only blocks of the RAM window count:
+    /// what is read back stays in RAM until the reader has moved on. Never touches disk.
+    pub fn spilled_around(&self, reader: ReaderId, behind: Ticks, ahead: Ticks) -> Vec<Spilled> {
+        self.lock().spilled_around(reader, behind, ahead)
+    }
+
+    /// Reads blocks back from disk into RAM, where [`lookup`](Self::lookup) then finds them. It
+    /// waits on the disk, so it is not for the thread that renders.
+    pub fn load(&self, spilled: Vec<Spilled>) -> io::Result<()> {
+        for Spilled { at, loc, file } in spilled {
+            let packets = read_block(&file, loc)?;
+            self.lock().keep_in_memory(at, loc, packets);
+        }
+        Ok(())
     }
 
     /// What is missing at `t`; `None` if `t` is buffered or past the end. Never touches disk.
@@ -784,6 +828,7 @@ impl Timeline {
                 .sum(),
             memory_bytes: g.memory_bytes,
             disk_bytes: g.disk_bytes,
+            disk_lookups: g.disk_lookups,
         }
     }
 }
@@ -833,7 +878,15 @@ impl Inner {
         }
 
         let mut frontier = None;
-        let preceding = self.ranges.partition_point(|r| r.start() <= t + MAX_HOLE);
+        let mut preceding = self.ranges.partition_point(|r| r.start() <= t + MAX_HOLE);
+        // a range starting just after `t` stands in for it, so that a hole that small is
+        // skipped, but not while the range before it still has media at `t`, which plays first
+        while preceding >= 2
+            && self.ranges[preceding - 1].start() > t
+            && self.ranges[preceding - 2].end() > t
+        {
+            preceding -= 1;
+        }
         if let Some(range) = preceding.checked_sub(1) {
             let r = &self.ranges[range];
             let block = r.block_at(t);
@@ -866,6 +919,47 @@ impl Inner {
             },
             (None, None) => Pending::Gap,
         })
+    }
+
+    /// See [`Timeline::spilled_around`].
+    fn spilled_around(&self, reader: ReaderId, behind: Ticks, ahead: Ticks) -> Vec<Spilled> {
+        let Some(playhead) = self.readers.iter().find(|r| r.id == reader) else {
+            return Vec::new();
+        };
+        let playhead = playhead.playhead;
+        // not back into a gap before the range that holds the playhead
+        let earliest = self
+            .ranges
+            .iter()
+            .find(|r| r.start() <= playhead && playhead < r.end())
+            .map_or(playhead, Range::start);
+        let until = playhead.saturating_add(ahead);
+        let mut spilled = Vec::new();
+        let mut t = playhead.saturating_sub(behind).max(earliest);
+        while t < until {
+            let Probe::Buffered { range, block } = self.probe(t) else {
+                break;
+            };
+            let range = &self.ranges[range];
+            for b in range.blocks.range(block..) {
+                if b.start >= until {
+                    break;
+                }
+                if let (None, Some(loc)) = (&b.mem, b.disk)
+                    && self.in_memory_window(b.start, b.end)
+                {
+                    spilled.push(Spilled {
+                        // within the block, and past the end of the one before it
+                        at: b.end - 1,
+                        loc,
+                        file: self.segment_file(loc.segment),
+                    });
+                }
+            }
+            // on into a range that follows after a hole small enough to play across
+            t = range.end();
+        }
+        spilled
     }
 
     fn segment_file(&self, id: u64) -> Arc<File> {
@@ -1354,6 +1448,13 @@ impl Inner {
     }
 }
 
+/// Reads a spilled block back. Its file stays readable even if its segment is evicted meanwhile.
+fn read_block(file: &File, loc: DiskLoc) -> io::Result<Vec<Packet>> {
+    let mut buf = vec![0; loc.len as usize];
+    file.read_exact_at(&mut buf, loc.offset)?;
+    decode_block(Bytes::from(buf))
+}
+
 /// The packet covering `t` in a block that ends after `t`, or the first one after `t` when the
 /// block starts later.
 fn packet_at(packets: &[Packet], t: Ticks) -> &Packet {
@@ -1509,6 +1610,25 @@ mod tests {
     }
 
     #[test]
+    fn a_small_hole_is_skipped_only_once_playback_reaches_it() {
+        let tl = Timeline::new(memory_only());
+        let a = tl.register_producer(None);
+        fill(&tl, a, 0..100);
+        tl.cancel(a);
+        // 60 ms after the first range ends: too far to merge, close enough to play on
+        let b = tl.register_producer(Some(103 * PKT));
+        fill(&tl, b, 103..200);
+        assert_eq!(tl.buffered(), vec![(0, 100 * PKT), (103 * PKT, 200 * PKT)]);
+
+        // what the first range still has plays before the second starts
+        for i in 95..100 {
+            assert_eq!(ready(&tl, i * PKT), pkt(i));
+        }
+        assert_eq!(ready(&tl, 100 * PKT), pkt(103), "the hole is skipped");
+        assert_eq!(ready(&tl, 103 * PKT), pkt(103));
+    }
+
+    #[test]
     fn merged_ranges_read_back_from_disk() {
         let dir = tempfile::tempdir().unwrap();
         let tl = Timeline::new(spill_into(&dir, 1 << 30, 1 << 20));
@@ -1625,6 +1745,78 @@ mod tests {
             panic!("{t} is not buffered");
         };
         g.ranges[range].blocks[block].mem.is_some()
+    }
+
+    #[test]
+    fn what_a_reader_plays_next_is_read_back_ahead_of_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let tl = Timeline::new(spill_into(&dir, 1 << 30, 1 << 20));
+        let reader = tl.add_reader(0);
+        let p = tl.register_producer(None);
+        fill(&tl, p, 0..packets_in(300));
+        tl.finish(p, Finish::Eof);
+        let s = |s: i64| s * TICKS_PER_SECOND;
+        tl.set_playhead(reader, s(150));
+        assert_eq!(tl.stats().memory_bytes, 0);
+
+        // one block a second
+        let next = tl.spilled_around(reader, 0, s(5));
+        assert_eq!(next.len(), 5);
+        tl.load(next).unwrap();
+        for second in 150..155 {
+            assert!(in_ram(&tl, s(second)), "{second}");
+        }
+        assert!(!in_ram(&tl, s(155)));
+        assert!(tl.spilled_around(reader, 0, s(5)).is_empty());
+        assert_eq!(
+            tl.spilled_around(reader, TICKS_PER_SECOND / 10, s(5)).len(),
+            1,
+            "the block before the playhead"
+        );
+
+        // what was read back stays while playback moves on, and is found in RAM
+        tl.set_playhead(reader, s(151));
+        assert!(in_ram(&tl, s(154)));
+        for i in packets_in(151)..packets_in(155) {
+            assert_eq!(ready(&tl, i * PKT), pkt(i));
+        }
+        assert_eq!(tl.stats().disk_lookups, 0);
+
+        // no further than the RAM window reaches (60 s ahead): a sweep would release the rest
+        let window = tl.spilled_around(reader, 0, s(3600));
+        assert_eq!(window.len(), (155..=211).count());
+        tl.load(window).unwrap();
+        assert!(in_ram(&tl, s(211)));
+        assert!(!in_ram(&tl, s(212)));
+    }
+
+    #[test]
+    fn reading_ahead_goes_on_across_a_hole_that_playback_skips() {
+        let dir = tempfile::tempdir().unwrap();
+        let tl = Timeline::new(spill_into(&dir, 1 << 30, 1 << 20));
+        // far away while it downloads, so that nothing stays in RAM
+        let reader = tl.add_reader(3600 * TICKS_PER_SECOND);
+        let a = tl.register_producer(None);
+        fill(&tl, a, 0..100);
+        tl.finish(a, Finish::Stopped);
+        let b = tl.register_producer(Some(103 * PKT));
+        fill(&tl, b, 103..200);
+        tl.finish(b, Finish::Eof);
+        assert_eq!(tl.buffered(), vec![(0, 100 * PKT), (103 * PKT, 200 * PKT)]);
+        assert_eq!(tl.stats().memory_bytes, 0);
+
+        tl.set_playhead(reader, TICKS_PER_SECOND);
+        let next = tl.spilled_around(reader, 0, 5 * TICKS_PER_SECOND);
+        assert_eq!(
+            next.len(),
+            3,
+            "the first range's last block, and the second's two"
+        );
+        tl.load(next).unwrap();
+        for i in (50..100).chain(103..200) {
+            assert_eq!(ready(&tl, i * PKT), pkt(i));
+        }
+        assert_eq!(tl.stats().disk_lookups, 0);
     }
 
     #[test]

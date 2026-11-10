@@ -34,9 +34,11 @@ impl Strip {
         }
     }
 
-    /// Replaces the effects (`None` removes them) from the next render on.
-    pub fn set_effects(&mut self, effects: Option<Effects>) {
-        self.effects = effects;
+    /// Replaces the effects (`None` removes them) from the next render on, and returns the ones
+    /// replaced. They can hold megabytes of delay lines: a caller holding a lock that the audio
+    /// thread takes drops them after letting go of it.
+    pub fn set_effects(&mut self, effects: Option<Effects>) -> Option<Effects> {
+        std::mem::replace(&mut self.effects, effects)
     }
 
     /// Linear gain applied after the effects; it moves there over a few milliseconds.

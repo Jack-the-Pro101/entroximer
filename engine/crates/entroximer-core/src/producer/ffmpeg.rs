@@ -15,6 +15,12 @@ use super::process::{ProcessSpec, stdout_stream};
 use super::{Producer, ProducerCaps, ProducerStream, TimestampMode, seconds_arg};
 use crate::timeline::Ticks;
 
+/// The environment variable ffmpeg takes its HTTP proxy from where an input's `-http_proxy`
+/// does not reach: requests that do not inherit the input's options.
+pub const PROXY_VARIABLE: &str = "http_proxy";
+/// Environment variables that exempt hosts from a proxy.
+pub const PROXY_EXEMPTIONS: [&str; 2] = ["no_proxy", "NO_PROXY"];
+
 #[derive(Clone, Debug)]
 pub struct FfmpegProducer {
     pub ffmpeg: String,
@@ -24,7 +30,8 @@ pub struct FfmpegProducer {
     pub headers: Vec<(String, String)>,
     /// A live input: not seekable, and every open starts at the live edge.
     pub live: bool,
-    /// An HTTP proxy for the input's requests, HLS segments included.
+    /// An HTTP proxy for every request the input makes or leads to (redirects, HLS segments),
+    /// whatever the environment says.
     pub http_proxy: Option<String>,
 }
 
@@ -53,7 +60,13 @@ impl FfmpegProducer {
             spec = spec.arg("-headers").arg(headers);
         }
         if let Some(proxy) = &self.http_proxy {
-            spec = spec.arg("-http_proxy").arg(proxy);
+            spec = spec
+                .arg("-http_proxy")
+                .arg(proxy)
+                .env(PROXY_VARIABLE, proxy);
+            for exemption in PROXY_EXEMPTIONS {
+                spec = spec.env_remove(exemption);
+            }
         }
         if let Some(start) = start.filter(|&t| t > 0 && !self.live) {
             spec = spec.arg("-ss").arg(seconds_arg(start));
@@ -95,16 +108,19 @@ mod tests {
             http_proxy: Some("http://proxy:8888".to_owned()),
             ..FfmpegProducer::new("ffmpeg", "https://media.example/a.webm")
         };
-        let args = producer.spec(None).args;
+        let spec = producer.spec(None);
+        let args = &spec.args;
         let proxy = args.iter().position(|a| a == "-http_proxy").unwrap();
         let input = args.iter().position(|a| a == "-i").unwrap();
         assert_eq!(args[proxy + 1], "http://proxy:8888");
         assert!(proxy < input, "input options go before -i");
-        assert!(
-            !FfmpegProducer::new("ffmpeg", "x")
-                .spec(None)
-                .args
-                .contains(&"-http_proxy".to_owned())
-        );
+        // and to what the input leads to, with no host exempt
+        let proxy = ("http_proxy".to_owned(), "http://proxy:8888".to_owned());
+        assert_eq!(spec.env, [proxy]);
+        assert_eq!(spec.env_remove, ["no_proxy", "NO_PROXY"]);
+
+        let unproxied = FfmpegProducer::new("ffmpeg", "x").spec(None);
+        assert!(!unproxied.args.contains(&"-http_proxy".to_owned()));
+        assert!(unproxied.env.is_empty() && unproxied.env_remove.is_empty());
     }
 }

@@ -6,13 +6,16 @@
 //! that failed after the drop), and a fresh `playerUpdate` per player. Otherwise the players are
 //! destroyed. Periodic events (`playerUpdate`, `stats`) are not kept: the fresh state replaces
 //! them.
+//!
+//! A client can find its connection dead before the engine does, and come back while the
+//! session still has that connection. The new one then takes the session over: the players
+//! never pause, and the old connection is closed.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 
@@ -36,17 +39,46 @@ pub struct Session {
     clip_turns: Mutex<HashMap<(Snowflake, String), oneshot::Receiver<()>>>,
 }
 
+/// Where a session's messages go: its client's connection.
+pub trait Outbox: Send + Sync + 'static {
+    /// Queues `message` for the client, in the order of the calls; gives it back once the
+    /// connection takes no more.
+    fn send(&self, message: ServerMessage) -> Result<(), ServerMessage>;
+
+    /// Another connection has taken the session over: this one is to close.
+    fn replaced(&self);
+}
+
 enum Link {
     Attached {
         connection: u64,
-        out: UnboundedSender<ServerMessage>,
+        out: Box<dyn Outbox>,
+        /// Events the connection no longer took, as it was closing but not yet detached.
+        unsent: Backlog,
     },
     Detached {
         /// Identifies this stretch of being detached, see [`Session::detached_epoch`].
         epoch: u64,
-        backlog: VecDeque<ServerMessage>,
-        missed: u64,
+        backlog: Backlog,
     },
+}
+
+/// Events kept for a client to receive once it resumes: the newest [`BACKLOG_CAPACITY`], with
+/// the older ones counted as missed.
+#[derive(Default)]
+struct Backlog {
+    events: VecDeque<ServerMessage>,
+    missed: u64,
+}
+
+impl Backlog {
+    fn push(&mut self, message: ServerMessage) {
+        if self.events.len() == BACKLOG_CAPACITY {
+            self.events.pop_front();
+            self.missed += 1;
+        }
+        self.events.push_back(message);
+    }
 }
 
 impl Session {
@@ -57,8 +89,7 @@ impl Session {
             players: Mutex::new(HashMap::new()),
             link: Mutex::new(Link::Detached {
                 epoch: 0,
-                backlog: VecDeque::new(),
-                missed: 0,
+                backlog: Backlog::default(),
             }),
             resume_timeout: Mutex::new(resume_timeout),
             connections: AtomicU64::new(1),
@@ -66,34 +97,35 @@ impl Session {
         }
     }
 
-    /// Makes `out` the session's connection: sends `ready`, any buffered events and each
-    /// player's current state through it, and lets paused players continue. Returns the
-    /// connection's number for [`detach`](Self::detach).
-    pub fn attach(&self, out: UnboundedSender<ServerMessage>, resumed: bool) -> u64 {
+    /// Makes `out` the session's connection, in place of the one it may still have: sends
+    /// `ready`, any buffered events and each player's current state through it, and lets paused
+    /// players continue. Returns the connection's number for [`detach`](Self::detach).
+    pub fn attach(&self, out: impl Outbox, resumed: bool) -> u64 {
         let connection = self.connections.fetch_add(1, Ordering::Relaxed);
         {
             let mut link = lock(&self.link);
-            let (backlog, missed) = match std::mem::replace(
-                &mut *link,
-                Link::Attached {
-                    connection,
-                    out: out.clone(),
-                },
-            ) {
-                Link::Detached {
-                    backlog, missed, ..
-                } => (backlog, missed),
-                Link::Attached { .. } => (VecDeque::new(), 0),
+            let backlog = match &mut *link {
+                Link::Detached { backlog, .. } => std::mem::take(backlog),
+                // the client came back before its last connection was found dead
+                Link::Attached { out, unsent, .. } => {
+                    out.replaced();
+                    std::mem::take(unsent)
+                }
             };
             let ready = ServerMessage::Ready {
                 session_id: self.id.clone(),
                 resumed,
-                missed_events: missed,
+                missed_events: backlog.missed,
             };
             // the receiving task outlives this call; if it is gone, the connection already closed
-            for message in std::iter::once(ready).chain(backlog) {
+            for message in std::iter::once(ready).chain(backlog.events) {
                 let _ = out.send(message);
             }
+            *link = Link::Attached {
+                connection,
+                out: Box::new(out),
+                unsent: Backlog::default(),
+            };
         }
         // players emit through the link, so only once it is released
         for player in self.players() {
@@ -108,18 +140,17 @@ impl Session {
     pub(super) fn detach(&self, connection: u64) -> Option<u64> {
         let epoch = {
             let mut link = lock(&self.link);
-            match &*link {
-                Link::Attached { connection: c, .. } if *c == connection => {
-                    let epoch = self.connections.fetch_add(1, Ordering::Relaxed);
-                    *link = Link::Detached {
-                        epoch,
-                        backlog: VecDeque::new(),
-                        missed: 0,
-                    };
-                    epoch
-                }
+            let backlog = match &mut *link {
+                Link::Attached {
+                    connection: current,
+                    unsent,
+                    ..
+                } if *current == connection => std::mem::take(unsent),
                 _ => return None,
-            }
+            };
+            let epoch = self.connections.fetch_add(1, Ordering::Relaxed);
+            *link = Link::Detached { epoch, backlog };
+            epoch
         };
         for player in self.players() {
             player.set_client_present(false);
@@ -140,26 +171,16 @@ impl Session {
         let periodic = matches!(event, Event::PlayerUpdate { .. } | Event::Stats(_));
         let message = ServerMessage::Event(Box::new(event));
         let mut link = lock(&self.link);
-        let message = match &*link {
-            Link::Attached { out, .. } => match out.send(message) {
+        let (message, backlog) = match &mut *link {
+            Link::Attached { out, unsent, .. } => match out.send(message) {
                 Ok(()) => return,
                 // the connection is closing; keep the event for a resume
-                Err(unsent) => unsent.0,
+                Err(refused) => (refused, unsent),
             },
-            Link::Detached { .. } => message,
+            Link::Detached { backlog, .. } => (message, backlog),
         };
-        if periodic {
-            return;
-        }
-        if let Link::Detached {
-            backlog, missed, ..
-        } = &mut *link
-        {
-            if backlog.len() == BACKLOG_CAPACITY {
-                backlog.pop_front();
-                *missed += 1;
-            }
-            backlog.push_back(message);
+        if !periodic {
+            backlog.push(message);
         }
     }
 
@@ -246,6 +267,16 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Tests take a session's messages straight from a channel.
+#[cfg(test)]
+impl Outbox for tokio::sync::mpsc::UnboundedSender<ServerMessage> {
+    fn send(&self, message: ServerMessage) -> Result<(), ServerMessage> {
+        tokio::sync::mpsc::UnboundedSender::send(self, message).map_err(|refused| refused.0)
+    }
+
+    fn replaced(&self) {}
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -299,6 +330,77 @@ mod tests {
         assert_eq!(
             received[1],
             json!({ "type": "event", "event": "youtubeSession", "state": "expired" })
+        );
+        assert!(session.detached_epoch().is_none());
+    }
+
+    #[test]
+    fn events_a_closing_connection_no_longer_takes_are_kept_for_the_resume() {
+        let session = Session::new(Snowflake(1), Duration::from_secs(60));
+        let (out, rx) = mpsc::unbounded_channel();
+        let closing = session.attach(out, false);
+        // its writer is gone, but the connection has not been found closed yet
+        drop(rx);
+        session.emit(stats());
+        session.emit(Event::YoutubeSession {
+            state: SessionState::Expired,
+        });
+        session.detach(closing).unwrap();
+
+        let (out, mut rx) = mpsc::unbounded_channel();
+        session.attach(out, true);
+        let received = drain(&mut rx);
+        assert_eq!(received.len(), 2, "{received:?}");
+        assert_eq!(received[0]["type"], "ready");
+        assert_eq!(received[1]["event"], "youtubeSession");
+    }
+
+    /// A connection that notes whether it was replaced.
+    struct Watched {
+        out: mpsc::UnboundedSender<ServerMessage>,
+        replaced: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Outbox for Watched {
+        fn send(&self, message: ServerMessage) -> Result<(), ServerMessage> {
+            Outbox::send(&self.out, message)
+        }
+
+        fn replaced(&self) {
+            self.replaced.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn a_new_connection_takes_over_from_one_not_yet_found_dead() {
+        let session = Session::new(Snowflake(1), Duration::from_secs(60));
+        let (out, dead) = mpsc::unbounded_channel();
+        let replaced = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watched = Watched {
+            out,
+            replaced: Arc::clone(&replaced),
+        };
+        let old = session.attach(watched, false);
+        // its writer has given up, and the engine has yet to notice
+        drop(dead);
+        session.emit(Event::YoutubeSession {
+            state: SessionState::Expired,
+        });
+        assert!(!replaced.load(Ordering::Relaxed));
+
+        let (out, mut rx) = mpsc::unbounded_channel();
+        session.attach(out, true);
+        assert!(
+            replaced.load(Ordering::Relaxed),
+            "the old connection closes"
+        );
+        let received = drain(&mut rx);
+        assert_eq!(received.len(), 2, "{received:?}");
+        assert_eq!(received[0]["resumed"], true);
+        assert_eq!(received[1]["event"], "youtubeSession");
+        assert!(
+            session.detach(old).is_none(),
+            "the old connection closing leaves the session attached"
         );
         assert!(session.detached_epoch().is_none());
     }

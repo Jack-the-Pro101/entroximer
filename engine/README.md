@@ -133,17 +133,30 @@ changes), `voiceClosed`, `stats` and `youtubeSession`; `clipStart`, `clipEnd`, `
 
 When a client's connection drops, its players pause where they are. The engine pings every
 client every 20 s, so a connection that silently died (say, the bot's network went away) counts as
-dropped after a minute without an answer; WebSocket libraries answer pings by themselves. If it
+dropped after a minute without an answer; WebSocket libraries answer pings by themselves. So does
+one that takes none of the engine's messages for a minute, even if it keeps sending requests. If it
 reconnects with its
 `Session-Id` within the resume timeout, playback continues from the same position, the client
 receives the events it could not get meanwhile (periodic ones excepted) and each player's current
-state; otherwise the players are destroyed. Playback also holds its position while the voice
-connection to Discord reconnects.
+state; otherwise the players are destroyed. A client may find its connection dead before the
+engine does: reconnecting with its `Session-Id` then takes the session over without the players
+pausing, and the engine closes the older connection with code 4002. Playback also holds its
+position while the voice connection to Discord reconnects.
 
-The engine bounds what one client can make it hold: messages up to 4 MiB, 256 requests running
-at once per connection (it reads further ones as those finish), queues up to 10 000 items, graphs up to 16 nodes and 64 edges, 4 layers besides the music per player with 8 clips
+The engine bounds what one client can make it hold: messages up to 4 MiB, 256 requests in flight
+per connection, counting those whose answers the client has yet to take (it reads further ones as
+answers go out), queues up to 10 000 items, graphs up to 16 nodes and 64 edges, 4 layers besides the music per player with 8 clips
 playing at once and 32 waiting on each, fades up to 10 s, and resume timeouts up to a day. A
 request that asks for more is refused with `bad_request`.
+
+So is a track that is too large, since what a client sends with a track stays for as long as the
+track is queued or playing: its `encoded` form may be up to 16 KiB (`ENTROXIMER_TRACK_MAX_KB`),
+its `userData` up to 4 KiB of JSON (`ENTROXIMER_USER_DATA_MAX_KB`), and a query up to 4 KiB
+(`ENTROXIMER_QUERY_MAX_KB`). The items of one queue may take 32 MiB together
+(`ENTROXIMER_QUEUE_MAX_MB`), counting their `encoded` forms, their `userData` and the queries
+still to load; a playlist that would take a queue past that is cut short. These are many times
+what tracks take: an `encoded` form is around 600 bytes, so ten thousand ordinary tracks come to
+about 11 MB. A link with a long signed URL has a longer one, as it holds the URL three times over.
 
 When the engine shuts down (`SIGTERM`, `SIGINT`), `/health` answers 503, new connections are
 refused, every player ends (clients get `trackEnd` with reason `cleanup`) and leaves its voice
@@ -170,10 +183,21 @@ queue update.
 | `local` | Files on the engine's host, by their path; only with `ENTROXIMER_LOCAL_FILES_DIR` or `ENTROXIMER_ALLOW_LOCAL_FILES` (see [Local files](#local-files)) | |
 | `upload` | Files clients uploaded, as `upload:<id>`; only with `ENTROXIMER_UPLOADS` (see [Uploads](#uploads)) | |
 
-Everything but `http`, `local` and Spotify's metadata goes through yt-dlp. `http` and `generic` refuse links to the
-engine's own machine and private networks (unless `ENTROXIMER_ALLOW_PRIVATE_URLS`), so clients
-cannot use the engine to reach internal services. Newgrounds currently refuses automated
-requests; it works as far as Newgrounds lets it.
+Everything but `http`, `local` and Spotify's metadata goes through yt-dlp. Newgrounds currently
+refuses automated requests; it works as far as Newgrounds lets it.
+
+Clients cannot use the engine to reach internal services. `http` and `generic` refuse links to
+the engine's own machine and private networks, and so does whatever a link leads to: a redirect,
+the media a page names, the segments of an HLS playlist, a host name that answers differently the
+second time it is looked up. For that, everything fetched for a link, by the engine, ffprobe,
+ffmpeg and yt-dlp, goes through an HTTP proxy inside the engine (on a loopback port it picks),
+which resolves each host itself and connects only to public addresses. It applies to every site
+but YouTube, which is reached as described above: directly or through its own proxy, and its PO
+token provider may be on a private address. Since links go through the engine's proxy, a proxy
+from the environment (`http_proxy`, `HTTPS_PROXY`) or a `--proxy` in `ENTROXIMER_YTDLP_ARGS` is
+not used for them. Local files and uploads are read from disk and are not affected.
+`ENTROXIMER_ALLOW_PRIVATE_URLS` turns all of this off, for an engine whose clients may play from
+a media server on the LAN.
 
 ### Local files
 
@@ -578,11 +602,15 @@ Every option is a flag or an environment variable (`entroximer --help`).
 | `ENTROXIMER_STUCK_MS` | `10000` | Wait for media after which a track is reported stuck, not counting YouTube holding a video's media back during its pre-roll ad |
 | `ENTROXIMER_RESUME_TIMEOUT_SECS` | `60` | How long a disconnected client's players wait, paused, before they are destroyed |
 | `ENTROXIMER_PRELOAD_SECS` | `30` | How long before a track ends the next item of the queue starts loading |
+| `ENTROXIMER_TRACK_MAX_KB` | `16` | The longest `encoded` form of a track a client may send, in KiB |
+| `ENTROXIMER_USER_DATA_MAX_KB` | `4` | The largest `userData` a client may send with a track, in KiB of JSON |
+| `ENTROXIMER_QUERY_MAX_KB` | `4` | The longest query (a link or a search) a client may send, in KiB |
+| `ENTROXIMER_QUEUE_MAX_MB` | `32` | What the items of one queue may take together (`encoded` forms, `userData`, queries), in MiB |
 | `ENTROXIMER_DEFAULT_SEARCH` | `ytsearch` | Search for queries that are neither links nor prefixed |
 | `ENTROXIMER_PLAYLIST_LIMIT` | `1000` | Most tracks loaded from one playlist (for a queue, from its start track) |
 | `ENTROXIMER_LOCAL_FILES_DIR` | none | Let clients play the files within this directory; see [Local files](#local-files) |
 | `ENTROXIMER_ALLOW_LOCAL_FILES` | off | Let clients play any file on the engine's host that it can read |
-| `ENTROXIMER_ALLOW_PRIVATE_URLS` | off | Let clients play links to private networks, e.g. a media server on the LAN |
+| `ENTROXIMER_ALLOW_PRIVATE_URLS` | off | Let clients play links to, or leading to, private networks, e.g. a media server on the LAN |
 | `ENTROXIMER_UPLOADS` | off | Let clients upload audio files to play; see [Uploads](#uploads) |
 | `ENTROXIMER_UPLOAD_MAX_MB` | `50` | The largest upload |
 | `ENTROXIMER_UPLOAD_TOTAL_MB` | `512` | Disk all uploads may take together |

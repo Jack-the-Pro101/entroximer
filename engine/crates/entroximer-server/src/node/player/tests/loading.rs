@@ -219,6 +219,66 @@ async fn a_playlist_loads_in_place() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_playlist_fills_the_queue_no_further_than_its_size_limit() {
+    let limits = TrackLimits {
+        queue_bytes: 1500,
+        ..TrackLimits::default()
+    };
+    let mut h = Harness::build_with(Duration::from_secs(1), Duration::from_secs(60), limits).await;
+    h.media.hold("list");
+    // something plays, so that what loads stays in the queue
+    let playing = h.tones(&["playing"]).await;
+    h.add(playing, None).await;
+    h.events_until("start").await;
+    let ids = h.add_links(&["list"], None).await;
+    let tracks = h
+        .tones(&["one", "two", "three", "four", "five", "six"])
+        .await;
+    let sizes: Vec<usize> = tracks.iter().map(TrackLimits::weigh).collect();
+    assert!(
+        sizes.iter().all(|size| (300..700).contains(size)),
+        "{sizes:?}"
+    );
+    // as many as fit, counted from the first
+    let mut room = 1500;
+    let fit = sizes
+        .iter()
+        .take_while(|&&size| {
+            let fits = size <= room;
+            room = room.saturating_sub(size);
+            fits
+        })
+        .count();
+    assert!((2..6).contains(&fit), "{fit} of {sizes:?}");
+
+    let list = h.player.state().queue.get(&ids[0]).cloned().unwrap();
+    let found = Found {
+        tracks,
+        ..Found::default()
+    };
+    {
+        let node = Arc::clone(&h.node);
+        let mut state = h.player.state();
+        h.player.loaded(&mut state, &node, &list, found);
+        assert_eq!(state.queue.len(), fit);
+        assert!(state.queue.bytes() <= 1500);
+        assert_eq!(state.queue.bytes(), sizes[..fit].iter().sum::<usize>());
+    }
+
+    // nothing more fits, whoever adds it
+    let more = h.tones(&["seven", "eight", "nine", "ten"]).await;
+    let items = more.into_iter().map(QueueItem::new).collect();
+    let refused = h.player.queue_add(items, None).await.unwrap_err();
+    assert_eq!(refused.code, ErrorCode::BadRequest);
+    assert!(
+        refused.message.contains("at most 1500 bytes"),
+        "{}",
+        refused.message
+    );
+    assert_eq!(h.player.state().queue.len(), fit);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_skip_to_an_item_that_fails_to_load_ends_the_queue_once() {
     let mut h = Harness::new(Duration::from_secs(1)).await;
     let tracks = h.tones(&["x"]).await;

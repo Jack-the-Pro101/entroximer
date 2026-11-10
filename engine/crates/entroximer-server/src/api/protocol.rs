@@ -14,7 +14,7 @@ use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use entroximer_core::dsp::{GraphSpec, NodeDescriptor, PresetDescriptor, PresetSelection};
-use entroximer_core::timeline::{TICKS_PER_SECOND, Ticks};
+use entroximer_core::timeline::{MAX_TICKS, TICKS_PER_SECOND, Ticks};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use ts_rs::TS;
@@ -67,10 +67,13 @@ impl Millis {
         Self(u64::try_from(ticks / Self::TICKS_PER_MILLI).unwrap_or(0))
     }
 
+    /// In the engine's ticks; a time beyond what the engine works with is [`MAX_TICKS`], so that
+    /// no position a client sends can overflow the arithmetic done on media times.
     pub fn to_ticks(self) -> Ticks {
         i64::try_from(self.0)
             .unwrap_or(i64::MAX)
             .saturating_mul(Self::TICKS_PER_MILLI)
+            .min(MAX_TICKS)
     }
 
     /// A length in seconds as sources report it; `None` unless finite and positive.
@@ -1366,6 +1369,9 @@ mod tests {
         assert_eq!(Millis(1500).to_ticks(), 72_000);
         assert_eq!(Millis::from_ticks(72_047), Millis(1500));
         assert_eq!(Millis::from_ticks(-5), Millis(0));
+        // leaving room for the arithmetic on positions, e.g. a look-ahead added to one
+        assert_eq!(Millis(u64::MAX).to_ticks(), MAX_TICKS);
+        assert!(Millis(u64::MAX).to_ticks().checked_mul(2).is_some());
         assert_eq!(Millis::from_secs_f64(2.5), Some(Millis(2500)));
         assert_eq!(Millis::from_secs_f64(f64::NAN), None);
         assert_eq!(Millis::from(Duration::from_secs(3)), Millis(3000));

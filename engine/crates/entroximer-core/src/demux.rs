@@ -21,7 +21,9 @@ use tokio_util::sync::CancellationToken;
 use crate::decode::Decoder;
 use crate::error::MediaError;
 use crate::producer::{Producer, ProducerStream, TimestampMode};
-use crate::timeline::{Finish, Packet, ProducerId, PushResult, TICKS_PER_SECOND, Ticks, Timeline};
+use crate::timeline::{
+    Finish, MAX_TICKS, Packet, ProducerId, PushResult, TICKS_PER_SECOND, Ticks, Timeline,
+};
 use crate::transport::{StreamReader, stream_reader};
 
 /// A running producer. Dropping it cancels the producer.
@@ -34,19 +36,24 @@ pub struct DemuxTask {
 }
 
 impl DemuxTask {
+    /// Registers a producer with `timeline` and opens `source` at `start` on the runtime `rt`.
+    ///
+    /// The source is opened there, not by the caller: opening may read files or start a process
+    /// (a download's cookies, a SABR download), and playback re-opens sources from the audio
+    /// thread, which must not wait for that and has no runtime to start a process from.
     pub fn spawn(
         rt: &Handle,
         timeline: Arc<Timeline>,
-        source: &dyn Producer,
+        source: Arc<dyn Producer>,
         start: Option<Ticks>,
     ) -> Self {
         let producer = timeline.register_producer(start);
-        let opening = source.open(start);
         let cancel = CancellationToken::new();
         tracing::debug!(producer, ?start, "opening producer");
         let handle = rt.spawn({
             let (timeline, cancel) = (timeline.clone(), cancel.clone());
             async move {
+                let opening = source.open(start);
                 let outcome = tokio::select! {
                     opened = opening => match opened {
                         Ok(stream) => run(timeline.clone(), producer, stream, cancel.clone()).await,
@@ -124,15 +131,20 @@ async fn run(
         }
     };
     let ((), demuxed) = futures_util::future::join(download, demux).await;
-    match demuxed.unwrap_or(Finish::Failed(MediaError::Panicked)) {
-        Finish::Failed(demux_error) => {
-            let source_error = source_failure
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            Finish::Failed(source_error.map_or(demux_error, MediaError::Source))
+    let source_error = source_failure
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    match (
+        demuxed.unwrap_or(Finish::Failed(MediaError::Panicked)),
+        source_error,
+    ) {
+        // a stream that broke off is not the end of the media, even where the demuxer took it
+        // for one: it would play as a shorter track instead of being retried
+        (Finish::Failed(_) | Finish::Eof, Some(source_error)) => {
+            Finish::Failed(MediaError::Source(source_error))
         }
-        finish => finish,
+        (finish, _) => finish,
     }
 }
 
@@ -263,10 +275,13 @@ impl AudioDemuxer {
         })
     }
 
-    fn to_ticks(&self, ts: i64) -> Ticks {
+    /// A container timestamp or duration in ticks, within [`MAX_TICKS`] either way: a corrupt
+    /// file's must not overflow the arithmetic done on media times.
+    fn to_ticks(&self, ts: impl Into<i128>) -> Ticks {
         let base = self.time_base;
-        (i128::from(ts) * i128::from(base.numer.get()) * i128::from(TICKS_PER_SECOND)
-            / i128::from(base.denom.get())) as Ticks
+        let ticks = ts.into() * i128::from(base.numer.get()) * i128::from(TICKS_PER_SECOND)
+            / i128::from(base.denom.get());
+        ticks.clamp(-i128::from(MAX_TICKS), i128::from(MAX_TICKS)) as Ticks
     }
 
     /// The audio track's next packet, or `None` at the end of the media.
@@ -285,7 +300,7 @@ impl AudioDemuxer {
             if packet.track_id != self.track_id {
                 continue;
             }
-            let container_dur = self.to_ticks(packet.dur.get() as i64);
+            let container_dur = self.to_ticks(packet.dur.get());
             let dur = if self.opus {
                 // container durations are often missing or rounded; the packet knows exactly
                 opus2::packet::get_nb_samples(&packet.data, 48_000)
@@ -297,8 +312,12 @@ impl AudioDemuxer {
             // CodecDelay), which playback drops like any audio before the start position.
             // symphonia 0.6.1 does not yet turn Matroska DiscardPadding into `trim_end`, so up to
             // one packet of encoder padding is played at the very end of such tracks.
+            let pts = self
+                .to_ticks(packet.pts.get())
+                .saturating_add(self.offset)
+                .clamp(-MAX_TICKS, MAX_TICKS);
             return Ok(Some(Packet {
-                pts: self.to_ticks(packet.pts.get()) + self.offset,
+                pts,
                 dur,
                 trim_start: saturating_u32(packet.trim_start.get()),
                 trim_end: saturating_u32(packet.trim_end.get()),

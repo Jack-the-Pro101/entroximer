@@ -257,16 +257,11 @@ impl GuildPlayer {
             playlist,
         } = found;
         let user_data = item.track.user_data.as_ref();
-        // the item itself makes room
+        let found = tracks.len();
+        // the item itself makes room: for one track, whatever its size, and for its own bytes
         let room = MAX_QUEUE_LENGTH + 1 - state.queue.len().min(MAX_QUEUE_LENGTH);
-        if tracks.len() > room {
-            tracing::info!(
-                guild_id = %self.guild_id,
-                left_out = tracks.len() - room,
-                "the queue is full; a playlist's tracks are left out"
-            );
-            tracks.truncate(room);
-        }
+        tracks.truncate(room);
+        let mut room = (self.max_queue_bytes + item.bytes()).saturating_sub(state.queue.bytes());
         let mut items: Vec<QueueItem> = tracks
             .into_iter()
             .map(|track| {
@@ -275,7 +270,21 @@ impl GuildPlayer {
                     ..track
                 })
             })
+            .enumerate()
+            .take_while(|(index, item)| {
+                let fits = *index == 0 || item.bytes() <= room;
+                room = room.saturating_sub(item.bytes());
+                fits
+            })
+            .map(|(_, item)| item)
             .collect();
+        if items.len() < found {
+            tracing::info!(
+                guild_id = %self.guild_id,
+                left_out = found - items.len(),
+                "the queue is full; a playlist's tracks are left out"
+            );
+        }
         if let Some(first) = items.first_mut() {
             first.id = item.id.clone();
         }

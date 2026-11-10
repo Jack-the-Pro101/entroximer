@@ -154,7 +154,8 @@ impl GuildPlayer {
             return Err(bad_request(format!("maxClips must be 1 to {MAX_MIXED}")));
         }
         let effects = compile_effects(node, update.graph, update.preset)?;
-        {
+        // the effects it replaces are freed once the mixer is unlocked again
+        let replaced_effects = {
             let mut state = self.state();
             let exists = state.layers.iter().any(|layer| layer.name == name);
             if !exists {
@@ -187,10 +188,10 @@ impl GuildPlayer {
                 layer.clipping = clipping;
                 deck_layer.deck.set_clipping(clipping);
             }
-            if let Some((graph, effects)) = effects {
+            let replaced_effects = effects.and_then(|(graph, effects)| {
                 layer.graph = graph;
-                deck_layer.deck.set_effects(effects);
-            }
+                deck_layer.deck.set_effects(effects)
+            });
             if let Some(paused) = update.paused {
                 layer.paused = paused;
                 deck_layer.paused = paused;
@@ -212,7 +213,9 @@ impl GuildPlayer {
                 deck_layer.duck = duck.as_ref().map(deck_duck);
                 layer.duck = duck;
             }
-        }
+            replaced_effects
+        };
+        drop(replaced_effects);
         self.settle().await;
         Ok(self.layer_info(name))
     }
@@ -266,7 +269,7 @@ impl GuildPlayer {
         if clip
             .clip_id
             .as_ref()
-            .is_some_and(|id| id.is_empty() || id.len() > MAX_CLIP_ID)
+            .is_some_and(|id| id.is_empty() || id.chars().count() > MAX_CLIP_ID)
         {
             return Err(bad_request(format!(
                 "clipId must be 1 to {MAX_CLIP_ID} characters"

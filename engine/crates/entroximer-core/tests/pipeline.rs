@@ -13,6 +13,7 @@ use entroximer_core::demux::inspect;
 use entroximer_core::error::display_chain;
 use entroximer_core::player::{Player, PlayerConfig, Status};
 use entroximer_core::producer::file::FileProducer;
+use entroximer_core::producer::growing_file::GrowingFileProducer;
 use entroximer_core::producer::process::{ProcessProducer, ProcessSpec};
 use entroximer_core::producer::{Producer, ProducerCaps, TimestampMode};
 use entroximer_core::timeline::{SpillConfig, TICKS_PER_SECOND};
@@ -274,6 +275,113 @@ fn failing_source_is_retried_then_reported_with_its_own_error() {
         3,
         "first try plus two retries"
     );
+}
+
+/// The harness renders outside the runtime, as songbird's mixer thread does: a source that
+/// starts its process as it is opened must be opened on the runtime, the first time and again
+/// after a failure.
+#[test]
+fn a_source_that_spawns_as_it_opens_is_opened_and_retried_off_the_rendering_thread() {
+    let work = tempfile::tempdir().unwrap();
+    let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let producer = GrowingFileProducer::new(
+        work.path().to_owned(),
+        ProducerCaps::default(),
+        Some("webm".into()),
+        {
+            let attempts = Arc::clone(&attempts);
+            let media = fixture().to_owned();
+            move |_, dir: &Path| {
+                let first = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+                let script = if first {
+                    "echo 'HTTP Error 403: Forbidden' >&2; exit 3".to_owned()
+                } else {
+                    format!(
+                        "cp '{}' '{}'",
+                        media.display(),
+                        dir.join("media.webm").display()
+                    )
+                };
+                (
+                    ProcessSpec::new("sh").arg("-c").arg(script),
+                    TimestampMode::Absolute,
+                )
+            }
+        },
+    );
+    let cfg = PlayerConfig {
+        retry_backoff: Duration::from_millis(20),
+        ..PlayerConfig::default()
+    };
+    let mut h = Harness::with_config(producer, cfg);
+
+    let audio = h.render(0.5);
+    assert_playing_second(&audio[at(0.3) as usize * 2..], 0.3);
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+/// Media kept for playing later is on disk only. Played at a pace playback could have, it is
+/// read back ahead of the rendering thread, which never reads the disk itself.
+#[test]
+fn media_on_disk_is_read_back_ahead_of_the_rendering_thread() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let spill = tempfile::tempdir().unwrap();
+    let mut cfg = PlayerConfig::default();
+    cfg.retention.spill = Some(SpillConfig {
+        dir: spill.path().to_owned(),
+        ..SpillConfig::default()
+    });
+    let source = Arc::new(FileProducer {
+        path: fixture().to_owned(),
+    });
+    let downloading = Player::new(rt.handle().clone(), source, cfg, None);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while downloading.media_end().is_none() {
+        assert!(Instant::now() < deadline, "download did not finish");
+        downloading.wait_for_media(Duration::from_millis(50));
+    }
+    let kept = downloading.keep();
+    drop(downloading);
+    kept.park(0, None).expect("all of it is on disk");
+
+    // a player made ahead of its turn, as a queue's next track is: by the time it plays, what
+    // it plays first has been read back
+    let mut player = Player::from_kept(rt.handle().clone(), &kept, Some(at(20.0)));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut in_ram = 0;
+    loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let now_in_ram = player.cache_stats().memory_bytes;
+        if now_in_ram > 0 && now_in_ram == in_ram {
+            break;
+        }
+        in_ram = now_in_ram;
+        assert!(Instant::now() < deadline, "nothing was read ahead");
+    }
+
+    let audio = play_paced(&mut player, 8.5);
+    assert_playing_second(&audio[at(8.3) as usize * 2..], 28.3);
+    assert_eq!(player.cache_stats().disk_lookups, 0);
+
+    // a seek is not foreseen: rendered right away, it reads the block it lands in, and the one
+    // before it when its preroll is there, unless reading ahead got to them first
+    player.seek(at(50.0)).unwrap();
+    let audio = play_paced(&mut player, 3.5);
+    assert_playing_second(&audio[at(3.3) as usize * 2..], 53.3);
+    assert!(player.cache_stats().disk_lookups <= 2);
+}
+
+/// Renders `seconds` of buffered media ten times as fast as they would play.
+fn play_paced(player: &mut Player, seconds: f64) -> Vec<f32> {
+    let mut audio = Vec::new();
+    let mut block = vec![0.0; BLOCK_FRAMES * 2];
+    while audio.len() < at(seconds) as usize * 2 {
+        let rendered = player.render(&mut block).unwrap();
+        assert_eq!(rendered.status, Status::Playing);
+        audio.extend_from_slice(&block[..rendered.frames * 2]);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    audio
 }
 
 #[test]

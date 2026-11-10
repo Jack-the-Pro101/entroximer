@@ -14,7 +14,7 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::api;
 use crate::config::{MediaContext, Secret};
 use crate::managed_ytdlp::YtDlpBinary;
-use crate::node::{Node, NodeSettings};
+use crate::node::{Node, NodeSettings, TrackLimits};
 use crate::youtube::{self, AuthPolicy, RotationSchedule, SessionState};
 
 pub const HEALTH_PATH: &str = "/health";
@@ -56,10 +56,53 @@ pub struct ServeArgs {
     /// its queue, so that it follows without a gap.
     #[arg(long, env = "ENTROXIMER_PRELOAD_SECS", default_value_t = 30)]
     pub preload_secs: u64,
+
+    /// The longest `encoded` form of a track a client may send, in KiB. A track's is around
+    /// 600 bytes; a link with a long signed URL makes it longer, as it holds the URL three
+    /// times over.
+    #[arg(long, env = "ENTROXIMER_TRACK_MAX_KB", default_value_t = 16, value_parser = at_least_one)]
+    pub track_max_kb: u64,
+
+    /// The largest `userData` a client may send with a track, in KiB of JSON.
+    #[arg(long, env = "ENTROXIMER_USER_DATA_MAX_KB", default_value_t = 4, value_parser = at_least_one)]
+    pub user_data_max_kb: u64,
+
+    /// The longest query (a link or a search) a client may send, in KiB.
+    #[arg(long, env = "ENTROXIMER_QUERY_MAX_KB", default_value_t = 4, value_parser = at_least_one)]
+    pub query_max_kb: u64,
+
+    /// What the items of one queue may take together, in MiB, counting their `encoded` forms,
+    /// queries and `userData`. Ten thousand ordinary tracks take about 11.
+    #[arg(long, env = "ENTROXIMER_QUEUE_MAX_MB", default_value_t = 32, value_parser = at_least_one)]
+    pub queue_max_mb: u64,
+}
+
+impl ServeArgs {
+    fn track_limits(&self) -> TrackLimits {
+        let bytes = |amount: u64, unit: u64| {
+            usize::try_from(amount.saturating_mul(unit)).unwrap_or(usize::MAX)
+        };
+        TrackLimits {
+            encoded_bytes: bytes(self.track_max_kb, 1 << 10),
+            user_data_bytes: bytes(self.user_data_max_kb, 1 << 10),
+            query_bytes: bytes(self.query_max_kb, 1 << 10),
+            queue_bytes: bytes(self.queue_max_mb, 1 << 20),
+        }
+    }
+}
+
+/// A limit of nothing would refuse every track.
+fn at_least_one(value: &str) -> Result<u64, String> {
+    match value.parse() {
+        Ok(0) => Err("must be at least 1".to_owned()),
+        Ok(amount) => Ok(amount),
+        Err(e) => Err(format!("not a whole number: {e}")),
+    }
 }
 
 pub async fn run(args: ServeArgs, ctx: Arc<MediaContext>) -> anyhow::Result<()> {
     let addr = SocketAddr::new(args.listen.host, args.listen.port);
+    let limits = args.track_limits();
     // an empty variable, e.g. from `${ENTROXIMER_PASSWORD:-}` in compose files, means none
     let password = args.password.filter(|p| !p.is_blank());
     if password.is_none() {
@@ -120,6 +163,7 @@ pub async fn run(args: ServeArgs, ctx: Arc<MediaContext>) -> anyhow::Result<()> 
             stuck_after: Duration::from_millis(args.stuck_ms),
             resume_timeout: Duration::from_secs(args.resume_timeout_secs),
             preload_lead: Duration::from_secs(args.preload_secs),
+            limits,
         },
     );
     let app = api::router(Arc::clone(&node));

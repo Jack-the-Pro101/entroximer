@@ -20,6 +20,8 @@ use crate::cache::CacheDir;
 use crate::managed_ytdlp::{ManagedYtDlp, YtDlpBinary};
 use crate::sources::Sources;
 use crate::sources::artwork::Artwork;
+use crate::sources::egress::Egress;
+use crate::sources::net;
 use crate::sources::spotify::{DEFAULT_MIRROR_SEARCHES, DEFAULT_PLAYLIST_QUERY};
 use crate::uploads::{UploadLimits, UploadStore};
 use crate::youtube::{AuthPolicy, YouTube};
@@ -81,7 +83,7 @@ pub struct MediaConfig {
 
     /// How much more is kept ahead of the playhead than behind it, in RAM and on disk: with
     /// the defaults, 240 s ahead in RAM.
-    #[arg(long, env = "ENTROXIMER_FORWARD_BIAS", default_value_t = 8.0)]
+    #[arg(long, env = "ENTROXIMER_FORWARD_BIAS", default_value_t = 8.0, value_parser = parse_forward_bias)]
     pub forward_bias: f64,
 
     /// RAM cap for one track's cached audio, in MiB.
@@ -390,6 +392,16 @@ pub struct YouTubeConfig {
     pub proxy: Option<Url>,
 }
 
+/// Distances ahead of the playhead are divided by the bias, which only a positive number makes
+/// sense of.
+fn parse_forward_bias(value: &str) -> Result<f64, String> {
+    match value.parse::<f64>() {
+        Ok(bias) if bias.is_finite() && bias > 0.0 => Ok(bias),
+        Ok(_) => Err("must be a number above 0".to_owned()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 fn parse_http_proxy(value: &str) -> Result<Url, String> {
     let url = Url::parse(value).map_err(|e| format!("not a URL: {e}"))?;
     match url.scheme() {
@@ -448,6 +460,8 @@ pub struct MediaContext {
     pub artwork: Artwork,
     /// Files clients uploaded, if uploads are on.
     pub uploads: Option<Arc<UploadStore>>,
+    /// What keeps links from leading to private networks, unless clients may play those.
+    egress: Option<Egress>,
     cache: CacheDir,
     /// What all tracks' cached audio may take together.
     cache_budget: Arc<CacheBudget>,
@@ -464,8 +478,14 @@ pub struct YtDlpRuns {
 }
 
 impl MediaContext {
+    /// Within a Tokio runtime, which the proxy for clients' links (see [`Egress`]) runs on.
     pub fn new(config: MediaConfig) -> anyhow::Result<Self> {
         let cache = CacheDir::acquire(&config.cache_root())?;
+        let egress = if config.sources.allow_private_urls {
+            None
+        } else {
+            Some(Egress::start().context("cannot start the proxy for clients' links")?)
+        };
         let ytdlp = if config.ytdlp.managed {
             YtDlpBinary::Managed(Arc::new(config.managed_ytdlp()))
         } else {
@@ -505,9 +525,26 @@ impl MediaContext {
             sources,
             artwork: Artwork::default(),
             uploads,
+            egress,
             cache,
             cache_budget,
         })
+    }
+
+    /// The proxy that everything fetched for a client's link goes through, so that the link
+    /// cannot lead to the engine's own machine or a private network; `None` if clients may
+    /// play links to those.
+    pub fn link_proxy(&self) -> Option<&Url> {
+        self.egress.as_ref().map(Egress::proxy)
+    }
+
+    /// The HTTP client for the engine's own requests to clients' links: through
+    /// [`Self::link_proxy`], if there is one.
+    pub fn link_client(&self) -> &reqwest::Client {
+        match &self.egress {
+            Some(egress) => egress.client(),
+            None => net::client(),
+        }
     }
 
     /// Directory for spilled packets and in-progress downloads.
@@ -600,6 +637,15 @@ mod tests {
         assert!(parse_http_proxy("https://proxy.example").is_err());
         assert!(parse_http_proxy("socks5://100.64.0.1:1080").is_err());
         assert!(parse_http_proxy("not a url").is_err());
+    }
+
+    #[test]
+    fn the_forward_bias_must_be_positive() {
+        assert_eq!(parse_forward_bias("8"), Ok(8.0));
+        assert_eq!(parse_forward_bias("0.5"), Ok(0.5));
+        for refused in ["0", "-2", "NaN", "inf", "much"] {
+            assert!(parse_forward_bias(refused).is_err(), "{refused}");
+        }
     }
 
     #[test]

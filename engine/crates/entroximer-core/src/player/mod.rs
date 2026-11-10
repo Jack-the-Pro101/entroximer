@@ -2,9 +2,12 @@
 //!
 //! The player owns the track's [`Timeline`] and the producers filling it. Rendering never blocks:
 //! when media is missing it reports [`Status::Buffering`] and asks the coverage policy how to get
-//! it (wait for the download, or re-open the source closer to the position).
+//! it (wait for the download, or re-open the source closer to the position). Media that is only
+//! on disk is read back ahead of playback, off the thread that renders; right after a seek,
+//! rendering reads the block it lands in itself.
 
 mod coverage;
+mod read_ahead;
 
 use std::collections::VecDeque;
 use std::io;
@@ -15,6 +18,7 @@ use symphonia::core::codecs::audio::AudioCodecParameters;
 use tokio::runtime::Handle;
 
 pub use coverage::{Coverage, CoverageConfig};
+use read_ahead::ReadAhead;
 
 use crate::decode::{DecodeError, Decoder};
 use crate::demux::DemuxTask;
@@ -35,6 +39,9 @@ const DEFAULT_PREROLL: Ticks = TICKS_PER_SECOND / 10;
 
 /// Consecutive undecodable packets replaced by silence before playback fails.
 const MAX_DECODE_FAILURES: u32 = 8;
+
+/// The most silence that replaces one undecodable packet: longer than any codec's packets.
+const MAX_SILENCE: Ticks = TICKS_PER_SECOND;
 
 #[derive(Clone, Debug)]
 pub struct PlayerConfig {
@@ -123,6 +130,9 @@ pub struct Player {
     timeline: Option<Arc<Timeline>>,
     /// This player among the timeline's readers.
     reader: ReaderId,
+    read_ahead: ReadAhead,
+    /// The position at which more was last asked to be read ahead.
+    read_ahead_from: Ticks,
     cfg: PlayerConfig,
     /// Live producers; dropping one cancels it.
     producers: Vec<DemuxTask>,
@@ -259,12 +269,15 @@ impl Player {
     ) -> Self {
         let caps = source.caps();
         let reader = timeline.add_reader(start);
+        let read_ahead = ReadAhead::spawn(&rt, Arc::clone(&timeline), reader);
         let mut player = Self {
             rt,
             source,
             caps,
             timeline: Some(timeline),
             reader,
+            read_ahead,
+            read_ahead_from: start,
             cfg,
             producers: Vec::new(),
             pipeline: None,
@@ -292,7 +305,12 @@ impl Player {
     /// Fills `out` (interleaved stereo) with as many frames as are ready. Never blocks.
     pub fn render(&mut self, out: &mut [f32]) -> Result<Rendered, PlaybackError> {
         let wanted = out.len() / CHANNELS;
-        self.timeline().set_playhead(self.reader, self.position());
+        let position = self.position();
+        self.timeline().set_playhead(self.reader, position);
+        if (position - self.read_ahead_from).abs() >= read_ahead::STEP {
+            self.read_ahead_from = position;
+            self.read_ahead.moved();
+        }
         let status = self.fill(wanted)?;
 
         let frames = wanted.min(self.pcm.len() / CHANNELS);
@@ -404,6 +422,8 @@ impl Player {
             .map_or(0, |(start, ..)| start);
         self.cursor = (target - preroll).max(earliest);
         self.timeline().set_playhead(self.reader, target);
+        self.read_ahead_from = target;
+        self.read_ahead.moved();
     }
 
     fn fill(&mut self, wanted: usize) -> Result<Status, PlaybackError> {
@@ -451,10 +471,11 @@ impl Player {
                     error = %display_chain(&e),
                     "replacing undecodable packet with silence"
                 );
-                // silence at the output rate keeps every later timestamp in place
+                // silence at the output rate keeps every later timestamp in place; a corrupt
+                // packet may claim any length, and gets no more than a real one could have
+                let silence = packet.dur.clamp(0, MAX_SILENCE) as usize;
                 self.resampled.clear();
-                self.resampled
-                    .resize(packet.dur.max(0) as usize * CHANNELS, 0.0);
+                self.resampled.resize(silence * CHANNELS, 0.0);
                 self.append_pcm(packet.pts, Output::Resampled);
                 return Ok(());
             }
@@ -552,7 +573,7 @@ impl Player {
             self.producers.push(DemuxTask::spawn(
                 &self.rt,
                 Arc::clone(self.timeline()),
-                self.source.as_ref(),
+                Arc::clone(&self.source),
                 at,
             ));
         }

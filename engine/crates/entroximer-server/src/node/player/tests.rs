@@ -12,9 +12,9 @@ use serde_json::Value;
 use super::*;
 use crate::api::protocol::{LoadResult, ServerMessage, TrackSelector};
 use crate::config::{MediaConfig, MediaContext};
-use crate::node::NodeSettings;
 use crate::node::output::MixerSource;
 use crate::node::tracks;
+use crate::node::{NodeSettings, TrackLimits};
 use crate::sources::{FoundTrack, TrackInfo, TrackRef};
 
 const TONE: Duration = Duration::from_secs(2);
@@ -129,6 +129,14 @@ impl Harness {
     }
 
     async fn build(preload_lead: Duration, stuck_after: Duration) -> Self {
+        Self::build_with(preload_lead, stuck_after, TrackLimits::default()).await
+    }
+
+    async fn build_with(
+        preload_lead: Duration,
+        stuck_after: Duration,
+        limits: TrackLimits,
+    ) -> Self {
         keep_songbird_scheduler();
         let dir = tempfile::tempdir().unwrap();
         let path = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
@@ -149,6 +157,7 @@ impl Harness {
                 stuck_after,
                 resume_timeout: Duration::from_secs(60),
                 preload_lead,
+                limits,
             },
         );
         let (session, _) = node.open_session(Snowflake(1), None);

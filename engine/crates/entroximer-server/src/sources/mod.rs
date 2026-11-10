@@ -9,6 +9,7 @@
 pub mod artwork;
 pub mod background;
 mod direct;
+pub mod egress;
 pub mod local;
 pub mod metadata;
 pub(crate) mod net;

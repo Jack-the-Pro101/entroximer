@@ -33,6 +33,8 @@ use loop_cache::LoopCache;
 use queue::{Pending, QueueItem};
 use tracks::{Loaded, TrackCache, decode, for_selector, stand_in};
 
+pub use tracks::TrackLimits;
+
 #[derive(Clone, Debug)]
 pub struct NodeSettings {
     /// What clients must send as `Authorization`; `None` lets every client in.
@@ -45,6 +47,8 @@ pub struct NodeSettings {
     pub resume_timeout: Duration,
     /// How long before the current track ends a player prepares the next item of its queue.
     pub preload_lead: Duration,
+    /// How much of a client's tracks the engine holds.
+    pub limits: TrackLimits,
 }
 
 pub struct Node {
@@ -101,13 +105,14 @@ impl Node {
         node
     }
 
-    /// Resumes the session `resume` names if it exists, belongs to the same bot and has no
-    /// connection; otherwise starts a new one. Returns whether it resumed.
+    /// Resumes the session `resume` names if it exists and belongs to the same bot; otherwise
+    /// starts a new one. Returns whether it resumed. A session that still has a connection is
+    /// resumed too: its client has found that connection dead before the engine did.
     pub fn open_session(&self, user_id: Snowflake, resume: Option<&str>) -> (Arc<Session>, bool) {
         let mut sessions = self.sessions();
         if let Some(session) = resume
             .and_then(|id| sessions.get(id))
-            .filter(|s| s.user_id == user_id && s.detached_epoch().is_some())
+            .filter(|s| s.user_id == user_id)
         {
             return (Arc::clone(session), true);
         }
@@ -179,6 +184,7 @@ impl Node {
     }
 
     pub async fn load(&self, selector: &TrackSelector) -> Result<Loaded, ApiError> {
+        self.settings.limits.check(selector)?;
         let loaded = match selector {
             TrackSelector::Encoded { encoded, .. } => self.tracks.get(&self.ctx, encoded).await?,
             TrackSelector::Query {
@@ -196,6 +202,7 @@ impl Node {
     /// when it comes up), a query (or a stand-in for one) as a loading item, which the player
     /// loads in the background.
     pub fn queue_item(&self, selector: &TrackSelector) -> Result<QueueItem, ApiError> {
+        self.settings.limits.check(selector)?;
         let times = selector.times();
         Ok(match selector {
             TrackSelector::Encoded {

@@ -136,7 +136,8 @@ async fn fetch_page_image(page: &str, ctx: &MediaContext) -> Option<String> {
     if !ctx.config.sources.allow_private_urls {
         net::ensure_public(&url).await.ok()?;
     }
-    let mut response = net::client()
+    let mut response = ctx
+        .link_client()
         .get(url.clone())
         .timeout(PAGE_TIMEOUT)
         .send()

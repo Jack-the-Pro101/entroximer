@@ -70,6 +70,8 @@ pub struct GuildPlayer {
     me: Weak<Self>,
     node: Weak<Node>,
     session: Weak<Session>,
+    /// What the queue's items may take together; see [`QueueItem::bytes`].
+    max_queue_bytes: usize,
     mixer: Arc<Mutex<Mixer>>,
     driver: tokio::sync::Mutex<Driver>,
     /// songbird's track playing the mixer; paused while there is nothing to hear.
@@ -178,6 +180,7 @@ impl GuildPlayer {
                 me: me.clone(),
                 node: Arc::downgrade(node),
                 session: Arc::downgrade(session),
+                max_queue_bytes: node.settings.limits.queue_bytes,
                 mixer,
                 driver: tokio::sync::Mutex::new(driver),
                 output,
@@ -249,7 +252,9 @@ impl GuildPlayer {
             self.state().clipping = clipping;
         }
         if let Some((graph, effects)) = effects {
-            self.deck().set_effects(effects);
+            // the old effects are freed here, with the mixer unlocked again
+            let replaced = self.deck().set_effects(effects);
+            drop(replaced);
             self.state().graph = graph;
         }
         if let Some(paused) = update.paused {
@@ -328,6 +333,17 @@ impl GuildPlayer {
             if length + items.len() > MAX_QUEUE_LENGTH {
                 return Err(bad_request(format!(
                     "a queue holds at most {MAX_QUEUE_LENGTH} items; it has {length}"
+                )));
+            }
+            let (held, more) = (
+                state.queue.bytes(),
+                items.iter().map(QueueItem::bytes).sum::<usize>(),
+            );
+            if held + more > self.max_queue_bytes {
+                return Err(bad_request(format!(
+                    "a queue holds at most {} bytes of tracks, counting their `encoded` forms \
+                     and `userData`; it has {held}, and these are {more}",
+                    self.max_queue_bytes
                 )));
             }
             let index = index.map_or(length, |i| i as usize).min(length);
@@ -500,6 +516,7 @@ impl GuildPlayer {
                 packets: sum.packets + s.packets,
                 memory_bytes: sum.memory_bytes + s.memory_bytes,
                 disk_bytes: sum.disk_bytes + s.disk_bytes,
+                disk_lookups: sum.disk_lookups + s.disk_lookups,
             })
     }
 
@@ -741,6 +758,10 @@ async fn preload_ticks(player: Weak<GuildPlayer>) {
             player.plan_next(&mut state);
         }
         player.sync_output();
+        // removed layers that have faded out are freed here, with the mixer unlocked again,
+        // rather than by the audio thread
+        let retired = player.mixer().take_retired();
+        drop(retired);
     }
 }
 

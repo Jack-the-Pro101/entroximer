@@ -1,6 +1,8 @@
 // Starts a real engine for the integration tests: the binary from `cargo build` (or
 // `$ENTROXIMER_BIN`), with a test tone to play. Tests skip themselves when it is missing.
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { connect, createServer } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -88,6 +90,59 @@ export async function startEngine(options: { password?: string; uploads?: boolea
       engine.kill();
       await engine.exited;
       rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+export interface Relay {
+  /** The engine's URL by way of the relay. */
+  url: string;
+  /**
+   * Stops passing anything on for the connections open now, in either direction and without
+   * closing them: what a network that went away looks like to both ends.
+   */
+  freeze(): void;
+  stop(): void;
+}
+
+/** A TCP relay in front of the engine at `url`. */
+export async function startRelay(url: string): Promise<Relay> {
+  const engine = new URL(url);
+  let live = new Set<Socket>();
+  const all = new Set<Socket>();
+  const server = createServer((client) => {
+    const upstream = connect({ host: engine.hostname, port: Number(engine.port) });
+    for (const [from, to] of [
+      [client, upstream],
+      [upstream, client],
+    ] as const) {
+      all.add(from);
+      live.add(from);
+      from.on("data", (chunk) => {
+        if (live.has(from)) {
+          to.write(chunk);
+        }
+      });
+      from.on("close", () => {
+        all.delete(from);
+        if (live.delete(from)) {
+          to.destroy();
+        }
+      });
+      from.on("error", () => {});
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    url: `ws://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    freeze() {
+      live = new Set();
+    },
+    stop() {
+      server.close();
+      for (const socket of all) {
+        socket.destroy();
+      }
     },
   };
 }

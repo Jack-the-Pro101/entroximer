@@ -253,13 +253,19 @@ Spotify app; Spotify tracks play from YouTube); `decode` reads `encoded` tracks 
 engine, so Discord cannot load them from their URL: upload the image with the message instead
 (the bot in `../bot` shows how). When the
 connection drops, it reconnects and resumes the session: the engine pauses the players
-meanwhile and continues them where they were. If it reconnects after the engine's resume
+meanwhile and continues them where they were. A connection the engine has been silent on for
+75 s is given up as dead and replaced the same way, as is the current one by
+`connection.reconnect()` (say, after the network changed); the players keep playing if the
+engine had not noticed yet. If it reconnects after the engine's resume
 timeout, or after the engine restarted, `playersLost` lists the players that are gone; the bot
 leaves their voice channels. `youtubeSession` reports when the
 engine's YouTube session needs fresh cookies.
 
 Failures are `EntroximerError`s with a `code`: the engine's codes (`age_restricted`,
 `unavailable`, `bad_request`, ...) or the client's own (`connection_lost`, `timeout`, `closed`).
+`bad_request` is also what the engine answers when asked to hold more than it does: by default
+`userData` over 4 KiB as JSON, a query over 4 KiB, or a queue past 10 000 items or 32 MiB (see
+the engine's README for all of its limits).
 A request times out after `requestTimeoutMs` (30 s), or `loadTimeoutMs` (150 s) for those that
 may load tracks (`load`, `search`, adding to the queue, playing), which take as long as the source
 does; both include waiting for a dropped connection to come back. Times and percents may be

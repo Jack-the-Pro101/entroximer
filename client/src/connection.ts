@@ -237,7 +237,7 @@ export class Connection extends Emitter<ConnectionEvents> {
 
   /** Reopens the connection, resuming the session; e.g. after the network changed. */
   reconnect(): void {
-    this.#socket?.close(4000, "reconnecting");
+    this.#abandon(4000, "reconnecting");
   }
 
   /** The absolute URL of `path` on the engine's HTTP side, e.g. `/v1/artwork/...`. */
@@ -366,6 +366,20 @@ export class Connection extends Emitter<ConnectionEvents> {
     }
   }
 
+  /**
+   * Gives the connection up without waiting for it to close, which a dead one can take long to
+   * do. The engine hands the session to the next connection even while it still holds this one.
+   */
+  #abandon(code: number, reason: string): void {
+    const socket = this.#socket;
+    if (socket === null) {
+      return;
+    }
+    // from here on the socket is no longer this connection's: its events are ignored
+    this.#onClose(code, reason);
+    socket.close(code, reason);
+  }
+
   #waitUntilReady(deadline: number): Promise<void> {
     if (this.#ready) {
       return Promise.resolve();
@@ -389,7 +403,7 @@ export class Connection extends Emitter<ConnectionEvents> {
       clearTimeout(this.#silenceTimer);
     }
     this.#silenceTimer = setTimeout(
-      () => this.#socket?.close(4001, "the engine went silent"),
+      () => this.#abandon(4001, "the engine went silent"),
       Connection.#SILENCE_LIMIT_MS,
     );
   }

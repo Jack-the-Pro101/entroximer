@@ -147,7 +147,8 @@ pub(crate) async fn ensure_public(url: &Url) -> Result<(), ResolveError> {
     Ok(())
 }
 
-fn is_internal(ip: IpAddr) -> bool {
+/// Whether `ip` is this machine's or on a private network.
+pub(crate) fn is_internal(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => is_internal_v4(ip),
         IpAddr::V6(ip) => {

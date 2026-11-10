@@ -16,14 +16,16 @@ use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::{Instant, MissedTickBehavior};
+use tokio_util::sync::CancellationToken;
 
 use super::protocol::{
     ApiError, Call, ErrorCode, Outcome, Request, Response as Reply, ServerMessage, Snowflake,
 };
 use super::{Authorized, HttpError};
 use crate::node::player::{ClipTurn, GuildPlayer};
+use crate::node::session::Outbox;
 use crate::node::{Node, Session, tracks};
 use crate::view;
 
@@ -39,12 +41,47 @@ const MAX_MESSAGE_BYTES: usize = 4 << 20;
 /// disconnect.
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 const SILENCE_LIMIT: Duration = Duration::from_secs(60);
+/// How long one message may take to go out. A client that takes nothing for this long has
+/// stopped reading, even if it still sends: its connection is closed, since what the engine
+/// has for it would otherwise queue up without end.
+const WRITE_LIMIT: Duration = SILENCE_LIMIT;
 /// How long answers to requests still running may take to go out once the client is gone.
 const WRITER_GRACE: Duration = Duration::from_secs(10);
-/// Requests of one connection that run at once. Beyond this the connection's next requests are
-/// read as earlier ones finish, so that a client firing off thousands has the engine hold no
-/// more than this many.
+/// Requests of one connection that are in flight at once: running, or answered with the answer
+/// still to go out. Beyond this the connection's next requests are read as earlier ones' answers
+/// are written, so that a client firing off thousands, or one slow to take the answers, has the
+/// engine hold no more than this many.
 const MAX_IN_FLIGHT: usize = 256;
+/// The close code of a connection whose session another connection resumed.
+const CLOSE_REPLACED: u16 = 4002;
+
+/// A message on its way to the client.
+struct Outgoing {
+    message: ServerMessage,
+    /// A response's place among the requests in flight, given up once it has gone out.
+    slot: Option<OwnedSemaphorePermit>,
+}
+
+/// The session's way into a connection: its events queue up with the responses, in order.
+struct Events {
+    out: mpsc::UnboundedSender<Outgoing>,
+    /// Cancelled once another connection has taken the session over.
+    replaced: CancellationToken,
+}
+
+impl Outbox for Events {
+    fn send(&self, message: ServerMessage) -> Result<(), ServerMessage> {
+        let event = Outgoing {
+            message,
+            slot: None,
+        };
+        self.out.send(event).map_err(|refused| refused.0.message)
+    }
+
+    fn replaced(&self) {
+        self.replaced.cancel();
+    }
+}
 
 pub(super) async fn upgrade(
     _: Authorized,
@@ -81,16 +118,35 @@ async fn connection(
     let (session, resumed) = node.open_session(user_id, resume.as_deref());
     tracing::info!(session = %session.id, %client, resumed, "client connected");
 
-    let (out, outgoing) = mpsc::unbounded_channel::<ServerMessage>();
-    let connection = session.attach(out.clone(), resumed);
+    let (out, outgoing) = mpsc::unbounded_channel::<Outgoing>();
+    let replaced = CancellationToken::new();
+    let events = Events {
+        out: out.clone(),
+        replaced: replaced.clone(),
+    };
+    let connection = session.attach(events, resumed);
     let (sink, mut incoming) = socket.split();
-    let writer = tokio::spawn(write(Arc::clone(&node), sink, outgoing));
+    let mut writer = tokio::spawn(write(Arc::clone(&node), sink, outgoing, replaced.clone()));
+    let mut writing = true;
     let in_flight = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
 
     loop {
         let next = tokio::select! {
-            next = tokio::time::timeout(SILENCE_LIMIT, incoming.next()) => next,
+            // in this order: a writer that ended because the engine shuts down is no lost client
+            biased;
             () = node.closed() => break,
+            // the client found this connection dead before the engine did, and came back
+            () = replaced.cancelled() => {
+                tracing::info!(session = %session.id, %client, "the session continues on a newer connection");
+                break;
+            }
+            // nothing reaches the client any more, so there is nobody to take requests from
+            _ = &mut writer => {
+                writing = false;
+                tracing::info!(session = %session.id, %client, "client is gone or stopped reading");
+                break;
+            }
+            next = tokio::time::timeout(SILENCE_LIMIT, incoming.next()) => next,
         };
         let message = match next {
             Ok(Some(Ok(message))) => message,
@@ -117,18 +173,13 @@ async fn connection(
                     () = node.closed() => break,
                 };
                 // each request runs on its own, so a slow load never holds up a pause
-                let handling = handle(
+                tokio::spawn(handle(
                     Arc::clone(&node),
                     Arc::clone(&session),
                     out.clone(),
-                    id,
-                    call,
-                    turn,
-                );
-                tokio::spawn(async move {
-                    handling.await;
-                    drop(permit);
-                });
+                    Incoming { id, call, turn },
+                    permit,
+                ));
             }
             Message::Binary(_) => {
                 tracing::debug!(session = %session.id, "ignoring a binary message");
@@ -142,20 +193,24 @@ async fn connection(
     drop(out);
     // in-flight requests may still answer; the writer ends with their senders, unless a dead
     // connection keeps it from sending
-    let stop_writing = writer.abort_handle();
-    if tokio::time::timeout(WRITER_GRACE, writer).await.is_err() {
-        stop_writing.abort();
+    if writing {
+        let stop_writing = writer.abort_handle();
+        if tokio::time::timeout(WRITER_GRACE, writer).await.is_err() {
+            stop_writing.abort();
+        }
     }
     tracing::info!(session = %session.id, %client, "client disconnected");
 }
 
 /// Sends the session's messages, and pings, until nothing can send any more, then closes the
-/// connection: normally, or as "going away" when the engine shuts down, after the messages
-/// already queued (such as the players' last events).
+/// connection: normally, as "going away" when the engine shuts down, after the messages already
+/// queued (such as the players' last events), or as replaced. It also ends once the client
+/// takes no more messages (see [`WRITE_LIMIT`]).
 async fn write(
     node: Arc<Node>,
     mut sink: SplitSink<WebSocket, Message>,
-    mut outgoing: mpsc::UnboundedReceiver<ServerMessage>,
+    mut outgoing: mpsc::UnboundedReceiver<Outgoing>,
+    replaced: CancellationToken,
 ) {
     let text = |message: &ServerMessage| {
         Message::Text(
@@ -167,30 +222,37 @@ async fn write(
     let mut pings = tokio::time::interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
     pings.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
-        let message = tokio::select! {
+        let (message, slot) = tokio::select! {
             biased;
-            message = outgoing.recv() => match message {
-                Some(message) => text(&message),
+            outgoing = outgoing.recv() => match outgoing {
+                Some(Outgoing { message, slot }) => (text(&message), slot),
                 None => break,
             },
             () = node.closed() => {
-                while let Ok(message) = outgoing.try_recv() {
-                    if sink.send(text(&message)).await.is_err() {
+                while let Ok(Outgoing { message, .. }) = outgoing.try_recv() {
+                    if !send(&mut sink, text(&message)).await {
                         return;
                     }
                 }
                 break;
             }
-            _ = pings.tick() => Message::Ping(Bytes::new()),
+            _ = pings.tick() => (Message::Ping(Bytes::new()), None),
         };
-        if sink.send(message).await.is_err() {
+        if !send(&mut sink, message).await {
             return;
         }
+        // the response is out: its request makes room for the connection's next one
+        drop(slot);
     }
     let close = if node.is_closing() {
         CloseFrame {
             code: close_code::AWAY,
             reason: "the engine is shutting down".into(),
+        }
+    } else if replaced.is_cancelled() {
+        CloseFrame {
+            code: CLOSE_REPLACED,
+            reason: "the session continues on a newer connection".into(),
         }
     } else {
         CloseFrame {
@@ -199,7 +261,15 @@ async fn write(
         }
     };
     // fails harmlessly when the client closed first
-    let _ = sink.send(Message::Close(Some(close))).await;
+    send(&mut sink, Message::Close(Some(close))).await;
+}
+
+/// Sends one message; `false` if the client is gone, or does not take it within [`WRITE_LIMIT`].
+async fn send(sink: &mut SplitSink<WebSocket, Message>, message: Message) -> bool {
+    matches!(
+        tokio::time::timeout(WRITE_LIMIT, sink.send(message)).await,
+        Ok(Ok(()))
+    )
 }
 
 /// A request's id and what it asks for; `None` if it has no id to answer.
@@ -216,14 +286,23 @@ fn parse(session: &Session, text: &str) -> Option<(u64, Result<Call, ApiError>)>
     Some((request.id, call))
 }
 
+/// A request as read from the connection.
+struct Incoming {
+    id: u64,
+    call: Result<Call, ApiError>,
+    /// A `clip.play`'s turn on its layer.
+    turn: Option<ClipTurn>,
+}
+
+/// Runs a request and queues its response, which keeps the request's `slot` until it is written.
 async fn handle(
     node: Arc<Node>,
     session: Arc<Session>,
-    out: mpsc::UnboundedSender<ServerMessage>,
-    id: u64,
-    call: Result<Call, ApiError>,
-    turn: Option<ClipTurn>,
+    out: mpsc::UnboundedSender<Outgoing>,
+    request: Incoming,
+    slot: OwnedSemaphorePermit,
 ) {
+    let Incoming { id, call, turn } = request;
     let outcome = match call {
         Ok(call) => dispatch(&node, &session, call, turn).await,
         Err(error) => Err(error),
@@ -233,7 +312,10 @@ async fn handle(
         Err(error) => Outcome::Err { error },
     };
     // a closed connection has nobody to answer
-    let _ = out.send(ServerMessage::Response(Reply { id, outcome }));
+    let _ = out.send(Outgoing {
+        message: ServerMessage::Response(Reply { id, outcome }),
+        slot: Some(slot),
+    });
 }
 
 async fn dispatch(
@@ -243,17 +325,23 @@ async fn dispatch(
     turn: Option<ClipTurn>,
 ) -> Result<Value, ApiError> {
     match call {
-        Call::LoadTrack(params) => to_value(node.tracks.load(&node.ctx, &params.query).await?),
-        Call::SearchTracks(params) => to_value(
-            node.tracks
+        Call::LoadTrack(params) => {
+            node.settings.limits.check_query(&params.query)?;
+            to_value(node.tracks.load(&node.ctx, &params.query).await?)
+        }
+        Call::SearchTracks(params) => {
+            node.settings.limits.check_query(&params.query)?;
+            let found = node
+                .tracks
                 .search(
                     &node.ctx,
                     params.prefix.as_deref(),
                     &params.query,
                     params.limit,
                 )
-                .await?,
-        ),
+                .await?;
+            to_value(found)
+        }
         Call::DecodeTracks(params) => to_value(
             params
                 .encoded

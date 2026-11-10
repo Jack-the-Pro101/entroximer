@@ -201,9 +201,11 @@ impl Deck {
         self.strip.rate()
     }
 
-    /// Replaces the effects (`None` removes them) from the next render on.
-    pub fn set_effects(&mut self, effects: Option<Effects>) {
-        self.strip.set_effects(effects);
+    /// Replaces the effects (`None` removes them) from the next render on, and returns the ones
+    /// replaced, for a caller holding the deck's lock to drop once it has let go of it (see
+    /// [`Strip::set_effects`]).
+    pub fn set_effects(&mut self, effects: Option<Effects>) -> Option<Effects> {
+        self.strip.set_effects(effects)
     }
 
     /// Linear gain applied after the effects; changes take a few milliseconds.

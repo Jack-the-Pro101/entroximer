@@ -15,7 +15,7 @@ import type {
   Track,
   TrackEndReason,
 } from "../src/index.js";
-import { canRunEngine, nextCall, startEngine } from "./engine.js";
+import { canRunEngine, nextCall, startEngine, startRelay } from "./engine.js";
 import type { TestEngine } from "./engine.js";
 
 const BOT = "1000";
@@ -583,5 +583,27 @@ describe.skipIf(!canRunEngine)("against a real engine", () => {
     expect(player.track?.info.title).toBe("tone");
     // requests work again on the new connection
     expect((await player.setVolume(80)).volume).toBe(80);
+  });
+
+  test("comes back at once from a connection that died without closing", async () => {
+    const relay = await startRelay(engine.url);
+    try {
+      const manager = client({ url: relay.url });
+      await manager.connect();
+      const player = manager.player("31");
+      await player.play(engine.tone);
+
+      // neither end is told: the engine still counts the client as connected
+      relay.freeze();
+      const resumed = nextCall<[{ resumed: boolean }]>(5_000);
+      manager.on("ready", resumed.listener);
+      manager.connection.reconnect();
+
+      expect((await resumed.called)[0].resumed).toBe(true);
+      expect(manager.players.get("31")).toBe(player);
+      expect((await player.setVolume(70)).volume).toBe(70);
+    } finally {
+      relay.stop();
+    }
   });
 });

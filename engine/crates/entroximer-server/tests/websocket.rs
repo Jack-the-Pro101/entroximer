@@ -10,7 +10,7 @@ use std::time::Duration;
 use clap::Parser;
 use entroximer_server::api;
 use entroximer_server::config::{MediaConfig, MediaContext, Secret};
-use entroximer_server::node::{Node, NodeSettings};
+use entroximer_server::node::{Node, NodeSettings, TrackLimits};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -140,6 +140,10 @@ impl Engine {
                 stuck_after: Duration::from_secs(10),
                 resume_timeout: Duration::from_secs(30),
                 preload_lead: PRELOAD_LEAD,
+                limits: TrackLimits {
+                    queue_bytes: 16 << 10,
+                    ..TrackLimits::default()
+                },
             },
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -427,6 +431,163 @@ async fn players_pause_while_their_client_is_away_and_continue_on_resume() {
     let id = bot.call("player.get", json!({ "guildId": "2" })).await;
     let player = bot.response(id).await;
     assert_eq!(player["result"]["track"]["info"]["title"], "tone");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_comes_back_takes_its_session_over_from_its_last_connection() {
+    let engine = Engine::start(Some(PASSWORD)).await;
+    let mut stale = engine.connect(Some(PASSWORD), None).await.unwrap();
+    let session = stale.recv().await["sessionId"].as_str().unwrap().to_owned();
+    let id = stale
+        .call(
+            "player.update",
+            json!({ "guildId": "2", "track": { "query": fixture() } }),
+        )
+        .await;
+    assert_eq!(stale.recv_significant().await["event"], "trackStart");
+    stale.response(id).await;
+
+    // the engine has not found the first connection dead: to it, the client is still there
+    let mut bot = engine
+        .connect(Some(PASSWORD), Some(&session))
+        .await
+        .unwrap();
+    let ready = bot.recv().await;
+    assert_eq!(ready["resumed"], true, "{ready}");
+    assert_eq!(ready["sessionId"], session.as_str());
+    let fresh = bot.recv().await;
+    assert_eq!(fresh["event"], "playerUpdate", "{fresh}");
+    let stats = bot.stats().await;
+    assert_eq!(stats["players"], 1, "{stats}");
+    assert_eq!(stats["playingPlayers"], 1, "the player never paused");
+
+    // the first connection is closed, which changes nothing for the session
+    let close = loop {
+        let message = tokio::time::timeout(Duration::from_secs(15), stale.ws.next())
+            .await
+            .expect("the replaced connection stayed open")
+            .expect("the replaced connection ended without a close frame")
+            .unwrap();
+        if let Message::Close(close) = message {
+            break close.expect("a close frame with a code");
+        }
+    };
+    assert_eq!(u16::from(close.code), 4002, "{close:?}");
+    drop(stale);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(bot.stats().await["playingPlayers"], 1);
+
+    // a session of another bot is not there to take
+    let mut request = format!("ws://{}/v1/ws", engine.addr)
+        .into_client_request()
+        .unwrap();
+    let headers = request.headers_mut();
+    headers.insert("Authorization", PASSWORD.parse().unwrap());
+    headers.insert("User-Id", "2000".parse().unwrap());
+    headers.insert("Session-Id", session.parse().unwrap());
+    let (ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let mut other = Client { ws, next_id: 1 };
+    let ready = other.recv().await;
+    assert_eq!(ready["resumed"], false, "{ready}");
+    assert_ne!(ready["sessionId"], session.as_str());
+    assert_eq!(bot.stats().await["playingPlayers"], 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tracks_and_queues_larger_than_the_engine_holds_are_refused() {
+    // the test engine's queues hold 16 KiB; the other limits are the defaults
+    let engine = Engine::start(None).await;
+    let mut client = engine.connect(None, None).await.unwrap();
+    client.recv().await;
+    let (_, loaded) = client
+        .exchange("tracks.load", json!({ "query": fixture() }))
+        .await;
+    let encoded = loaded["result"]["track"]["encoded"].clone();
+    let refusal = |response: &Value| {
+        assert_eq!(response["error"]["code"], "bad_request", "{response}");
+        response["error"]["message"].as_str().unwrap().to_owned()
+    };
+
+    let (_, response) = client
+        .exchange("tracks.load", json!({ "query": "x".repeat(5000) }))
+        .await;
+    assert!(refusal(&response).starts_with("a query may be at most 4096 bytes"));
+    let add = |tracks: Value| json!({ "guildId": "4", "tracks": tracks });
+    let (_, response) = client
+        .exchange(
+            "queue.add",
+            add(json!([{ "encoded": "A".repeat(17 << 10) }])),
+        )
+        .await;
+    assert!(refusal(&response).starts_with("an encoded track may be at most 16384 bytes"));
+    let (_, response) = client
+        .exchange(
+            "queue.add",
+            add(json!([{ "encoded": encoded, "userData": "d".repeat(5000) }])),
+        )
+        .await;
+    assert!(refusal(&response).starts_with("`userData` may be at most 4096 bytes"));
+    let (_, response) = client
+        .exchange(
+            "player.update",
+            json!({ "guildId": "4", "track": { "encoded": encoded, "userData": "d".repeat(5000) } }),
+        )
+        .await;
+    assert!(refusal(&response).starts_with("`userData` may be at most 4096 bytes"));
+
+    // three fit in a queue, a fourth does not
+    let sized = json!({ "encoded": encoded, "userData": "d".repeat(4000) });
+    let (_, response) = client
+        .exchange("queue.add", add(json!([sized, sized, sized, sized])))
+        .await;
+    let message = refusal(&response);
+    assert!(
+        message.starts_with("a queue holds at most 16384 bytes of tracks"),
+        "{message}"
+    );
+    let (_, response) = client
+        .exchange("queue.add", add(json!([sized, sized, sized])))
+        .await;
+    assert_eq!(
+        response["result"]["items"].as_array().unwrap().len(),
+        3,
+        "{response}"
+    );
+    // the first of them starts playing, which leaves room for one more, and no more than one
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let (_, page) = client
+            .exchange("queue.get", json!({ "guildId": "4" }))
+            .await;
+        if page["result"]["queue"]["length"] == 2 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "nothing started: {page}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let (_, response) = client.exchange("queue.add", add(json!([sized]))).await;
+    assert_eq!(response["result"]["queue"]["length"], 3, "{response}");
+    let (_, response) = client.exchange("queue.add", add(json!([sized]))).await;
+    assert!(refusal(&response).starts_with("a queue holds at most 16384 bytes of tracks"));
+    let (_, page) = client
+        .exchange("queue.get", json!({ "guildId": "4" }))
+        .await;
+    assert_eq!(
+        page["result"]["queue"]["length"], 3,
+        "nothing was added: {page}"
+    );
+
+    // room made is room to add to
+    let first = page["result"]["items"][0]["id"].clone();
+    let (_, response) = client
+        .exchange("queue.remove", json!({ "guildId": "4", "ids": [first] }))
+        .await;
+    assert_eq!(response["result"]["length"], 2, "{response}");
+    let (_, response) = client.exchange("queue.add", add(json!([sized]))).await;
+    assert_eq!(response["result"]["queue"]["length"], 3, "{response}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
